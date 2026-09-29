@@ -156,7 +156,8 @@ private struct DeviceRow: View {
 
     var body: some View {
         let here = state.playingDeviceId == state.myDeviceId
-        let tint = here ? Omp.muted : Omp.maro
+        let tint = here ? Omp.foreground : Omp.maro
+        let shape = RoundedRectangle(cornerRadius: m.pt(Omp.labelGap))
         Menu {
             ForEach(state.pickerDevices(), id: \.self) { device in
                 let me = device.id == state.myDeviceId
@@ -171,17 +172,18 @@ private struct DeviceRow: View {
                 }
             }
         } label: {
+            // A real button, like Spotify's device picker: bordered, always here.
             HStack(spacing: m.pt(8)) {
                 OmpIcon(Omp.Icons.broadcast, color: tint)
-                OmpText(here ? "Playing on this phone" : "Playing on \(state.playingDeviceName)",
-                        size: Omp.TypeSize.bodySmall, color: here ? Omp.muted : Omp.foreground)
+                OmpText(here ? "Playing on this phone" : "Playing on \(state.playingDeviceName)")
                     .frame(maxWidth: .infinity, alignment: .leading)
-                OmpText("\u{25BE}", color: tint)
+                OmpText("Devices \u{25BE}", size: Omp.TypeSize.bodySmall, color: tint)
             }
-            .padding(.horizontal, m.pt(6))
-            .padding(.vertical, m.pt(6))
-            .background(here ? Color.clear : Omp.maro.opacity(0.12), in: RoundedRectangle(cornerRadius: m.pt(Omp.labelGap)))
-            .contentShape(Rectangle())
+            .padding(.horizontal, m.pt(10))
+            .padding(.vertical, m.pt(8))
+            .background(here ? Omp.normalFill : Omp.maro.opacity(0.14), in: shape)
+            .overlay(shape.stroke(tint.opacity(0.45), lineWidth: 1))
+            .contentShape(shape)
         }
     }
 }
