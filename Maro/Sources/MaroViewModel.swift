@@ -190,10 +190,12 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         pump = client.phonePump(
             deviceId: deviceId(),
             deviceName: Omp.phoneName,
-            stop: { [weak self] in await MainActor.run { self == nil || self!.pumpStop || !self!.state.signedIn } },
+            stop: { [weak self] in await self?.pumpShouldStop() ?? true },
             onEvent: { [weak self] msg in await self?.onRelayMessage(msg) }
         )
     }
+
+    private func pumpShouldStop() -> Bool { pumpStop || !state.signedIn }
 
     private func musicDirectory() -> URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("Maro", isDirectory: true)
@@ -1599,8 +1601,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                     lastSaved = s.localAvailable
                     body["saved"] = s.localAvailable.sorted()
                 }
-                let client = self.client
-                Task { _ = await client.postAction("phone.state", body) }
+                let client = self.client, payload = body
+                Task { _ = await client.postAction("phone.state", payload) }
             }
         }
     }
