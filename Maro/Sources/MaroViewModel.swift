@@ -14,8 +14,6 @@ private let downloadBatch = 4
 /** After a clear, adopt an empty account queue for this long instead of holding the old one. */
 private let queueClearWindow: Double = 10 * 60
 
-private let warmRetry: Double = 10 * 60
-
 private let audioExtensions: Set<String> = ["m4a", "mp3", "ogg", "webm", "aac", "flac", "opus"]
 
 /** Why the phone asked the engine to put a song on the droplet. */
@@ -871,9 +869,9 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 AudioCache.precache(videoId)
                 continue
             }
-            // The engine keeps only the latest few asks, so one dropped while
-            // scrolling past is asked again when it comes back into view.
-            if now - (warmAsked[t.id] ?? -warmRetry) < warmRetry { continue }
+            // Asked once: the engine works through every ask and the droplet
+            // keeps what it stores, so asking again only repeats the work.
+            if warmAsked[t.id] != nil { continue }
             warmAsked[t.id] = now
             let requestId = UUID().uuidString.lowercased()
             let track = videoId.isEmpty ? t : t.with(videoId: videoId)
