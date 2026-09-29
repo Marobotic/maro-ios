@@ -638,6 +638,11 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         s.likedKeys = Sync.likedKeys(likedArr)
         s.likedIds = Set(Sync.tracks(likedArr).flatMap(\.trackIds))
         s.library = Sync.library(snap.obj("playlists"))
+        // What the desktop streams and downloads at: its setting, shared.
+        if let quality = snap.obj("quality") {
+            s.quality = quality.str("stream", s.quality).ifEmpty(s.quality)
+            s.downloadQuality = quality.str("download", s.downloadQuality).ifEmpty(s.downloadQuality)
+        }
         if let spotify {
             s.spotifyConnected = spotify.bool("connected")
             s.spotifyApiConnected = spotify.bool("apiConnected")
