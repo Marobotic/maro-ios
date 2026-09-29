@@ -165,6 +165,9 @@ enum Omp {
         ("max", "Very high  ·  up to 256 kbps"),
     ]
 
+    /// Streaming has one tier more: Spotify at 320, YouTube's best as the fallback.
+    static let streamQualityOptions: [(String, String)] = qualityOptions + [("spotify", "Spotify  ·  320 kbps")]
+
     static let sourceOptions: [(String, String)] = [
         ("auto", "Whichever is available"),
         ("spotify", "Prefer Spotify  ·  320 kbps"),

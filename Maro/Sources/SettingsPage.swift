@@ -62,9 +62,9 @@ struct SettingsPage: View {
                         on: state.savingOffline
                     ) { vm.setSavingOffline($0) }
                     SettingsHead(label: "Quality")
-                    SettingsChoiceRow(label: "Streaming", value: state.quality, options: Omp.qualityOptions) { vm.setQuality("stream", $0) }
+                    SettingsChoiceRow(label: "Streaming", value: state.quality, options: Omp.streamQualityOptions) { vm.setQuality("stream", $0) }
                     SettingsChoiceRow(label: "Downloads", value: state.downloadQuality, options: Omp.qualityOptions) { vm.setQuality("download", $0) }
-                    OmpText("Songs are downloaded from YouTube. Spotify is used for your library, search and playlists.",
+                    OmpText("Downloads only ever come from YouTube. Streaming at Spotify 320 kbps plays from Spotify, falling back to YouTube's best; offline, saved songs play.",
                             size: Omp.TypeSize.caption, color: Omp.muted, maxLines: 3)
                         .padding(.horizontal, m.pt(4))
                         .padding(.vertical, m.pt(6))

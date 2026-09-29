@@ -888,7 +888,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         // Whatever is on screen gets ready on the droplet, whichever device
         // plays: a tap from here, or on the one playing, should start at once.
         guard state.signedIn else { return }
-        warm(Array(tracks.prefix(10)))
+        warm(Array(tracks.prefix(40)))
     }
 
     func onStarted(tag: Int) {
