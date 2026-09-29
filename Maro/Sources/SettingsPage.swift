@@ -64,6 +64,10 @@ struct SettingsPage: View {
                     SettingsHead(label: "Quality")
                     SettingsChoiceRow(label: "Streaming", value: state.quality, options: Omp.qualityOptions) { vm.setQuality("stream", $0) }
                     SettingsChoiceRow(label: "Downloads", value: state.downloadQuality, options: Omp.qualityOptions) { vm.setQuality("download", $0) }
+                    OmpText("Songs are downloaded from YouTube. Spotify is used for your library, search and playlists.",
+                            size: Omp.TypeSize.caption, color: Omp.muted, maxLines: 3)
+                        .padding(.horizontal, m.pt(4))
+                        .padding(.vertical, m.pt(6))
                     SettingsHead(label: "Library")
                     SettingsRow(icon: Omp.Icons.list, label: "Queue", meta: "\(state.queue.count) tracks") {}
                     SettingsRow(icon: Omp.Icons.like, label: "Liked", meta: "\(state.likedKeys.count) tracks") {}
