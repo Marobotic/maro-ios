@@ -144,17 +144,18 @@ private struct AccountStrip: View {
             }
         }()
         HStack(spacing: m.pt(6)) {
-            Menu {
-                Button(state.email.ifBlank("Omarchy Music Plugin")) { vm.selectAccount("maro") }
-                Button(state.spotifyConnected ? spotifyName : "Spotify not connected") { vm.selectAccount("spotify") }
-                Button(state.ytmConnected ? ytmName : "YouTube Music not connected") { vm.selectAccount("ytm") }
-            } label: {
-                HStack(spacing: m.pt(7)) {
-                    OmpIcon(state.selectedAccount == "spotify" ? Omp.Icons.spotify : state.selectedAccount == "ytm" ? Omp.Icons.ytm : Omp.Icons.cloud)
-                    OmpText(accountText)
-                }
-                .padding(.horizontal, m.pt(8))
-                .padding(.vertical, m.pt(6))
+            // The app's own popup, not the system Menu: a Menu label is drawn
+            // by UIKit, which clipped the Nerd Font cloud in half.
+            OmpButton(
+                icon: state.selectedAccount == "spotify" ? Omp.Icons.spotify : state.selectedAccount == "ytm" ? Omp.Icons.ytm : Omp.Icons.cloud,
+                text: accountText,
+                vertical: 6
+            ) {
+                present(.menu(title: "Account", items: [
+                    .init(icon: Omp.Icons.cloud, label: state.email.ifBlank("Omarchy Music Plugin")) { vm.selectAccount("maro") },
+                    .init(icon: Omp.Icons.spotify, label: state.spotifyConnected ? spotifyName : "Spotify not connected") { vm.selectAccount("spotify") },
+                    .init(icon: Omp.Icons.ytm, label: state.ytmConnected ? ytmName : "YouTube Music not connected") { vm.selectAccount("ytm") },
+                ]))
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             // Where the music plays, one tap away: the same list as the button
