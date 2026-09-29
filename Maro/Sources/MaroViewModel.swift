@@ -48,6 +48,9 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     private let deviceCache = DeviceCache()
     private let prefs = UserDefaults.standard
 
+    /** "Play music on this device only": out of the shared player (see there). */
+    private var solo = UserDefaults.standard.bool(forKey: "playSolo")
+
     @Published var state = UiState() {
         didSet { stateChanged(from: oldValue) }
     }
@@ -136,7 +139,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         s.signedIn = client.session != nil
         s.email = client.email ?? ""
         s.selectedAccount = prefs.string(forKey: "selectedAccount") ?? "maro"
-        s.playbackMode = prefs.string(forKey: "playbackMode") == PlaybackMode.standalonePhone.rawValue ? .standalonePhone : .remoteDesktop
+        s.playbackMode = solo || prefs.string(forKey: "playbackMode") == PlaybackMode.standalonePhone.rawValue ? .standalonePhone : .remoteDesktop
+        s.solo = solo
         s.savingOffline = prefs.object(forKey: "savingOffline") as? Bool ?? true
         state = s
         Task {
@@ -147,6 +151,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 ensurePhonePump()
                 await pullAccount()
                 await pullSync()
+                await syncPlayer()
                 await refreshTrackMap()
                 await sleep(seconds: 1.5)
                 await pullAccount()
@@ -200,6 +205,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         pump = client.phonePump(
             deviceId: deviceId(),
             deviceName: { await MainActor.run { Omp.phoneName } },
+            solo: { [weak self] in await self?.solo ?? false },
             stop: { [weak self] in await self?.pumpShouldStop() ?? true },
             onEvent: { [weak self] msg in await self?.onRelayMessage(msg) }
         )
@@ -368,27 +374,197 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     private func applyAccount(_ response: JSON) {
         guard let a = response.obj("account") else { return }
         let devices = (a.arr("devices") ?? []).compactMap { $0 as? JSON }.map {
-            Device(id: $0.str("device"), name: $0.str("name"), kind: $0.str("kind"), connected: $0.bool("connected"), isPlayback: $0.bool("playback"))
+            Device(id: $0.str("device"), name: $0.str("name"), kind: $0.str("kind"), connected: $0.bool("connected"), isPlayback: $0.bool("playback"), solo: $0.bool("solo"))
         }
         state.devices = devices
-        let target = a.str("playback")
-        state.playbackTarget = target
-        followPlayback(target, devices)
+        state.playbackTarget = a.str("playback")
+    }
+
+    // -- the shared player ---------------------------------------------------
+    //
+    // One queue, one song and one playhead per account, held by the droplet,
+    // like Spotify Connect. Exactly one device makes the sound; every other
+    // one shows the same state and its presses go to that device. Picking a
+    // device only moves the sound: the new one carries on with the same queue
+    // at the same second. "Play music on this device only" (solo) leaves this
+    // phone out of it: its own queue, its own playback, hidden from the lists.
+
+    private var playerDoc: JSON?
+    private var playerQueue: [Track] = []
+    private var playerQueueRev = -1
+    private var playerActive = false
+    private var lastPublishedKey: [AnyHashable] = []
+    private var lastPublishedQueue: [Track]?
+    private var lastPublishedPos: Double = 0
+    private var lastPublishedAt: Double = 0
+    private var lastPublishedPlaying = false
+    private var publishedOnce = false
+
+    /** What the shared player is doing right now. */
+    private func syncPlayer() async {
+        if solo { return }
+        if let doc = await client.getPlayer() { await applyPlayer(doc) }
+    }
+
+    private func applyPlayer(_ incoming: JSON) async {
+        if solo { return }
+        var doc = incoming
+        if doc["queue"] == nil && doc.int("queueRev") != playerQueueRev, let full = await client.getPlayer() {
+            doc = full                          // a queue change we did not get the list for
+        }
+        if let prev = playerDoc, doc.int("rev") < prev.int("rev") { return }
+        if doc["queue"] != nil {
+            playerQueue = Sync.tracks(doc.arr("queue")).map(giveVideoId)
+            playerQueueRev = doc.int("queueRev")
+        }
+        playerDoc = doc
+        let device = doc.str("device")
+        let active = device == deviceId()
+        let wasActive = playerActive
+        playerActive = active
+        let queue = playerQueue
+        let index = doc.int("index", -1)
+        let playing = doc.bool("playing")
+        let lag = max(0, doc.double("serverNow") - doc.double("positionAt")) / 1000
+        let position = doc.double("position") + (playing ? lag : 0)
+        let track = queue[safe: index]
+        let name = doc.str("name")
+        // The shared state: what every device shows while another one plays.
+        var s = state
+        s.queue = queue
+        s.queueIndex = index
+        s.queueName = name
+        s.track = track
+        s.playing = playing
+        s.repeat = doc.str("repeat", "off")
+        s.shuffle = doc.bool("shuffle")
+        s.volume = doc.int("volume", s.volume)
+        s.playbackTarget = device
+        s.origin = ""
+        state = s
+        if active {
+            if !wasActive { takeOver(queue, index, name, doc, position, playing) }
+        } else {
+            // Another device makes the sound: this phone is its remote.
+            if isPhone { setPlaybackMode(.remoteDesktop) }
+            phonePlayer?.pause()
+            progress = Progress(position: position, duration: track?.duration ?? 0, playing: playing, anchor: uptime())
+        }
+    }
+
+    /** The sound moved here: carry on with the shared queue, at its second. */
+    private func takeOver(_ queue: [Track], _ index: Int, _ name: String, _ doc: JSON, _ position: Double, _ playing: Bool) {
+        if !isPhone { setPlaybackMode(.standalonePhone) }
+        localDirty = true
+        publishedOnce = false
+        log.info("the music moved here: \(queue.count) tracks at \(Int(position)) s")
+        state.localRepeat = doc.str("repeat", "off")
+        state.localShuffle = doc.bool("shuffle")
+        if queue.isEmpty { return }
+        let start = min(max(index, 0), queue.count - 1)
+        if playing {
+            pendingSeek = position
+            playLocalQueue(queue, start, name: name)
+        } else {
+            // Paused where the other device left it; play starts it here.
+            phonePlayer?.stop()
+            var s = state
+            s.localQueue = queue
+            s.localQueueIndex = start
+            s.localQueueName = name
+            s.localTrack = queue[start]
+            s.localPlaying = false
+            s.localPreparing = false
+            state = s
+            progress = Progress(position: position, duration: queue[start].duration, playing: false, anchor: uptime())
+        }
     }
 
     /**
-     * The account says which device plays; this phone follows it instead of
-     * trusting what it last remembered. Another connected device playing makes
-     * this phone its remote (and silent); the account naming this phone makes
-     * it the player again.
+     * Report what this phone plays to the shared player: on any change, on a
+     * jump of the playhead, and every 15 s while playing.
      */
-    private func followPlayback(_ target: String, _ devices: [Device]) {
-        if target.isEmpty { return }
-        if target == deviceId() {
-            if !isPhone { setPlaybackMode(.standalonePhone) }
-        } else if isPhone, devices.contains(where: { $0.id == target && $0.connected }) {
-            setPlaybackMode(.remoteDesktop)
+    private func publishPlayer(force: Bool = false) async {
+        guard !solo, state.signedIn, isPhone else { return }
+        let owner = playerDoc?.str("device") ?? ""
+        if !owner.isEmpty && owner != deviceId() { return }
+        let s = state
+        if owner.isEmpty && !s.localPlaying && !force { return }
+        let now = uptime()
+        let pos = progress.at(now)
+        let key: [AnyHashable] = [s.localQueueIndex, s.localPlaying, s.localShuffle, s.localRepeat, s.volume, s.localQueueName]
+        let queueChanged = !publishedOnce || lastPublishedQueue != s.localQueue
+        let expected = lastPublishedPos + (lastPublishedPlaying ? now - lastPublishedAt : 0)
+        let due = force || !publishedOnce || key != lastPublishedKey || queueChanged
+            || abs(pos - expected) > 3 || (s.localPlaying && now - lastPublishedAt > 15)
+        if !due { return }
+        publishedOnce = true
+        lastPublishedKey = key
+        lastPublishedQueue = s.localQueue
+        lastPublishedPos = pos
+        lastPublishedAt = now
+        lastPublishedPlaying = s.localPlaying
+        var body: JSON = [
+            "device": deviceId(), "index": s.localQueueIndex, "name": s.localQueueName,
+            "playing": s.localPlaying, "shuffle": s.localShuffle, "repeat": s.localRepeat,
+            "volume": s.volume, "position": pos,
+        ]
+        if queueChanged { body["queue"] = s.localQueue.map { $0.toJSON() } }
+        playerActive = true
+        guard let out = await client.putPlayer(body) else {
+            publishedOnce = false               // try again next pass
+            return
         }
+        if !out.bool("ok"), let moved = out.obj("player") {
+            await applyPlayer(moved)            // the sound moved elsewhere meanwhile
+        } else if out.bool("ok") {
+            playerQueueRev = out.int("queueRev", playerQueueRev)
+            var doc = playerDoc ?? [:]
+            doc["device"] = deviceId()
+            doc["rev"] = out.int("rev")
+            playerDoc = doc
+        }
+    }
+
+    /** Play music on this phone only, or join the shared player again. */
+    func setSolo(_ enabled: Bool) {
+        solo = enabled
+        prefs.set(enabled, forKey: "playSolo")
+        state.solo = enabled
+        if enabled {
+            playerDoc = nil
+            playerActive = false
+            setPlaybackMode(.standalonePhone)
+            showStatus("Playing on this phone only", "ok")
+        } else {
+            publishedOnce = false
+            Task { await syncPlayer() }
+            showStatus("Back on the shared player", "ok")
+        }
+    }
+
+    /**
+     * A press while another device makes the sound: the droplet hands it to
+     * that device, or to this phone when that one has gone away.
+     */
+    private func remote(_ action: String, _ payload: JSON = [:]) {
+        let client = client, me = deviceId()
+        Task {
+            if !(await client.playerCommand(action, payload, from: me)) {
+                showStatus("Could not reach the playing device", "error")
+            }
+        }
+    }
+
+    /** Play `tracks` from `index`, here or on whichever device plays. */
+    private func playList(_ tracks: [Track], _ index: Int, name: String?) {
+        if tracks.isEmpty { return }
+        if isPhone { return playLocalQueue(tracks, index, name: name) }
+        let start = min(max(index, 0), tracks.count - 1)
+        showRemote(tracks[start], start)
+        state.queue = tracks
+        if let name { state.queueName = name }
+        remote("playtracks", ["tracks": tracks.map { $0.toJSON() }, "index": start, "name": name ?? ""])
     }
 
     private func pullSync() async {
@@ -448,11 +624,16 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         let ytm = providers?.obj("youtubeMusic")
         let recent = Sync.tracks(snap.arr("recent"))
         var s = base
-        s.queue = Sync.tracks(snap.arr("queue")).map(giveVideoId)
-        s.queueIndex = snap.int("queueIndex", base.queueIndex)
-        s.queueName = snap.str("queueName", base.queueName)
+        // On the shared player, the queue and song come from it, not from the
+        // desktop's snapshot.
+        let shared = playerDoc != nil && !solo
+        if !shared {
+            s.queue = Sync.tracks(snap.arr("queue")).map(giveVideoId)
+            s.queueIndex = snap.int("queueIndex", base.queueIndex)
+            s.queueName = snap.str("queueName", base.queueName)
+        }
         if base.playbackMode == .remoteDesktop { s.volume = snap.int("volume", base.volume) }
-        if !cur.title.isEmpty || !cur.id.isEmpty { s.track = cur }
+        if !shared && (!cur.title.isEmpty || !cur.id.isEmpty) { s.track = cur }
         if !recent.isEmpty { s.recent = recent }
         s.likedKeys = Sync.likedKeys(likedArr)
         s.likedIds = Set(Sync.tracks(likedArr).flatMap(\.trackIds))
@@ -484,7 +665,13 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     private func onRelayMessage(_ msg: JSON) {
         let p = msg.obj("payload") ?? [:]
         switch msg.str("type") {
+        case "player":
+            let doc = p
+            Task { await applyPlayer(doc) }
+            return
         case "nowPlaying":
+            // The shared player says what plays; this is the old way.
+            if playerDoc != nil && !solo { return }
             let t = Relay.trackFromNowPlaying(p)
             if !t.id.isEmpty || !t.title.isEmpty { state.track = t }
             state.playing = p.bool("playing", state.playing)
@@ -546,7 +733,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         Task.detached { cache.savePlaylist(key, merged, total: total, hasMore: hasMore) }
         if playWhenLoaded == selected.id && !merged.isEmpty {
             playWhenLoaded = nil
-            playLocalQueue(merged, 0, name: selected.name)
+            playList(merged, 0, name: selected.name)
         }
     }
 
@@ -858,6 +1045,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 ensurePhonePump()
                 await pullAccount()
                 await pullSync()
+                await syncPlayer()
                 await refreshTrackMap()
                 showStatus(
                     created ? "Account created. Now pick how you want to listen." : "Signed in as \(client.email ?? "")",
@@ -994,7 +1182,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         let now = uptime()
         state.playing = !s.playing
         progress = Progress(position: progress.at(now), duration: progress.duration, playing: !s.playing, anchor: now)
-        send("toggle")
+        remote("toggle")
     }
 
     func next() {
@@ -1008,7 +1196,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     private func remoteJump(_ delta: Int, _ action: String) {
         let target = state.queueIndex + delta
         if let t = state.queue[safe: target] { showRemote(t, target) }
-        send(action)
+        remote(action)
     }
 
     private func showRemote(_ track: Track, _ index: Int) {
@@ -1028,7 +1216,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     }
 
     func restart() {
-        if !isPhone { return send("restart") }
+        if !isPhone { return remote("restart") }
         phone.seek(to: 0)
         phone.play()
     }
@@ -1038,13 +1226,13 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         p.position = position
         p.anchor = uptime()
         progress = p
-        if isPhone { phone.seek(to: position) } else { send("seek", ["position": position]) }
+        if isPhone { phone.seek(to: position) } else { remote("seek", ["position": position]) }
     }
 
     func setVolume(_ pct: Int) {
         let v = min(max(pct, 0), 100)
         state.volume = v
-        if isPhone { phone.volume = Float(v) / 100 } else { send("volume", ["value": v, "final": true]) }
+        if isPhone { phone.volume = Float(v) / 100 } else { remote("volume", ["value": v, "final": true]) }
     }
 
     func setRepeat(_ mode: String) {
@@ -1052,7 +1240,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             state.localRepeat = mode
         } else {
             state.repeat = mode
-            send("repeat", ["mode": mode])
+            remote("repeat", ["mode": mode])
         }
     }
 
@@ -1061,7 +1249,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             state.localShuffle.toggle()
         } else {
             state.shuffle.toggle()
-            send("queue.shuffle", ["enabled": state.shuffle])
+            remote("queue.shuffle", ["enabled": state.shuffle])
         }
     }
 
@@ -1070,7 +1258,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             playLocalQueue(state.localQueue, i, name: nil)
         } else {
             if let t = state.queue[safe: i] { showRemote(t, i) }
-            send("play.queue", ["index": i])
+            remote("play.queue", ["index": i])
         }
     }
 
@@ -1080,36 +1268,28 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
      */
     func playTrack(_ t: Track, context: [Track]? = nil, name: String? = nil, index: Int? = nil) {
         if t.id.isEmpty { return }
+        // The list it was tapped in becomes the queue, wherever it plays.
         let list = context ?? [t]
-        if isPhone {
-            if let i = index ?? list.firstIndex(where: { $0.id == t.id }) {
-                playLocalQueue(list, i, name: name)
-            } else {
-                playLocalQueue([t], 0, name: name)
-            }
+        if let i = index ?? list.firstIndex(where: { $0.id == t.id }) {
+            playList(list, i, name: name)
         } else {
-            showRemote(t, state.queue.firstIndex { $0.id == t.id } ?? state.queueIndex)
-            send("playtrack", ["track": t.toJSON()])
+            playList([t], 0, name: name)
         }
     }
 
     func playPlaylist(_ row: LibraryRow) {
         if row.id.isEmpty { return }
-        if isPhone {
-            if state.selectedPlaylist?.id == row.id && !state.playlistTracks.isEmpty {
-                playLocalQueue(state.playlistTracks, 0, name: row.name)
-            } else {
-                playWhenLoaded = row.id
-                openPlaylist(row)
-            }
-            return
+        if state.selectedPlaylist?.id == row.id && !state.playlistTracks.isEmpty {
+            playList(state.playlistTracks, 0, name: row.name)
+        } else {
+            playWhenLoaded = row.id
+            openPlaylist(row)
         }
-        send("play", ["source": row.source, "id": row.id, "name": row.name, "start": 0, "replace": true])
     }
 
     func playOfflineAt(_ i: Int) {
         guard state.songs.indices.contains(i) else { return }
-        if isPhone { playLocalQueue(state.songs, i, name: "Saved songs") } else { send("offline.play", ["index": i]) }
+        playList(state.songs, i, name: "Saved songs")
     }
 
     func queueNext(_ t: Track) {
@@ -1123,18 +1303,18 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             showStatus("Playing next: \(t.title)", "ok")
             return
         }
-        send("queue.addNext", ["track": t.toJSON()])
+        remote("queue.addNext", ["track": t.toJSON()])
         showStatus("Playing next: \(t.title)", "ok")
     }
 
     func addToQueue(_ t: Track) {
         if t.id.isEmpty { return }
-        if isPhone { state.localQueue.append(giveVideoId(t)) } else { send("queue.add", ["track": t.toJSON()]) }
+        if isPhone { state.localQueue.append(giveVideoId(t)) } else { remote("queue.add", ["track": t.toJSON()]) }
         showStatus("Added to queue: \(t.title)", "ok")
     }
 
     func removeQueueIndex(_ i: Int) {
-        if !isPhone { return send("queue.remove", ["index": i]) }
+        if !isPhone { return remote("queue.remove", ["index": i]) }
         guard state.localQueue.indices.contains(i) else { return }
         let wasCurrent = i == state.localQueueIndex
         if wasCurrent { phonePlayer?.stop() }
@@ -1154,7 +1334,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
 
     func moveQueue(_ from: Int, _ to: Int) {
         if from == to { return }
-        if !isPhone { return send("queue.move", ["from": from, "to": to]) }
+        if !isPhone { return remote("queue.move", ["from": from, "to": to]) }
         var queue = state.localQueue
         guard queue.indices.contains(from), queue.indices.contains(to) else { return }
         let current = state.localQueueIndex
@@ -1175,7 +1355,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         // The account snapshot may still hold the old songs for a while: mark
         // the clear so the merge guard adopts the empty queue.
         queueClearedAt = uptime()
-        if !isPhone { return send("queue.clear") }
+        if !isPhone { return remote("queue.clear") }
         localDirty = true
         phonePlayer?.stop()
         var s = state
@@ -1251,7 +1431,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 state.playlistTotal = cached.total
                 if playWhenLoaded == row.id {
                     playWhenLoaded = nil
-                    playLocalQueue(cached.tracks, 0, name: row.name)
+                    playList(cached.tracks, 0, name: row.name)
                 }
             } else {
                 loadPlaylistPage(0)
@@ -1295,7 +1475,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
 
     func playOpenPlaylist() {
         guard let row = state.selectedPlaylist, !state.playlistTracks.isEmpty else { return }
-        if isPhone { playLocalQueue(state.playlistTracks, 0, name: row.name) } else { playPlaylist(row) }
+        playList(state.playlistTracks, 0, name: row.name)
     }
 
     func createPlaylist(_ name: String, from: Track?) {
@@ -1488,32 +1668,21 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     }
 
     /**
-     * Make [device] the one that plays. Like Spotify Connect: if this phone
-     * was playing and the desktop takes over, the song carries on there from
-     * the same second, with the same queue; picking the phone stops the desktop.
+     * Make `device` the one that plays. Like Spotify Connect, only the sound
+     * moves: the same queue and song carry on there from the same second.
      */
     func selectDevice(_ device: Device) {
         if !device.connected && !device.id.isEmpty { return }
+        if solo { return showStatus("This phone plays on its own. Turn off \u{201C}Play music on this device only\u{201D} first.", "error") }
         let target = device.id.ifEmpty(deviceId())
         Task {
-            if !(await client.setPlayback(target)) {
+            // The latest word from this phone before the sound leaves it.
+            if isPhone { await publishPlayer(force: true) }
+            guard let doc = await client.playerDevice(target) else {
                 showStatus("Could not switch devices", "error")
                 return
             }
-            state.playbackTarget = target
-            if target == deviceId() {
-                setPlaybackMode(.standalonePhone)
-                send("device.select", ["device": target])
-            } else {
-                // Another phone or a desktop: what plays here goes on there,
-                // and this phone becomes a remote for it.
-                let transfer = transferOut()
-                phonePlayer?.pause()
-                setPlaybackMode(.remoteDesktop)
-                var body: JSON = ["device": target]
-                if let transfer { body["transfer"] = transfer }
-                send("device.select", body)
-            }
+            await applyPlayer(doc)
         }
     }
 
@@ -1643,12 +1812,16 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                     lastKey = []
                     continue
                 }
+                // The shared player first: it decides what every device shows.
+                await self.publishPlayer()
                 let key: [AnyHashable] = [s.localTrack?.id, s.localPlaying, s.localQueueIndex, s.volume, s.localRepeat,
                                           s.localShuffle, s.localPreparing, s.localQueueName, s.localQueue.count, s.localAvailable]
                 let now = uptime()
                 let pos = self.progress.at(now)
                 let expected = sentPos + (s.localPlaying ? now - sentAt : 0)
-                let offset = (max(s.localQueueIndex - 50, 0) / 100) * 100
+                // The whole queue goes to the shared player now; the desktop's
+                // indices are the same as this phone's.
+                let offset = 0
                 let queueChanged = s.localQueue != lastQueue || offset != lastOffset
                 let jumped = abs(pos - expected) > 2
                 let due = s.localPlaying && now - sentAt > 15
@@ -1674,8 +1847,6 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                     lastQueue = s.localQueue
                     lastOffset = offset
                     self.reportedOffset = offset
-                    let end = min(offset + 300, s.localQueue.count)
-                    body["queue"] = offset < end ? s.localQueue[offset..<end].map { $0.toJSON() } : []
                 }
                 // The whole offline set, but only when it moves.
                 if s.localAvailable != lastSaved {

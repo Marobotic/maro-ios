@@ -158,8 +158,9 @@ private struct AccountStrip: View {
                 ]))
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            // Where the music plays, one tap away: the same list as the button
-            // under the controls.
+            // Where the music plays, one tap away. Not there while this phone
+            // plays on its own.
+            if !state.solo {
             OmpButton(
                 icon: Omp.Icons.broadcast,
                 // Accent while this phone is the one playing.
@@ -167,6 +168,7 @@ private struct AccountStrip: View {
                 vertical: 6,
                 horizontal: 8
             ) { present(devicePicker(state, vm)) }
+            }
             OmpButton(icon: Omp.Icons.gear, selected: state.settingsOpen, vertical: 6, horizontal: 8) { vm.toggleSettings() }
         }
     }

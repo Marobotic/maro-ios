@@ -166,6 +166,8 @@ struct Device: Equatable, Hashable {
     var kind: String
     var connected: Bool
     var isPlayback: Bool
+    /** Plays on its own ("this device only"): not part of the shared player. */
+    var solo = false
 }
 
 /** Progress of a "Download playlist" job, keyed by its playlist id. */
@@ -215,6 +217,8 @@ struct UiState: Equatable {
     // This phone's relay id and the name it shows up under.
     var myDeviceId = ""
     var deviceName = ""
+    // "Play music on this device only": out of the shared player.
+    var solo = false
 
     // Player (desktop)
     var track: Track?
@@ -336,7 +340,7 @@ struct UiState: Equatable {
     func pickerDevices() -> [Device] {
         let playing = playingDeviceId
         let others = devices
-            .filter { $0.connected && $0.id != myDeviceId }
+            .filter { $0.connected && !$0.solo && $0.id != myDeviceId }
             .map { d -> Device in
                 var d = d
                 d.isPlayback = d.id == playing

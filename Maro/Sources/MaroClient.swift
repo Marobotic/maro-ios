@@ -198,6 +198,32 @@ final class MaroClient: @unchecked Sendable {
         return resp.str("playback") == device
     }
 
+    // -- the shared player: one queue, one song, one playhead per account --
+
+    /** The account's shared player, or nil when the droplet is unreachable. */
+    func getPlayer() async -> JSON? {
+        (try? await call("GET", "/player", timeout: 15))?.obj("player")
+    }
+
+    /**
+     * Report what this phone plays. The answer carries `player` (and ok false)
+     * when the sound has moved to another device in the meantime.
+     */
+    func putPlayer(_ body: JSON) async -> JSON? {
+        try? await call("PUT", "/player", body: body, timeout: 15)
+    }
+
+    /** Move the sound to `device`; the new shared player, or nil. */
+    func playerDevice(_ device: String) async -> JSON? {
+        (try? await call("POST", "/player/device", body: ["device": device], timeout: 15))?.obj("player")
+    }
+
+    /** A press for whichever device plays; `from` takes over if that one is gone. */
+    func playerCommand(_ action: String, _ payload: JSON, from: String) async -> Bool {
+        guard let resp = try? await call("POST", "/player/command", body: ["action": action, "payload": payload, "from": from]) else { return false }
+        return resp.bool("ok")
+    }
+
     func postAction(_ action: String, _ payload: JSON = [:]) async -> Bool {
         guard let resp = try? await call("POST", "/relay/desktop", body: ["action": action, "payload": payload]) else { return false }
         return resp.bool("ok")
@@ -207,7 +233,7 @@ final class MaroClient: @unchecked Sendable {
      * Long-poll the phone queue so now-playing snapshots arrive as the desktop
      * engine emits them. Runs until the task is cancelled or [stop] says so.
      */
-    func phonePump(deviceId: String, deviceName: @escaping @Sendable () async -> String, stop: @escaping @Sendable () async -> Bool, onEvent: @escaping @Sendable (JSON) async -> Void) -> Task<Void, Never> {
+    func phonePump(deviceId: String, deviceName: @escaping @Sendable () async -> String, solo: @escaping @Sendable () async -> Bool, stop: @escaping @Sendable () async -> Bool, onEvent: @escaping @Sendable (JSON) async -> Void) -> Task<Void, Never> {
         Task.detached(priority: .utility) { [self] in
             // Carry on after the last message this phone handled, even across a
             // restart: from 0 the backlog replays, and a play command someone
@@ -219,8 +245,9 @@ final class MaroClient: @unchecked Sendable {
                 if await stop() { return }
                 // Read per poll: a rename reaches the account on the next one.
                 let n = Self.escape(await deviceName())
+                let alone = await solo() ? 1 : 0
                 do {
-                    var req = request("\(Self.base)/relay/phone?device=\(q)&name=\(n)&after=\(after)&wait=25", timeout: Self.pollTimeout)
+                    var req = request("\(Self.base)/relay/phone?device=\(q)&name=\(n)&solo=\(alone)&after=\(after)&wait=25", timeout: Self.pollTimeout)
                     req.setValue("application/json", forHTTPHeaderField: "Accept")
                     let (data, resp) = try await http.data(for: req)
                     let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
