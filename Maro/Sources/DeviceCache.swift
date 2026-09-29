@@ -19,6 +19,7 @@ final class DeviceCache: @unchecked Sendable {
     private let trackMapFile: URL
     private let snapshotFile: URL
     private let localQueueFile: URL
+    private let playheadFile: URL
 
     init() {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -28,6 +29,7 @@ final class DeviceCache: @unchecked Sendable {
         trackMapFile = dir.appendingPathComponent("track-map.json")
         snapshotFile = dir.appendingPathComponent("snapshot.json")
         localQueueFile = dir.appendingPathComponent("local-queue.json")
+        playheadFile = dir.appendingPathComponent("playhead.json")
         try? FileManager.default.createDirectory(at: playlistDir, withIntermediateDirectories: true)
     }
 
@@ -70,6 +72,20 @@ final class DeviceCache: @unchecked Sendable {
     /** The phone's own playback queue (the list shown in standalone mode). */
     func saveLocalQueue(name: String, _ tracks: [Track]) {
         write(localQueueFile, ["name": name, "tracks": tracks.map { $0.toJSON() }])
+    }
+
+    /**
+     * Which song of the phone's queue was on and how far in, so a restart
+     * comes back paused at the same spot. Small and separate from the queue,
+     * which is too big to rewrite every few seconds.
+     */
+    func savePlayhead(index: Int, trackId: String, position: Double) {
+        write(playheadFile, ["index": index, "id": trackId, "position": position])
+    }
+
+    func playhead() -> (index: Int, id: String, position: Double)? {
+        guard let obj = readJSON(playheadFile) as? JSON else { return nil }
+        return (obj.int("index", -1), obj.str("id"), obj.double("position"))
     }
 
     /**

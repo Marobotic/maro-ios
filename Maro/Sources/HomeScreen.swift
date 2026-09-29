@@ -14,12 +14,29 @@ private func deviceLabel(_ device: Device) -> String {
     return device.kind == "phone" ? "Phone" : "Desktop"
 }
 
+/** Every connected device; the one playing now in the accent colour, the rest white. */
+@MainActor
+func devicePicker(_ state: UiState, _ vm: MaroViewModel) -> OmpDialog {
+    .menu(title: "Play on", items: state.pickerDevices().map { device in
+        OmpDialog.Item(
+            icon: Omp.Icons.broadcast,
+            label: deviceLabel(device),
+            tint: device.isPlayback ? Omp.maro : Omp.foreground,
+            detail: device.id == state.myDeviceId ? "This phone" : "",
+            bold: device.isPlayback
+        ) { if !device.isPlayback { vm.selectDevice(device) } }
+    })
+}
+
 /** The Omp-styled popups (menus, name prompts, confirmations) share one host. */
 enum OmpDialog: Identifiable {
     struct Item {
         let icon: String
         let label: String
         var closes = true
+        var tint: Color = Omp.foreground
+        var detail = ""
+        var bold = false
         let action: () -> Void
     }
 
@@ -113,6 +130,7 @@ struct HomeScreen: View {
  */
 private struct AccountStrip: View {
     @Environment(\.omp) private var m
+    @Environment(\.presentDialog) private var present
     let state: UiState
     @ObservedObject var vm: MaroViewModel
 
@@ -140,6 +158,15 @@ private struct AccountStrip: View {
                 .padding(.vertical, m.pt(6))
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            // Where the music plays, one tap away: the same list as the button
+            // under the controls.
+            OmpButton(
+                icon: Omp.Icons.broadcast,
+                selected: state.playingDeviceId != state.myDeviceId,
+                foreground: state.playingDeviceId == state.myDeviceId ? Omp.foreground : Omp.maro,
+                vertical: 6,
+                horizontal: 8
+            ) { present(devicePicker(state, vm)) }
             OmpButton(icon: Omp.Icons.gear, selected: state.settingsOpen, vertical: 6, horizontal: 8) { vm.toggleSettings() }
         }
     }
@@ -151,6 +178,7 @@ private struct AccountStrip: View {
  */
 private struct DeviceRow: View {
     @Environment(\.omp) private var m
+    @Environment(\.presentDialog) private var present
     let state: UiState
     @ObservedObject var vm: MaroViewModel
 
@@ -158,21 +186,7 @@ private struct DeviceRow: View {
         let here = state.playingDeviceId == state.myDeviceId
         let tint = here ? Omp.foreground : Omp.maro
         let shape = RoundedRectangle(cornerRadius: m.pt(Omp.labelGap))
-        Menu {
-            ForEach(state.pickerDevices(), id: \.self) { device in
-                let me = device.id == state.myDeviceId
-                Button {
-                    if !device.isPlayback { vm.selectDevice(device) }
-                } label: {
-                    if device.isPlayback {
-                        Label(deviceLabel(device), systemImage: "checkmark")
-                    } else {
-                        Text(deviceLabel(device))
-                    }
-                    if me { Text("This phone") }
-                }
-            }
-        } label: {
+        Button { present(devicePicker(state, vm)) } label: {
             // A real button, like Spotify's device picker: bordered, always here.
             HStack(spacing: m.pt(8)) {
                 OmpIcon(Omp.Icons.broadcast, color: tint)
@@ -186,6 +200,7 @@ private struct DeviceRow: View {
             .overlay(shape.stroke(tint.opacity(0.45), lineWidth: 1))
             .contentShape(shape)
         }
+        .buttonStyle(.plain)
     }
 }
 
@@ -416,8 +431,11 @@ private struct DialogView: View {
                     if item.closes { dismiss() }
                 } label: {
                     HStack(spacing: 12) {
-                        OmpIcon(item.icon)
-                        OmpText(item.label)
+                        OmpIcon(item.icon, color: item.tint)
+                        VStack(alignment: .leading, spacing: 2) {
+                            OmpText(item.label, color: item.tint, bold: item.bold)
+                            if !item.detail.isEmpty { OmpText(item.detail, size: Omp.TypeSize.caption, color: Omp.muted) }
+                        }
                         Spacer(minLength: 0)
                     }
                     .padding(.horizontal, 12).padding(.vertical, 10)

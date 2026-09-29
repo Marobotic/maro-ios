@@ -209,7 +209,11 @@ final class MaroClient: @unchecked Sendable {
      */
     func phonePump(deviceId: String, deviceName: @escaping @Sendable () async -> String, stop: @escaping @Sendable () async -> Bool, onEvent: @escaping @Sendable (JSON) async -> Void) -> Task<Void, Never> {
         Task.detached(priority: .utility) { [self] in
-            var after: Int64 = 0
+            // Carry on after the last message this phone handled, even across a
+            // restart: from 0 the backlog replays, and a play command someone
+            // sent a few seconds before the restart would start music on launch.
+            let seqKey = "relaySeq:\(deviceId)"
+            var after = Int64(defaults.integer(forKey: seqKey))
             let q = Self.escape(deviceId)
             while !Task.isCancelled {
                 if await stop() { return }
@@ -222,7 +226,11 @@ final class MaroClient: @unchecked Sendable {
                     let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
                     if (200..<300).contains(code), let body = JSONText.parse(data) as? JSON {
                         for case let msg as JSON in body.arr("messages") ?? [] { await onEvent(msg) }
-                        after = body.int64("seq", after)
+                        let seq = body.int64("seq", after)
+                        if seq != after {
+                            after = seq
+                            defaults.set(Int(seq), forKey: seqKey)
+                        }
                     } else {
                         try await Task.sleep(nanoseconds: 5_000_000_000)
                     }

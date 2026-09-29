@@ -153,6 +153,13 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             }
         }
         startConnectivityWatch()
+        Task { [weak self] in
+            while true {
+                await sleep(seconds: 5)
+                guard let self else { return }
+                if self.isPhone && self.state.localPlaying { self.savePlayheadNow() }
+            }
+        }
     }
 
     /** What SwiftUI's didSet sees: the Android view model's state collectors, in one place. */
@@ -304,7 +311,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
      */
     private func restoreSnapshot() async {
         let cache = deviceCache
-        let (raw, local) = await Task.detached { (cache.snapshot(), cache.localQueue()) }.value
+        let (raw, local, head) = await Task.detached { (cache.snapshot(), cache.localQueue(), cache.playhead()) }.value
         if let raw, let data = JSONText.parse(raw) as? JSON, let snap = data.obj("snapshot") {
             let at = data.str("at")
             if !at.isEmpty { lastSyncAt = at }
@@ -317,6 +324,14 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             state.localQueue = local.tracks
             if local.tracks.isEmpty { state.localQueueIndex = -1 }
             state.localQueueName = local.name
+            // Back where it was, paused: the song and the second it was at.
+            if let head, local.tracks[safe: head.index]?.id == head.id {
+                let track = local.tracks[head.index]
+                state.localQueueIndex = head.index
+                state.localTrack = track
+                state.localPlaying = false
+                if isPhone { progress = Progress(position: head.position, duration: track.duration, playing: false, anchor: uptime()) }
+            }
         } else if !state.queue.isEmpty {
             state.localQueue = state.queue
         }
@@ -680,8 +695,24 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             loggedTag = playTag
             log.info("playing \(Int((uptime() - self.tapAt) * 1000)) ms after tap via \(self.playRoute, privacy: .public)")
         }
-        if state.localPlaying != playing { state.localPlaying = playing }
+        if state.localPlaying != playing {
+            state.localPlaying = playing
+            if !playing { savePlayheadNow() }
+        }
         updateNowPlaying()
+    }
+
+    private var lastPlayhead = ""
+
+    /** Remember the song and second, so killing the app only pauses it. */
+    private func savePlayheadNow() {
+        guard let track = state.localTrack, localDirty || localQueueOnDisk else { return }
+        let index = state.localQueueIndex, position = progress.at(uptime())
+        let key = "\(index)|\(track.id)|\(Int(position))"
+        if key == lastPlayhead { return }
+        lastPlayhead = key
+        let cache = deviceCache, id = track.id
+        Task.detached { cache.savePlayhead(index: index, trackId: id, position: position) }
     }
 
     func onEnded() { advance(auto: true) }
@@ -930,6 +961,9 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 playLocalQueue(s.localQueue, 0, name: nil)
             } else if let track = s.localTrack {
                 if !phone.hasMedia {
+                    // After a restart the song is shown but not loaded yet:
+                    // carry on from where the playhead was left.
+                    pendingSeek = progress.position
                     startTrack(track)
                 } else if phone.isPlaying {
                     phone.pause()
