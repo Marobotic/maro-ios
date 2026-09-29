@@ -120,13 +120,12 @@ struct HomeScreen: View {
         NowPlayingRow(state: shown, vm: vm)
         SeekRow(state: shown, vm: vm)
         TransportRow(state: shown, vm: vm)
-        DeviceRow(state: shown, vm: vm)
     }
 }
 
 /**
  * The top bar: whose library this is, and settings. Where the music plays
- * lives under the controls instead (DeviceRow), as in Spotify.
+ * is the wifi icon beside the gear, as in Spotify.
  */
 private struct AccountStrip: View {
     @Environment(\.omp) private var m
@@ -169,38 +168,6 @@ private struct AccountStrip: View {
             ) { present(devicePicker(state, vm)) }
             OmpButton(icon: Omp.Icons.gear, selected: state.settingsOpen, vertical: 6, horizontal: 8) { vm.toggleSettings() }
         }
-    }
-}
-
-/**
- * Where the music is coming out: this phone, or another device it is
- * remote-controlling. Tapping it lists every device connected right now.
- */
-private struct DeviceRow: View {
-    @Environment(\.omp) private var m
-    @Environment(\.presentDialog) private var present
-    let state: UiState
-    @ObservedObject var vm: MaroViewModel
-
-    var body: some View {
-        let here = state.playingDeviceId == state.myDeviceId
-        let tint = here ? Omp.themeAccent : Omp.foreground
-        let shape = RoundedRectangle(cornerRadius: m.pt(Omp.labelGap))
-        Button { present(devicePicker(state, vm)) } label: {
-            // A real button, like Spotify's device picker: bordered, always here.
-            HStack(spacing: m.pt(8)) {
-                OmpIcon(Omp.Icons.broadcast, color: tint)
-                OmpText(here ? "Playing on this phone" : "Playing on \(state.playingDeviceName)")
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                OmpText("Devices \u{25BE}", size: Omp.TypeSize.bodySmall, color: tint)
-            }
-            .padding(.horizontal, m.pt(10))
-            .padding(.vertical, m.pt(8))
-            .background(Omp.normalFill, in: shape)
-            .overlay(shape.stroke(tint.opacity(0.45), lineWidth: 1))
-            .contentShape(shape)
-        }
-        .buttonStyle(.plain)
     }
 }
 
