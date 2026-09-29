@@ -165,10 +165,11 @@ private struct DeviceRow: View {
                     if !device.isPlayback { vm.selectDevice(device) }
                 } label: {
                     if device.isPlayback {
-                        Label(deviceLabel(device) + (me ? "  ·  this phone" : ""), systemImage: "checkmark")
+                        Label(deviceLabel(device), systemImage: "checkmark")
                     } else {
-                        Text(deviceLabel(device) + (me ? "  ·  this phone" : ""))
+                        Text(deviceLabel(device))
                     }
+                    if me { Text("This phone") }
                 }
             }
         } label: {
