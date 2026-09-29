@@ -652,6 +652,11 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             s.ytmConnected = ytm.bool("connected")
             s.ytmAccountName = ytm.str("accountName")
         }
+        // A sign-in that has just gone through closes its prompt.
+        if let prompt = s.loginPrompt,
+           (prompt.service == "spotify" && s.spotifyConnected) || (prompt.service == "ytm" && s.ytmConnected) {
+            s.loginPrompt = nil
+        }
         return s
     }
 
@@ -704,6 +709,13 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             // from a while ago must not replay on launch.
             let sent = ISO8601DateFormatter.flexible(msg.str("sentAt"))
             if let sent, Date().timeIntervalSince(sent) < 30 { onControl(p) }
+            return
+        case "login":
+            let prompt = LoginPrompt(service: p.str("service"), url: p.str("url"), code: p.str("code"), error: p.str("error"))
+            // Spotify's page does the whole sign-in; YouTube Music needs its
+            // code shown first.
+            if prompt.error.isEmpty && prompt.code.isEmpty && !prompt.url.isEmpty { openUrl(prompt.url) }
+            state.loginPrompt = prompt
             return
         case "playlist.tracks":
             onPlaylistPage(p)
@@ -1122,7 +1134,9 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             showStatus("Disconnecting \(label) on the desktop.", "info")
         } else {
             send(key == "spotify" ? "login.spotifyd" : "login.ytm")
-            showStatus("\(label) sign-in opened on the desktop.", "info")
+            // A desktop engine opens it there; the cloud engine sends the
+            // link back here ("login"), which shows it on this phone.
+            showStatus("Starting the \(label) sign-in…", "info")
         }
     }
 
@@ -1913,6 +1927,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     }
 
     func clearStatus() { state.statusMsg = "" }
+
+    func dismissLogin() { state.loginPrompt = nil }
 }
 
 extension Array {

@@ -160,6 +160,14 @@ struct LibraryRow: Equatable, Hashable {
     var available = true
 }
 
+/** A sign-in the engine started for this phone: open the page, or show the code. */
+struct LoginPrompt: Equatable {
+    var service: String
+    var url = ""
+    var code = ""
+    var error = ""
+}
+
 struct Device: Equatable, Hashable {
     var id: String
     var name = ""
@@ -299,6 +307,9 @@ struct UiState: Equatable {
     // Status footer
     var statusMsg = ""
     var statusKind = "info"
+
+    // A Spotify / YouTube Music sign-in waiting on the user.
+    var loginPrompt: LoginPrompt?
 
     var isCurrent: Bool { track != nil }
 

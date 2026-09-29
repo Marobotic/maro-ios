@@ -110,6 +110,7 @@ struct HomeScreen: View {
         .environment(\.presentDialog, { dialog = $0 })
         .background(Omp.background.ignoresSafeArea())
         .overlay { if let dialog { DialogView(dialog: dialog) { self.dialog = nil }.id(dialog.id) } }
+        .overlay { if let prompt = vm.state.loginPrompt { LoginPromptView(prompt: prompt, vm: vm) } }
     }
 
     @ViewBuilder
@@ -435,5 +436,59 @@ private struct DialogView: View {
             }
             .padding(10)
         }
+    }
+}
+
+/**
+ * A sign-in the cloud engine started for this phone. YouTube Music signs in
+ * with a code approved on Google's page; Spotify's page (opened already) does
+ * it all, so this only says what is going on.
+ */
+private struct LoginPromptView: View {
+    let prompt: LoginPrompt
+    @ObservedObject var vm: MaroViewModel
+
+    var body: some View {
+        let label = prompt.service == "spotify" ? "Spotify" : "YouTube Music"
+        let body = !prompt.error.isEmpty ? prompt.error
+            : !prompt.code.isEmpty ? "Open Google's page, sign in with the Google account you use for YouTube Music, and enter this code:"
+            : "Finish signing in on the Spotify page that just opened, then come back here."
+        ZStack {
+            Color.black.opacity(0.6).ignoresSafeArea().onTapGesture { vm.dismissLogin() }
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Connect \(label)").font(Omp.font(17, bold: true)).foregroundColor(Omp.foreground)
+                Text(body).font(Omp.font(14)).foregroundColor(prompt.error.isEmpty ? Omp.muted : Omp.urgent)
+                if !prompt.code.isEmpty {
+                    Text(prompt.code).font(Omp.font(26, bold: true)).foregroundColor(Omp.foreground)
+                        .frame(maxWidth: .infinity).textSelection(.enabled)
+                }
+                HStack(spacing: 8) {
+                    if !prompt.code.isEmpty {
+                        button("Copy code", filled: false) {
+                            UIPasteboard.general.string = prompt.code
+                            vm.showStatus("Code copied", "ok")
+                        }
+                    }
+                    if !prompt.url.isEmpty && prompt.error.isEmpty {
+                        button(prompt.code.isEmpty ? "Open again" : "Open Google", filled: true) { vm.openUrl(prompt.url) }
+                    }
+                }
+                button(prompt.error.isEmpty ? "Done" : "Close", filled: false) { vm.dismissLogin() }
+            }
+            .padding(20)
+            .background(Omp.card, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Omp.softDk, lineWidth: 1))
+            .padding(24)
+        }
+    }
+
+    private func button(_ text: String, filled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(text).font(Omp.font(14)).foregroundColor(filled ? .white : Omp.foreground)
+                .frame(maxWidth: .infinity).frame(height: 46)
+                .background(filled ? Omp.themeAccent : Color.clear, in: RoundedRectangle(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(filled ? Omp.themeAccent : Omp.borderColor, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
     }
 }
