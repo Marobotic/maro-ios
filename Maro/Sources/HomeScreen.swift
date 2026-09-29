@@ -21,7 +21,7 @@ func devicePicker(_ state: UiState, _ vm: MaroViewModel) -> OmpDialog {
         OmpDialog.Item(
             icon: Omp.Icons.broadcast,
             label: deviceLabel(device),
-            tint: device.isPlayback ? Omp.maro : Omp.foreground,
+            tint: device.isPlayback ? Omp.themeAccent : Omp.foreground,
             detail: device.id == state.myDeviceId ? "This phone" : "",
             bold: device.isPlayback
         ) { if !device.isPlayback { vm.selectDevice(device) } }
@@ -162,8 +162,8 @@ private struct AccountStrip: View {
             // under the controls.
             OmpButton(
                 icon: Omp.Icons.broadcast,
-                selected: state.playingDeviceId != state.myDeviceId,
-                foreground: state.playingDeviceId == state.myDeviceId ? Omp.foreground : Omp.maro,
+                // Accent while this phone is the one playing.
+                foreground: state.playingDeviceId == state.myDeviceId ? Omp.themeAccent : Omp.foreground,
                 vertical: 6,
                 horizontal: 8
             ) { present(devicePicker(state, vm)) }
@@ -184,7 +184,7 @@ private struct DeviceRow: View {
 
     var body: some View {
         let here = state.playingDeviceId == state.myDeviceId
-        let tint = here ? Omp.foreground : Omp.maro
+        let tint = here ? Omp.themeAccent : Omp.foreground
         let shape = RoundedRectangle(cornerRadius: m.pt(Omp.labelGap))
         Button { present(devicePicker(state, vm)) } label: {
             // A real button, like Spotify's device picker: bordered, always here.
@@ -196,7 +196,7 @@ private struct DeviceRow: View {
             }
             .padding(.horizontal, m.pt(10))
             .padding(.vertical, m.pt(8))
-            .background(here ? Omp.normalFill : Omp.maro.opacity(0.14), in: shape)
+            .background(Omp.normalFill, in: shape)
             .overlay(shape.stroke(tint.opacity(0.45), lineWidth: 1))
             .contentShape(shape)
         }
