@@ -885,7 +885,9 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
 
     /** The rows on screen settled: get them ready to play at a tap. */
     func prefetchVisible(_ tracks: [Track]) {
-        guard isPhone, state.signedIn else { return }
+        // Whatever is on screen gets ready on the droplet, whichever device
+        // plays: a tap from here, or on the one playing, should start at once.
+        guard state.signedIn else { return }
         warm(Array(tracks.prefix(10)))
     }
 
@@ -897,6 +899,11 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         }
         log.info("ready \(Int((uptime() - self.tapAt) * 1000)) ms after tap via \(self.playRoute, privacy: .public)")
         failStreak = 0
+        // Played, so the droplet keeps it for good.
+        if let track = state.localTrack {
+            let vid = videoIdOf(track), client = client
+            if !vid.isEmpty { Task { await client.markPlayed(vid) } }
+        }
         state.localPreparing = false
         state.localError = ""
         guard let track = state.localTrack else { return }

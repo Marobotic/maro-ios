@@ -224,6 +224,11 @@ final class MaroClient: @unchecked Sendable {
         return resp.bool("ok")
     }
 
+    /** A song started playing here: the droplet keeps a played song for good. */
+    func markPlayed(_ videoId: String) async {
+        _ = try? await call("POST", "/played/" + Self.escape(videoId))
+    }
+
     func postAction(_ action: String, _ payload: JSON = [:]) async -> Bool {
         guard let resp = try? await call("POST", "/relay/desktop", body: ["action": action, "payload": payload]) else { return false }
         return resp.bool("ok")
