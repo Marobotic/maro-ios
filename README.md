@@ -1,4 +1,4 @@
-# Maro for iOS
+# Omarchy Music Plugin for iOS
 
 The Omarchy Music Plugin's phone app, ported from the Android app to SwiftUI.
 It signs in to the same marobotic.dev account, controls the desktop, and plays

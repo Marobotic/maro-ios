@@ -24,12 +24,14 @@ targets:
     info:
       path: Maro/Info.plist
       properties:
-        CFBundleDisplayName: Maro
+        CFBundleDisplayName: Omarchy Music Plugin
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSRequiresIPhoneOS: true
+        # The Android splash: the logo centred on the panel background.
         UILaunchScreen:
-          UIColorName: ""
+          UIColorName: SplashBackground
+          UIImageName: SplashLogo
         UIStatusBarStyle: UIStatusBarStyleLightContent
         UIUserInterfaceStyle: Dark
         UISupportedInterfaceOrientations:
