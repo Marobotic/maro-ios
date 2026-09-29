@@ -371,7 +371,24 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             Device(id: $0.str("device"), name: $0.str("name"), kind: $0.str("kind"), connected: $0.bool("connected"), isPlayback: $0.bool("playback"))
         }
         state.devices = devices
-        state.playbackTarget = a.str("playback")
+        let target = a.str("playback")
+        state.playbackTarget = target
+        followPlayback(target, devices)
+    }
+
+    /**
+     * The account says which device plays; this phone follows it instead of
+     * trusting what it last remembered. Another connected device playing makes
+     * this phone its remote (and silent); the account naming this phone makes
+     * it the player again.
+     */
+    private func followPlayback(_ target: String, _ devices: [Device]) {
+        if target.isEmpty { return }
+        if target == deviceId() {
+            if !isPhone { setPlaybackMode(.standalonePhone) }
+        } else if isPhone, devices.contains(where: { $0.id == target && $0.connected }) {
+            setPlaybackMode(.remoteDesktop)
+        }
     }
 
     private func pullSync() async {

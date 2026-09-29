@@ -43,10 +43,16 @@ struct OmpIcon: View {
         self.color = color
     }
 
+    /** Nerd Font icons live in the private-use planes; digits and "⋮" do not. */
+    private var isGlyph: Bool {
+        icon.unicodeScalars.contains { (0xE000...0xF8FF).contains($0.value) || $0.value >= 0xF0000 }
+    }
+
     var body: some View {
-        // Nerd Font glyphs draw wider than their advance; a box a bit wider
-        // than the font size keeps the logos from being cut in half.
-        Text(icon)
+        // A Nerd Font icon draws about two cells wide on a one-cell advance,
+        // and iOS clips text to its advance: the logos came out cut in half.
+        // A trailing space in the same font widens the text to the glyph.
+        Text(isGlyph ? icon + " " : icon)
             .font(Omp.font(m.pt(size)))
             .foregroundColor(color)
             .lineLimit(1)
