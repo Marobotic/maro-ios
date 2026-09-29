@@ -1474,13 +1474,9 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         }
         lyrics = SongLyrics(trackId: id, loading: true)
         lyricsTask = Task {
-            func done(_ found: SongLyrics) {
-                remember(found, id)
-                if lyrics.trackId == id { lyrics = found }
-            }
             if id.range(of: "^[A-Za-z0-9_-]{6,64}$", options: .regularExpression) != nil,
                let found = SongLyrics.from(id, await client.lyrics(id)) {
-                return done(found)
+                return lyricsFound(found, id)
             }
             if Task.isCancelled { return }
             if state.signedIn {
@@ -1488,8 +1484,13 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 await sleep(seconds: 6)
                 if Task.isCancelled || lyrics.trackId != id || !lyrics.loading { return }
             }
-            done(SongLyrics.from(id, await client.lrclib(track)) ?? SongLyrics(trackId: id))
+            lyricsFound(SongLyrics.from(id, await client.lrclib(track)) ?? SongLyrics(trackId: id), id)
         }
+    }
+
+    private func lyricsFound(_ found: SongLyrics, _ id: String) {
+        remember(found, id)
+        if lyrics.trackId == id { lyrics = found }
     }
 
     // -- remote control from the desktop -----------------------------------
@@ -1575,7 +1576,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 var body: JSON = [
                     "device": self.deviceId(),
                     "name": Omp.phoneName,
-                    "track": s.localTrack?.toJSON() ?? NSNull(),
+                    "track": s.localTrack.map { $0.toJSON() as Any } ?? NSNull(),
                     "playing": s.localPlaying,
                     "position": pos,
                     "duration": self.progress.duration,

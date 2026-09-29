@@ -55,6 +55,7 @@ final class VisibleRows: ObservableObject {
     }
 }
 
+@MainActor
 private func trackMenu(_ track: Track, liked: Bool, vm: MaroViewModel) -> OmpDialog {
     .menu(title: track.title.ifBlank(track.id), items: [
         .init(icon: Omp.Icons.add, label: "Play next") { vm.queueNext(track) },

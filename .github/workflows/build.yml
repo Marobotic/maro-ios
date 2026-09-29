@@ -23,7 +23,6 @@ jobs:
       # Unsigned: the phone-side signing happens on Linux with a free Apple ID.
       - name: Build
         run: |
-          set -o pipefail
           xcodebuild \
             -project Maro.xcodeproj \
             -scheme Maro \
@@ -34,8 +33,8 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            build | tee build.log | grep -E "error:|warning: .*(Sources)|BUILD" || true
-          test -d build/Build/Products/Release-iphoneos/Maro.app
+            build > build.log 2>&1 || { grep -E "error:" build.log | sort -u; exit 1; }
+          grep -E "Sources/.*warning:" build.log | sort -u || true
 
       - name: Package ipa
         run: |

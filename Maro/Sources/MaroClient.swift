@@ -89,9 +89,9 @@ final class MaroClient: @unchecked Sendable {
 
     /** Body bytes, or nil when the server answers non-2xx. */
     private func raw(_ req: URLRequest) async -> Data? {
-        guard let (data, resp) = try? await http.data(for: req),
-              let code = (resp as? HTTPURLResponse)?.statusCode, (200..<300).contains(code) else { return nil }
-        return data
+        guard let result = try? await http.data(for: req),
+              let code = (result.1 as? HTTPURLResponse)?.statusCode, (200..<300).contains(code) else { return nil }
+        return result.0
     }
 
     /**
