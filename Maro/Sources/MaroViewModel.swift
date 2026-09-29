@@ -752,7 +752,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             if tag != playTag { return }
             if ready {
                 playRoute = "engine"
-                phone.playStream(videoId, tag: tag)
+                phone.playStream(videoId, tag: tag, duration: job.track.duration)
             } else {
                 // No match on either provider, or the upload failed: skip
                 // this song rather than leave the player paused on it.
@@ -822,10 +822,10 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         let videoId = videoIdOf(track)
         if let file = localFiles[videoId], FileManager.default.fileExists(atPath: file.path) {
             playRoute = "file"
-            phone.playFile(file, tag: tag)
+            phone.playFile(file, tag: tag, duration: track.duration)
         } else if !videoId.isEmpty && (serverCached.contains(videoId) || !serverMapLoaded) {
             playRoute = AudioCache.isWarm(videoId) ? "warm asset" : "stream"
-            phone.playStream(videoId, tag: tag)
+            phone.playStream(videoId, tag: tag, duration: track.duration)
         } else {
             playRoute = "engine"
             phone.stop()
@@ -944,9 +944,26 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         if tag != playTag { return }
         let track = state.localTrack
         if let track, retriedTag != tag {
-            // Not on the droplet (or a broken copy): have the engine put it there.
             retriedTag = tag
             let videoId = videoIdOf(track)
+            if !notOnServer && !videoId.isEmpty && localFiles[videoId] == nil {
+                // The droplet has it but streaming it failed: fetch the whole
+                // file once and play that, before bothering the engine.
+                playRoute = "download"
+                log.info("stream failed (\(message, privacy: .public)), downloading instead")
+                Task {
+                    let saved = await saveLocalNow(track, videoId)
+                    guard tag == playTag else { return }
+                    if saved, let file = localFiles[videoId] {
+                        phone.playFile(file, tag: tag, duration: track.duration)
+                    } else {
+                        playRoute = "engine"
+                        requestCloud(track.with(videoId: videoId), .play(tag: tag))
+                    }
+                }
+                return
+            }
+            // Not on the droplet (or a broken copy): have the engine put it there.
             if notOnServer { serverCached.remove(videoId) }
             log.info("stream failed (\(message, privacy: .public)), asking the engine")
             playRoute = "engine"

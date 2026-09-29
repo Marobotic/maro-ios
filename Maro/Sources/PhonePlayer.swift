@@ -119,6 +119,9 @@ final class PhonePlayer {
     private var timeObserver: Any?
     private var endObserver: NSObjectProtocol?
     private var failObserver: NSObjectProtocol?
+    private var boundaryObserver: Any?
+    /** The song's real length from its metadata, 0 when unknown. */
+    private var expected: Double = 0
 
     init(events: PhonePlayerEvents) {
         self.events = events
@@ -156,17 +159,34 @@ final class PhonePlayer {
         set { player.volume = newValue }
     }
 
-    func playFile(_ file: URL, tag: Int) { start(AVURLAsset(url: file), tag: tag) }
+    func playFile(_ file: URL, tag: Int, duration: Double) { start(AVURLAsset(url: file), tag: tag, duration: duration) }
 
-    func playStream(_ videoId: String, tag: Int) {
+    func playStream(_ videoId: String, tag: Int, duration: Double) {
         let asset = AudioCache.asset(videoId)
         AudioCache.forget(videoId)
-        start(asset, tag: tag)
+        start(asset, tag: tag, duration: duration)
     }
 
-    private func start(_ asset: AVURLAsset, tag: Int) {
+    private func start(_ asset: AVURLAsset, tag: Int, duration: Double) {
         self.tag = tag
         started = false
+        expected = duration
+        if let boundaryObserver { player.removeTimeObserver(boundaryObserver) }
+        boundaryObserver = nil
+        // The droplet's files are fragmented MP4 (YouTube's streaming layout),
+        // whose length AVPlayer estimates, sometimes minutes too long: the song
+        // then ran into silence. The metadata's length is the real one, so the
+        // song ends there.
+        if duration > 1 {
+            boundaryObserver = player.addBoundaryTimeObserver(
+                forTimes: [NSValue(time: CMTime(seconds: duration - 0.25, preferredTimescale: 600))], queue: .main
+            ) { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self, self.tag == tag else { return }
+                    self.events?.onEnded()
+                }
+            }
+        }
         let item = AVPlayerItem(asset: asset)
         statusObservation = item.observe(\.status) { [weak self] item, _ in
             Task { @MainActor in self?.itemStatusChanged(item, tag: tag) }
@@ -216,7 +236,8 @@ final class PhonePlayer {
     private func report() {
         guard tag > 0 else { return }
         let d = player.currentItem?.duration.seconds ?? 0
-        events?.onProgress(position: currentPosition, duration: d.isFinite ? d : 0, playing: player.timeControlStatus != .paused)
+        let length = expected > 1 ? expected : (d.isFinite ? d : 0)
+        events?.onProgress(position: min(currentPosition, length > 0 ? length : .infinity), duration: length, playing: player.timeControlStatus != .paused)
     }
 
     func play() {
@@ -234,6 +255,8 @@ final class PhonePlayer {
 
     func stop() {
         tag = 0
+        if let boundaryObserver { player.removeTimeObserver(boundaryObserver) }
+        boundaryObserver = nil
         player.pause()
         player.replaceCurrentItem(with: nil)
     }
