@@ -212,6 +212,9 @@ struct UiState: Equatable {
     var error: String?
     var devices: [Device] = []
     var playbackTarget = ""
+    // This phone's relay id and the name it shows up under.
+    var myDeviceId = ""
+    var deviceName = ""
 
     // Player (desktop)
     var track: Track?
@@ -311,6 +314,37 @@ struct UiState: Equatable {
     }
 
     func downloadOf(_ row: LibraryRow) -> DownloadJob? { downloads["v3:" + row.source + ":" + row.id] }
+
+    /** The device whose speakers the music comes out of. */
+    var playingDeviceId: String {
+        if playbackMode == .standalonePhone { return myDeviceId }
+        if !playbackTarget.isEmpty && devices.contains(where: { $0.id == playbackTarget && $0.connected }) { return playbackTarget }
+        return devices.first { $0.kind == "desktop" && $0.connected }?.id ?? ""
+    }
+
+    var playingDeviceName: String {
+        let id = playingDeviceId
+        if id == myDeviceId { return deviceName }
+        return devices.first { $0.id == id }?.name.ifBlank("Desktop") ?? "Desktop"
+    }
+
+    /**
+     * What the device picker offers: every device connected right now, this
+     * phone first. This phone is always there, even before the account has
+     * heard its first poll.
+     */
+    func pickerDevices() -> [Device] {
+        let playing = playingDeviceId
+        let others = devices
+            .filter { $0.connected && $0.id != myDeviceId }
+            .map { d -> Device in
+                var d = d
+                d.isPlayback = d.id == playing
+                return d
+            }
+            .sorted { $0.name.lowercased() < $1.name.lowercased() }
+        return [Device(id: myDeviceId, name: deviceName, kind: "phone", connected: true, isPlayback: playing == myDeviceId)] + others
+    }
 
     func displayState() -> UiState {
         guard playbackMode == .standalonePhone else { return self }

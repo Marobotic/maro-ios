@@ -48,13 +48,16 @@ struct SettingsPage: View {
                         connected: state.ytmConnected
                     ) { vm.connectService("ytm") }
                     SettingsHead(label: "Devices")
+                    SettingsRow(icon: Omp.Icons.edit, label: "Device name", meta: state.deviceName, accent: true) {
+                        present(.name(title: "Device name", placeholder: Omp.defaultPhoneName, confirm: "Save", initial: state.deviceName) { vm.setDeviceName($0) })
+                    }
                     if state.devices.isEmpty {
                         SettingsRow(icon: Omp.Icons.wifi, label: "No devices yet", meta: "") {}
                     } else {
                         ForEach(state.devices, id: \.id) { device in
                             SettingsRow(
                                 icon: device.isPlayback ? Omp.Icons.gear : Omp.Icons.broadcast,
-                                label: device.name.ifBlank(device.kind == "phone" ? Omp.phoneName : "Desktop"),
+                                label: device.id == state.myDeviceId ? state.deviceName : device.name.ifBlank(device.kind == "phone" ? "Phone" : "Desktop"),
                                 meta: device.isPlayback ? "playback" : device.connected ? "connected" : "offline",
                                 accent: device.isPlayback
                             ) { vm.selectDevice(device) }

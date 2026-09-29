@@ -11,7 +11,7 @@ private let tabs: [(key: String, label: String)] = [
 
 private func deviceLabel(_ device: Device) -> String {
     if !device.name.isBlank { return device.name }
-    return device.kind == "phone" ? Omp.phoneName : "Desktop"
+    return device.kind == "phone" ? "Phone" : "Desktop"
 }
 
 /** The Omp-styled popups (menus, name prompts, confirmations) share one host. */
@@ -103,9 +103,14 @@ struct HomeScreen: View {
         NowPlayingRow(state: shown, vm: vm)
         SeekRow(state: shown, vm: vm)
         TransportRow(state: shown, vm: vm)
+        DeviceRow(state: shown, vm: vm)
     }
 }
 
+/**
+ * The top bar: whose library this is, and settings. Where the music plays
+ * lives under the controls instead (DeviceRow), as in Spotify.
+ */
 private struct AccountStrip: View {
     @Environment(\.omp) private var m
     let state: UiState
@@ -121,45 +126,63 @@ private struct AccountStrip: View {
             default: return state.email.ifBlank("Omarchy Music Plugin")
             }
         }()
-        let phoneMode = state.playbackMode == .standalonePhone
-        let devices = state.devices.contains { $0.kind == "phone" } ? state.devices :
-            state.devices + [Device(id: "", name: Omp.phoneName, kind: "phone", connected: state.signedIn, isPlayback: phoneMode)]
-        let selected = devices.first { $0.kind == (phoneMode ? "phone" : "desktop") }
         HStack(spacing: m.pt(6)) {
             Menu {
                 Button(state.email.ifBlank("Omarchy Music Plugin")) { vm.selectAccount("maro") }
                 Button(state.spotifyConnected ? spotifyName : "Spotify not connected") { vm.selectAccount("spotify") }
                 Button(state.ytmConnected ? ytmName : "YouTube Music not connected") { vm.selectAccount("ytm") }
             } label: {
-                stripLabel(
-                    icon: state.selectedAccount == "spotify" ? Omp.Icons.spotify : state.selectedAccount == "ytm" ? Omp.Icons.ytm : Omp.Icons.cloud,
-                    text: accountText, selected: state.signedIn, pad: 8, vpad: 4
-                )
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            Menu {
-                ForEach(devices, id: \.self) { device in
-                    Button(deviceLabel(device)) {
-                        if device.id.isEmpty { vm.setPlaybackMode(.standalonePhone) } else { vm.selectDevice(device) }
-                    }
+                HStack(spacing: m.pt(7)) {
+                    OmpIcon(state.selectedAccount == "spotify" ? Omp.Icons.spotify : state.selectedAccount == "ytm" ? Omp.Icons.ytm : Omp.Icons.cloud)
+                    OmpText(accountText)
                 }
-            } label: {
-                stripLabel(icon: Omp.Icons.broadcast, text: selected.map(deviceLabel) ?? (phoneMode ? "Phone" : "Desktop"), selected: phoneMode, pad: 5, vpad: 5)
+                .padding(.horizontal, m.pt(8))
+                .padding(.vertical, m.pt(6))
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            OmpButton(icon: Omp.Icons.gear, selected: state.settingsOpen, vertical: 6, horizontal: 6) { vm.toggleSettings() }
-                .padding(.trailing, m.pt(2))
+            OmpButton(icon: Omp.Icons.gear, selected: state.settingsOpen, vertical: 6, horizontal: 8) { vm.toggleSettings() }
         }
     }
+}
 
-    private func stripLabel(icon: String, text: String, selected: Bool, pad: CGFloat, vpad: CGFloat) -> some View {
-        HStack(spacing: m.pt(7)) {
-            OmpIcon(icon)
-            OmpText(text)
+/**
+ * Where the music is coming out: this phone, or another device it is
+ * remote-controlling. Tapping it lists every device connected right now.
+ */
+private struct DeviceRow: View {
+    @Environment(\.omp) private var m
+    let state: UiState
+    @ObservedObject var vm: MaroViewModel
+
+    var body: some View {
+        let here = state.playingDeviceId == state.myDeviceId
+        let tint = here ? Omp.muted : Omp.maro
+        Menu {
+            ForEach(state.pickerDevices(), id: \.self) { device in
+                let me = device.id == state.myDeviceId
+                Button {
+                    if !device.isPlayback { vm.selectDevice(device) }
+                } label: {
+                    if device.isPlayback {
+                        Label(deviceLabel(device) + (me ? "  ·  this phone" : ""), systemImage: "checkmark")
+                    } else {
+                        Text(deviceLabel(device) + (me ? "  ·  this phone" : ""))
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: m.pt(8)) {
+                OmpIcon(Omp.Icons.broadcast, color: tint)
+                OmpText(here ? "Playing on this phone" : "Playing on \(state.playingDeviceName)",
+                        size: Omp.TypeSize.bodySmall, color: here ? Omp.muted : Omp.foreground)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                OmpText("\u{25BE}", color: tint)
+            }
+            .padding(.horizontal, m.pt(6))
+            .padding(.vertical, m.pt(6))
+            .background(here ? Color.clear : Omp.maro.opacity(0.12), in: RoundedRectangle(cornerRadius: m.pt(Omp.labelGap)))
+            .contentShape(Rectangle())
         }
-        .padding(.horizontal, m.pt(pad))
-        .padding(.vertical, m.pt(vpad))
-        .background(selected ? Omp.selectedFill : Color.clear, in: RoundedRectangle(cornerRadius: m.pt(Omp.labelGap)))
     }
 }
 

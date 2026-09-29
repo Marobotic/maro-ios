@@ -207,12 +207,14 @@ final class MaroClient: @unchecked Sendable {
      * Long-poll the phone queue so now-playing snapshots arrive as the desktop
      * engine emits them. Runs until the task is cancelled or [stop] says so.
      */
-    func phonePump(deviceId: String, deviceName: String, stop: @escaping @Sendable () async -> Bool, onEvent: @escaping @Sendable (JSON) async -> Void) -> Task<Void, Never> {
+    func phonePump(deviceId: String, deviceName: @escaping @Sendable () async -> String, stop: @escaping @Sendable () async -> Bool, onEvent: @escaping @Sendable (JSON) async -> Void) -> Task<Void, Never> {
         Task.detached(priority: .utility) { [self] in
             var after: Int64 = 0
-            let q = Self.escape(deviceId), n = Self.escape(deviceName)
+            let q = Self.escape(deviceId)
             while !Task.isCancelled {
                 if await stop() { return }
+                // Read per poll: a rename reaches the account on the next one.
+                let n = Self.escape(await deviceName())
                 do {
                     var req = request("\(Self.base)/relay/phone?device=\(q)&name=\(n)&after=\(after)&wait=25", timeout: Self.pollTimeout)
                     req.setValue("application/json", forHTTPHeaderField: "Accept")

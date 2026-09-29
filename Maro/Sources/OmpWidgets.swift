@@ -44,7 +44,14 @@ struct OmpIcon: View {
     }
 
     var body: some View {
-        Text(icon).font(Omp.font(m.pt(size))).foregroundColor(color).lineLimit(1)
+        // Nerd Font glyphs draw wider than their advance; a box a bit wider
+        // than the font size keeps the logos from being cut in half.
+        Text(icon)
+            .font(Omp.font(m.pt(size)))
+            .foregroundColor(color)
+            .lineLimit(1)
+            .fixedSize()
+            .frame(minWidth: m.pt(size) * 1.3)
     }
 }
 

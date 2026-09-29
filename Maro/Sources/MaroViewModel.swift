@@ -129,7 +129,10 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     init() {
         AudioCache.session = { [client] in client.session }
         ArtLoader.shared.client = client
+        Omp.customPhoneName = prefs.string(forKey: "deviceName") ?? ""
         var s = UiState()
+        s.myDeviceId = deviceId()
+        s.deviceName = Omp.phoneName
         s.signedIn = client.session != nil
         s.email = client.email ?? ""
         s.selectedAccount = prefs.string(forKey: "selectedAccount") ?? "maro"
@@ -189,7 +192,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         startStateReports()
         pump = client.phonePump(
             deviceId: deviceId(),
-            deviceName: Omp.phoneName,
+            deviceName: { await MainActor.run { Omp.phoneName } },
             stop: { [weak self] in await self?.pumpShouldStop() ?? true },
             onEvent: { [weak self] msg in await self?.onRelayMessage(msg) }
         )
@@ -324,13 +327,19 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         if state.online != up { state.online = up }
     }
 
-    /** On/off. Probe the droplet every so often; the rest of the app reads [UiState.online]. */
+    /**
+     * On/off, and who else is around. Probe the droplet every so often; the
+     * answer is the account's device list, so the picker shows a phone that
+     * came online after this one without a restart.
+     */
     private func startConnectivityWatch() {
         Task { [weak self] in
             while true {
-                await sleep(seconds: 12)
+                await sleep(seconds: 10)
                 guard let self else { return }
-                self.markOnline(await self.client.account() != nil)
+                let account = await self.client.account()
+                self.markOnline(account != nil)
+                if let account { self.applyAccount(account) }
             }
         }
     }
@@ -338,7 +347,11 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     // -- state pull ---------------------------------------------------------
 
     private func pullAccount() async {
-        guard let a = await client.account()?.obj("account") else { return }
+        if let account = await client.account() { applyAccount(account) }
+    }
+
+    private func applyAccount(_ response: JSON) {
+        guard let a = response.obj("account") else { return }
         let devices = (a.arr("devices") ?? []).compactMap { $0 as? JSON }.map {
             Device(id: $0.str("device"), name: $0.str("name"), kind: $0.str("kind"), connected: $0.bool("connected"), isPlayback: $0.bool("playback"))
         }
@@ -817,7 +830,10 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             pump?.cancel()
             pump = nil
             await client.logout()
-            state = UiState()
+            var fresh = UiState()
+            fresh.myDeviceId = state.myDeviceId
+            fresh.deviceName = state.deviceName
+            state = fresh
             progress = Progress()
         }
     }
@@ -1403,6 +1419,18 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         showStatus("Playback source set to \(value)", "ok")
     }
 
+    /** Rename this phone everywhere: the picker here, the account, the desktop panel. */
+    func setDeviceName(_ name: String) {
+        let clean = String(name.trimmingCharacters(in: .whitespaces).prefix(80))
+        let custom = clean == Omp.defaultPhoneName ? "" : clean
+        Omp.customPhoneName = custom
+        prefs.set(custom, forKey: "deviceName")
+        state.deviceName = Omp.phoneName
+        let body: JSON = ["device": deviceId(), "name": Omp.phoneName]
+        Task { _ = await client.postAction("phone.state", body) }
+        showStatus("This phone is now called \(Omp.phoneName)", "ok")
+    }
+
     func selectAccount(_ account: String) {
         state.selectedAccount = account
         prefs.set(account, forKey: "selectedAccount")
@@ -1422,10 +1450,12 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 return
             }
             state.playbackTarget = target
-            if device.kind == "phone" {
+            if target == deviceId() {
                 setPlaybackMode(.standalonePhone)
                 send("device.select", ["device": target])
             } else {
+                // Another phone or a desktop: what plays here goes on there,
+                // and this phone becomes a remote for it.
                 let transfer = transferOut()
                 phonePlayer?.pause()
                 setPlaybackMode(.remoteDesktop)

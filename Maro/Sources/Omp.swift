@@ -98,11 +98,17 @@ enum Omp {
         static let broadcast = "\u{F1EB}"
     }
 
+    /** The name picked under Settings > Device name; blank means the default. */
+    static var customPhoneName = ""
+
+    /** What this phone is called in device lists. */
+    static var phoneName: String { customPhoneName.ifBlank(defaultPhoneName) }
+
     /**
-     * What this phone is called in device lists. iOS only hands apps the
-     * generic "iPhone" for the device name, so use the model instead.
+     * The name before anyone renames it. iOS only hands apps the generic
+     * "iPhone" for the device name, so use the model instead.
      */
-    static let phoneName: String = {
+    static let defaultPhoneName: String = {
         var info = utsname()
         uname(&info)
         let machine = withUnsafeBytes(of: &info.machine) { raw in
