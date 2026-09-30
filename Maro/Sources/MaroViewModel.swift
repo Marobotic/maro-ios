@@ -1333,6 +1333,18 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         playList(state.songs, i, name: "Saved songs")
     }
 
+    /// The song rings as the alarm on every Hourglass device.
+    func setAsAlarm(_ t: Track) {
+        let id = videoIdOf(t).ifEmpty(t.videoId.ifEmpty(t.id))
+        if id.isEmpty { return }
+        showStatus("Making \(t.title) your alarm…", "info")
+        let client = client
+        Task {
+            let err = await client.hourglassAlarm(songId: id, title: t.title, artist: t.artist)
+            if let err { showStatus(err, "error") } else { showStatus("\(t.title) is now your alarm on every device", "ok") }
+        }
+    }
+
     func queueNext(_ t: Track) {
         if t.id.isEmpty { return }
         if isPhone {

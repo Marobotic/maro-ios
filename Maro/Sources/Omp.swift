@@ -84,6 +84,7 @@ enum Omp {
         static let spotify = "\u{F1BC}"
         static let ytm = "\u{F16A}"
         static let gear = "\u{F013}"
+        static let bell = "\u{F0F3}"
         static let cloud = "\u{F0C2}"
         static let link = "\u{F0C1}"
         static let shuffle = "\u{F074}"

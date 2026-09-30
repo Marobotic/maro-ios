@@ -63,6 +63,7 @@ private func trackMenu(_ track: Track, liked: Bool, vm: MaroViewModel) -> OmpDia
         .init(icon: Omp.Icons.cloud, label: "Save offline") { vm.saveOffline(track) },
         .init(icon: Omp.Icons.paintbrush, label: "Download artwork") { vm.artFetch(track.artKey.ifBlank(track.id)) },
         .init(icon: liked ? Omp.Icons.like : Omp.Icons.likeFull, label: liked ? "Unlike" : "Like") { vm.likeTrack(track) },
+        .init(icon: Omp.Icons.bell, label: "Set as alarm") { vm.setAsAlarm(track) },
         .init(icon: Omp.Icons.link, label: "Open link") { vm.openUrl(Omp.trackUrl(track.source, track.videoId.ifEmpty(track.id))) },
     ])
 }

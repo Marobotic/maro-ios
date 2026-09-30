@@ -49,6 +49,23 @@ final class MaroClient: @unchecked Sendable {
         return _email
     }
 
+    /// Make a song the alarm sound in Hourglass, which signs in with this
+    /// same account. The server cuts the loudest 30 s from its cached copy.
+    /// Returns nil on success, else the reason.
+    func hourglassAlarm(songId: String, title: String, artist: String) async -> String? {
+        guard let s = session else { return "Sign in first" }
+        var req = URLRequest(url: URL(string: MaroClient.base.replacingOccurrences(of: "/cache", with: "") + "/hourglass/api/ringtones/song")!, timeoutInterval: 90)
+        req.httpMethod = "POST"
+        req.setValue("Bearer \(s)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["song_id": songId, "name": title, "artist": artist])
+        guard let got = try? await http.data(for: req) else { return "No connection" }
+        let data = got.0
+        let code = (got.1 as? HTTPURLResponse)?.statusCode ?? 0
+        if (200..<300).contains(code) { return nil }
+        return ((try? JSONSerialization.jsonObject(with: data)) as? [String: Any])?["error"] as? String ?? "Hourglass answered \(code)"
+    }
+
     init() {
         _session = defaults.string(forKey: "session")
         _email = defaults.string(forKey: "email")
