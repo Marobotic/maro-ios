@@ -38,7 +38,7 @@ struct LoginScreen: View {
         let error = problem ?? state.error
         ScrollView {
             VStack(spacing: 0) {
-                Image("SplashLogo").resizable().scaledToFit().frame(width: 84, height: 84)
+                Image("LaunchNote").resizable().scaledToFit().frame(width: 84, height: 84)
                 Spacer().frame(height: 16)
                 text("Omarchy Music Plugin", 22, Omp.foreground, bold: true)
                 Spacer().frame(height: 6)

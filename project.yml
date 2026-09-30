@@ -31,7 +31,7 @@ targets:
         # The Android splash: the logo centred on the panel background.
         UILaunchScreen:
           UIColorName: SplashBackground
-          UIImageName: SplashLogo
+          UIImageName: LaunchNote
         UIStatusBarStyle: UIStatusBarStyleLightContent
         UIUserInterfaceStyle: Dark
         UISupportedInterfaceOrientations:
