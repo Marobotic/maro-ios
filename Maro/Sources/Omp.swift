@@ -198,12 +198,29 @@ enum Omp {
         return "\(secs / 86400)d"
     }
 
-    static func trackUrl(_ source: String, _ id: String) -> String {
-        switch source {
-        case "spotify": return "https://open.spotify.com/track/\(id)"
-        case "ytm": return "https://music.youtube.com/watch?v=\(id)"
-        default: return ""
-        }
+    /**
+     * A Spotify link for one song: the exact track when its id is known, a
+     * Spotify search for the title and artist when it is not, so a YouTube
+     * Music song still gets a link that lands on the right record.
+     */
+    static func spotifyShareUrl(id: String, query: String) -> String {
+        if !id.isEmpty { return "https://open.spotify.com/track/\(id)" }
+        if !query.isEmpty { return "https://open.spotify.com/search/" + urlEncode(query) }
+        return ""
+    }
+
+    /** The same idea for YouTube Music. */
+    static func youtubeShareUrl(videoId: String, query: String) -> String {
+        if !videoId.isEmpty { return "https://music.youtube.com/watch?v=\(videoId)" }
+        if !query.isEmpty { return "https://music.youtube.com/search?q=" + urlEncode(query) }
+        return ""
+    }
+
+    /// Percent-encodes a whole UTF-8 string, which is what a search path wants.
+    private static func urlEncode(_ s: String) -> String {
+        var out = ""
+        for b in Array(s.utf8) { out += String(format: "%%%02X", b) }
+        return out
     }
 }
 

@@ -1345,6 +1345,24 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         }
     }
 
+    /// Copies the Spotify link for this song: the exact track, or a search for it.
+    func shareSpotifyLink(_ t: Track) {
+        let id = t.source == "spotify" ? t.id.ifEmpty(t.sourceId) : ""
+        copyLink(Omp.spotifyShareUrl(id: id, query: "\(t.title) \(t.artist)"), "Spotify")
+    }
+
+    /// Copies the YouTube Music link for this song, the same way.
+    func shareYouTubeLink(_ t: Track) {
+        let id = videoIdOf(t).ifEmpty(t.source == "ytm" ? t.id : "")
+        copyLink(Omp.youtubeShareUrl(videoId: id, query: "\(t.title) \(t.artist)"), "YouTube Music")
+    }
+
+    private func copyLink(_ url: String, _ service: String) {
+        guard !url.isEmpty else { return }
+        UIPasteboard.general.string = url
+        showStatus("\(service) link copied", "ok")
+    }
+
     func queueNext(_ t: Track) {
         if t.id.isEmpty { return }
         if isPhone {
