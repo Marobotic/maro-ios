@@ -131,6 +131,25 @@ private struct QueueView: View {
     }
 }
 
+/**
+ * The tick inside the saved dot, drawn rather than typed: a font glyph sits
+ * wherever its metrics put it, so it was off-centre, and differently on each
+ * platform. Same points on desktop, Android and iOS.
+ */
+private struct SavedTick: View {
+    var body: some View {
+        GeometryReader { g in
+            let w = g.size.width
+            Path { p in
+                p.move(to: CGPoint(x: w * 0.27, y: w * 0.52))
+                p.addLine(to: CGPoint(x: w * 0.43, y: w * 0.68))
+                p.addLine(to: CGPoint(x: w * 0.74, y: w * 0.35))
+            }
+            .stroke(Color.white, style: StrokeStyle(lineWidth: w * 0.15, lineCap: .round, lineJoin: .round))
+        }
+    }
+}
+
 /** Second line of a track row; a saved song gets Spotify's small filled dot before the artist. */
 private struct ArtistLine: View {
     @Environment(\.omp) private var m
@@ -141,7 +160,7 @@ private struct ArtistLine: View {
     var body: some View {
         HStack(spacing: 0) {
             if saved {
-                OmpIcon(Omp.Icons.check, size: 7, color: .white)
+                SavedTick()
                     .frame(width: m.pt(11), height: m.pt(11))
                     .background(Omp.themeAccent, in: Circle())
                     .padding(.trailing, m.pt(4))
