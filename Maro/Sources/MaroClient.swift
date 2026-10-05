@@ -197,6 +197,14 @@ final class MaroClient: @unchecked Sendable {
         return out
     }
 
+    /** The droplet's per-second kbps of one stored copy, or nil. */
+    func timeline(_ videoId: String, copy: String) async -> [Int]? {
+        let q = copy.isEmpty ? "" : "?f=" + Self.escape(copy)
+        guard let resp = try? await call("GET", "/audio/" + Self.escape(videoId) + "/timeline" + q, timeout: 20),
+              let arr = resp.arr("kbps") else { return nil }
+        return arr.map { ($0 as? NSNumber)?.intValue ?? 0 }
+    }
+
     func trackMap() async -> TrackMap? {
         guard let resp = try? await call("GET", "/map", timeout: 15), let map = resp.obj("map") else { return nil }
         var out: [String: String] = [:]

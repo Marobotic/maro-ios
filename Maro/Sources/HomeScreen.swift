@@ -202,6 +202,31 @@ private struct OfflineLine: View {
     }
 }
 
+/**
+ * The bitrate of what is sounding, at this second of the song, on whichever
+ * device is playing it: the droplet's per-second kbps of that exact copy, read
+ * at the playhead. Before the timeline arrives it is the copy's average.
+ * Green at the tier chosen in Settings, amber below it.
+ */
+private struct LiveBitrate: View {
+    let state: UiState
+    @ObservedObject var vm: MaroViewModel
+    let separator: Bool
+
+    var body: some View {
+        let progress = vm.progress
+        TimelineView(.periodic(from: .now, by: progress.playing ? 0.5 : 3600)) { _ in
+            let second = Int(progress.at(uptime()))
+            let live = second >= 0 && second < state.audioTimeline.count ? state.audioTimeline[second] : 0
+            let kbps = live > 0 ? live : state.audioKbps
+            if kbps > 0 {
+                OmpText((separator ? "  ·  " : "") + "\(kbps) kbps", size: Omp.TypeSize.caption,
+                        color: state.audioInTier == false ? Omp.qualityWait : Omp.qualityGood)
+            }
+        }
+    }
+}
+
 private struct NowPlayingRow: View {
     @Environment(\.omp) private var m
     let state: UiState
@@ -232,19 +257,11 @@ private struct NowPlayingRow: View {
                         OmpText(state.loadingStage.ifBlank("Loading…"), size: Omp.TypeSize.caption, color: Omp.accent)
                     }
                 } else if let track {
-                    let meta = [track.album, Omp.originLabel(state.origin), state.queueName.isEmpty ? "" : "in \(state.queueName)"]
+                    let meta = [track.album, Omp.originLabel(state.origin)]
                         .filter { !$0.isEmpty }.joined(separator: "  ·  ")
-                    // The bitrate of the copy this phone is playing - what the
-                    // file measures on the droplet, not the tier asked for.
-                    let kbps = state.localKbps > 0 && track.id == state.localTrack?.id ? state.localKbps : 0
-                    if !meta.isEmpty || kbps > 0 {
-                        HStack(spacing: 0) {
-                            if !meta.isEmpty { OmpText(meta, size: Omp.TypeSize.caption, color: Omp.muted) }
-                            if kbps > 0 {
-                                OmpText((meta.isEmpty ? "" : "  ·  ") + "\(kbps) kbps", size: Omp.TypeSize.caption,
-                                        color: state.localInTier == false ? Omp.qualityWait : Omp.qualityGood)
-                            }
-                        }
+                    HStack(spacing: 0) {
+                        if !meta.isEmpty { OmpText(meta, size: Omp.TypeSize.caption, color: Omp.muted) }
+                        LiveBitrate(state: state, vm: vm, separator: !meta.isEmpty)
                     }
                 }
             }

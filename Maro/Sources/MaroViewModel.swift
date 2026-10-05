@@ -445,7 +445,15 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         if active {
             if !wasActive { takeOver(queue, index, name, doc, position, playing) }
         } else {
-            // Another device makes the sound: this phone is its remote.
+            // Another device makes the sound: this phone is its remote, and
+            // shows the bitrate of the copy that device is playing.
+            if let a = doc.obj("audio"), !a.str("videoId").isEmpty {
+                setSounding(a.str("videoId"), copy: a.str("copy"), kbps: a.int("kbps"),
+                            inTier: a["inTier"] as? Bool)
+            } else {
+                // The playing device did not say: nothing, not the last song's number.
+                setSounding("", copy: "", kbps: 0, inTier: nil)
+            }
             if isPhone { setPlaybackMode(.remoteDesktop) }
             phonePlayer?.pause()
             progress = Progress(position: position, duration: track?.duration ?? 0, playing: playing, anchor: uptime())
@@ -492,7 +500,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         if owner.isEmpty && !s.localPlaying && !force { return }
         let now = uptime()
         let pos = progress.at(now)
-        let key: [AnyHashable] = [s.localQueueIndex, s.localPlaying, s.localShuffle, s.localRepeat, s.volume, s.localQueueName]
+        let key: [AnyHashable] = [s.localQueueIndex, s.localPlaying, s.localShuffle, s.localRepeat, s.volume, s.localQueueName,
+                                  s.audioVideoId, s.audioCopy]
         let queueChanged = !publishedOnce || lastPublishedQueue != s.localQueue
         let expected = lastPublishedPos + (lastPublishedPlaying ? now - lastPublishedAt : 0)
         let due = force || !publishedOnce || key != lastPublishedKey || queueChanged
@@ -509,6 +518,12 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             "playing": s.localPlaying, "shuffle": s.localShuffle, "repeat": s.localRepeat,
             "volume": s.volume, "position": pos,
         ]
+        if !s.audioVideoId.isEmpty {
+            // Which copy is sounding here, so every other device can show its
+            // live bitrate too.
+            body["audio"] = ["videoId": s.audioVideoId, "copy": s.audioCopy, "kbps": s.audioKbps,
+                             "tier": AudioCache.rung(), "inTier": s.audioInTier.map { $0 as Any } ?? NSNull()]
+        }
         if queueChanged { body["queue"] = s.localQueue.map { $0.toJSON() } }
         playerActive = true
         guard let out = await client.putPlayer(body) else {
@@ -843,8 +858,11 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             // whole song, so that is exactly what is being heard.
             let bytes = (try? FileManager.default.attributesOfItem(atPath: file.path)[.size] as? NSNumber)?.doubleValue ?? 0
             let kbps = track.duration > 1 ? Int(bytes * 8 / track.duration / 1000) : 0
-            state.localKbps = kbps
-            state.localInTier = kbps > 0 ? AudioCache.inTier(kbps) : nil
+            // Saved from one of the droplet's copies; the one that measures the
+            // same is the one whose timeline describes it.
+            var copy = ""
+            if let v = AudioCache.variant(videoId), abs(v.kbps - kbps) < 20, v.name.contains(".") { copy = v.name }
+            setSounding(videoId, copy: copy, kbps: kbps, inTier: kbps > 0 ? AudioCache.inTier(kbps) : nil)
             phone.playFile(file, tag: tag, duration: track.duration)
         } else if !videoId.isEmpty && (serverCached.contains(videoId) || !serverMapLoaded) {
             playRoute = AudioCache.isWarm(videoId) ? "warm asset" : "stream"
@@ -866,8 +884,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         func go() {
             guard tag == playTag else { return }
             let v = AudioCache.variant(videoId)
-            state.localKbps = v?.kbps ?? 0
-            state.localInTier = v?.inTier
+            let copy = (v?.name.contains(".") ?? false) ? v!.name : ""
+            setSounding(videoId, copy: copy, kbps: v?.kbps ?? 0, inTier: v?.inTier)
             phone.playStream(videoId, tag: tag, duration: duration)
         }
         if AudioCache.variant(videoId) != nil { return go() }
@@ -883,6 +901,34 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             }
             timeout.cancel()
             go()
+        }
+    }
+
+    private var timelines: [String: [Int]] = [:]
+
+    /**
+     * Say which copy is sounding, and fetch its per-second bitrate from the
+     * droplet once. Called for this phone's own playback and, from the shared
+     * player, for whatever another device is playing.
+     */
+    private func setSounding(_ videoId: String, copy: String, kbps: Int, inTier: Bool?) {
+        let key = videoId + "/" + copy
+        let known = timelines[key] ?? []
+        if state.audioVideoId != videoId || state.audioCopy != copy || state.audioKbps != kbps
+            || state.audioInTier != inTier || state.audioTimeline != known {
+            state.audioVideoId = videoId
+            state.audioCopy = copy
+            state.audioKbps = kbps
+            state.audioInTier = inTier
+            state.audioTimeline = known
+        }
+        if videoId.isEmpty || !known.isEmpty { return }
+        let client = client
+        Task { @MainActor in
+            guard let line = await client.timeline(videoId, copy: copy) else { return }
+            timelines[key] = line
+            if timelines.count > 64 { timelines.removeAll() ; timelines[key] = line }
+            if state.audioVideoId == videoId && state.audioCopy == copy { state.audioTimeline = line }
         }
     }
 

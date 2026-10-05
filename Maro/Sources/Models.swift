@@ -243,9 +243,17 @@ struct UiState: Equatable {
 
     // Settings
     var quality = "normal"
-    /** What the copy playing on this phone measures, and whether it is the tier chosen. */
-    var localKbps = 0
-    var localInTier: Bool?
+    /**
+     * The copy that is sounding, on whichever device: its video, which stored
+     * copy ("max.m4a"; "" is the original), what it measures on average, and
+     * whether that is the tier chosen. With `audioTimeline` - the droplet's
+     * per-second kbps of that copy - every device shows the live bitrate.
+     */
+    var audioVideoId = ""
+    var audioCopy = ""
+    var audioKbps = 0
+    var audioInTier: Bool?
+    var audioTimeline: [Int] = []
     var downloadQuality = "max"
     var savingOffline = true
     var playbackSource = "auto"
