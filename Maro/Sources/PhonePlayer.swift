@@ -61,6 +61,15 @@ enum AudioCache {
         }
     }
 
+    /** Whether a copy measuring `kbps` is the tier chosen - the droplet's own windows. */
+    static func inTier(_ kbps: Int) -> Bool {
+        switch rung() {
+        case "low": return kbps < 100
+        case "normal", "high": return kbps >= 100 && kbps < 200
+        default: return kbps >= 200
+        }
+    }
+
     /** Key of the asset for the copy that plays now: a new copy is a new key. */
     private static func key(_ videoId: String) -> String {
         guard let v = variant(videoId), v.name.contains(".") else { return videoId }

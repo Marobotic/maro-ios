@@ -839,8 +839,12 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         let videoId = videoIdOf(track)
         if let file = localFiles[videoId], FileManager.default.fileExists(atPath: file.path) {
             playRoute = "file"
-            state.localKbps = 0
-            state.localInTier = nil
+            // A saved song's rate is its size over its length: the file is the
+            // whole song, so that is exactly what is being heard.
+            let bytes = (try? FileManager.default.attributesOfItem(atPath: file.path)[.size] as? NSNumber)?.doubleValue ?? 0
+            let kbps = track.duration > 1 ? Int(bytes * 8 / track.duration / 1000) : 0
+            state.localKbps = kbps
+            state.localInTier = kbps > 0 ? AudioCache.inTier(kbps) : nil
             phone.playFile(file, tag: tag, duration: track.duration)
         } else if !videoId.isEmpty && (serverCached.contains(videoId) || !serverMapLoaded) {
             playRoute = AudioCache.isWarm(videoId) ? "warm asset" : "stream"
