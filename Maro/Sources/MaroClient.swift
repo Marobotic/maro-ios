@@ -22,6 +22,11 @@ final class MaroClient: @unchecked Sendable {
         URL(string: base + "/audio/" + escape(videoId))!
     }
 
+    /** One exact stored copy ("max.m4a"); the bytes behind it never change. */
+    static func audioURL(_ videoId: String, copy: String) -> URL {
+        URL(string: base + "/audio/" + escape(videoId) + "?f=" + escape(copy))!
+    }
+
     static func escape(_ s: String) -> String {
         s.addingPercentEncoding(withAllowedCharacters: .alphanumerics.union(CharacterSet(charactersIn: "-._~"))) ?? s
     }
@@ -174,6 +179,24 @@ final class MaroClient: @unchecked Sendable {
     }
 
     /** Which tracks the droplet can already stream, or nil when unreachable. */
+    /**
+     * Which stored copy each song plays as at `tier`: the best at or below it,
+     * else the original. Nil when the droplet cannot be reached.
+     */
+    func variants(_ ids: [String], tier: String) async -> [String: AudioCache.Variant]? {
+        guard !ids.isEmpty else { return [:] }
+        let path = "/variants?ids=" + Self.escape(ids.prefix(150).joined(separator: ","))
+            + "&q=" + Self.escape(tier)
+        guard let resp = try? await call("GET", path, timeout: 8) else { return nil }
+        var out: [String: AudioCache.Variant] = [:]
+        for (id, value) in resp.obj("variants") ?? [:] {
+            guard let v = value as? JSON else { continue }
+            out[id] = AudioCache.Variant(name: v.str("variant"), kbps: v.int("kbps"),
+                                         inTier: v.bool("inTier"), tier: tier, at: 0)
+        }
+        return out
+    }
+
     func trackMap() async -> TrackMap? {
         guard let resp = try? await call("GET", "/map", timeout: 15), let map = resp.obj("map") else { return nil }
         var out: [String: String] = [:]

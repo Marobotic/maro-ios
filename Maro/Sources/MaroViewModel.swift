@@ -129,6 +129,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
 
     init() {
         AudioCache.session = { [client] in client.session }
+        AudioCache.client = client
+        AudioCache.tier = { [weak self] in self?.state.quality ?? "max" }
         ArtLoader.shared.client = client
         Omp.customPhoneName = prefs.string(forKey: "deviceName") ?? ""
         var s = UiState()
@@ -767,7 +769,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             if tag != playTag { return }
             if ready {
                 playRoute = "engine"
-                phone.playStream(videoId, tag: tag, duration: job.track.duration)
+                playStreamAtTier(videoId, tag: tag, duration: job.track.duration)
             } else {
                 // No match on either provider, or the upload failed: skip
                 // this song rather than leave the player paused on it.
@@ -837,14 +839,46 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         let videoId = videoIdOf(track)
         if let file = localFiles[videoId], FileManager.default.fileExists(atPath: file.path) {
             playRoute = "file"
+            state.localKbps = 0
+            state.localInTier = nil
             phone.playFile(file, tag: tag, duration: track.duration)
         } else if !videoId.isEmpty && (serverCached.contains(videoId) || !serverMapLoaded) {
             playRoute = AudioCache.isWarm(videoId) ? "warm asset" : "stream"
-            phone.playStream(videoId, tag: tag, duration: track.duration)
+            playStreamAtTier(videoId, tag: tag, duration: track.duration)
         } else {
             playRoute = "engine"
             phone.stop()
             requestCloud(videoId.isEmpty ? track : track.with(videoId: videoId), .play(tag: tag))
+        }
+    }
+
+    /**
+     * Stream the copy at the tier chosen in Settings - or the best below it,
+     * which is what the droplet answers when it has nothing at the tier yet.
+     * A song seen on screen has been asked already; one that has not waits at
+     * most a moment for the answer, then plays the original.
+     */
+    private func playStreamAtTier(_ videoId: String, tag: Int, duration: Double) {
+        func go() {
+            guard tag == playTag else { return }
+            let v = AudioCache.variant(videoId)
+            state.localKbps = v?.kbps ?? 0
+            state.localInTier = v?.inTier
+            phone.playStream(videoId, tag: tag, duration: duration)
+        }
+        if AudioCache.variant(videoId) != nil { return go() }
+        Task { @MainActor in
+            let ask = Task { @MainActor in await AudioCache.lookup([videoId]) }
+            let timeout = Task { try? await Task.sleep(nanoseconds: 1_500_000_000) }
+            // Whichever finishes first: the answer, or a second and a half.
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask { await ask.value }
+                group.addTask { await timeout.value }
+                await group.next()
+                group.cancelAll()
+            }
+            timeout.cancel()
+            go()
         }
     }
 
@@ -862,11 +896,12 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     private func warm(_ tracks: [Track]) {
         let now = uptime()
         var ask: [JSON] = []
+        var onDroplet: [Track] = []
         for t in tracks where !t.id.isEmpty {
             let videoId = videoIdOf(t)
             if !videoId.isEmpty && localFiles[videoId] != nil { continue }
             if !videoId.isEmpty && serverCached.contains(videoId) {
-                AudioCache.precache(videoId)
+                onDroplet.append(t.with(videoId: videoId))
                 continue
             }
             // Asked once: the engine works through every ask and the droplet
@@ -879,6 +914,29 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             ask.append(["requestId": requestId, "track": track.toJSON()])
         }
         if !ask.isEmpty { send("cloud.prepare", ["priority": "warm", "tracks": ask]) }
+        if !onDroplet.isEmpty { warmAtTier(onDroplet) }
+    }
+
+    /**
+     * Songs the droplet already holds: find which copy each plays as at the
+     * chosen tier, have the droplet fetch the tier for any below it, and warm
+     * whichever copy plays now. Seen songs only - the rows on screen and the
+     * next few in the queue.
+     */
+    private func warmAtTier(_ tracks: [Track]) {
+        Task { @MainActor in
+            await AudioCache.lookup(tracks.map { $0.videoId })
+            let rung = AudioCache.rung()
+            var below: [JSON] = []
+            for t in tracks where AudioCache.variant(t.videoId)?.inTier == false {
+                let mark = t.id + ":" + rung
+                if warmAsked[mark] != nil { continue }
+                warmAsked[mark] = uptime()
+                below.append(["requestId": UUID().uuidString.lowercased(), "track": t.toJSON()])
+            }
+            if !below.isEmpty { send("cloud.prepare", ["priority": "warm", "quality": rung, "tracks": below]) }
+            for t in tracks { AudioCache.precache(t.videoId) }
+        }
     }
 
     /** The rows on screen settled: get them ready to play at a tap. */

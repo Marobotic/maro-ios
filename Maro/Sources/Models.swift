@@ -243,6 +243,9 @@ struct UiState: Equatable {
 
     // Settings
     var quality = "normal"
+    /** What the copy playing on this phone measures, and whether it is the tier chosen. */
+    var localKbps = 0
+    var localInTier: Bool?
     var downloadQuality = "max"
     var savingOffline = true
     var playbackSource = "auto"

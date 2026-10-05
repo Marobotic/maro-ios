@@ -21,6 +21,10 @@ enum Omp {
     static let spotify = Color(hex: 0x1DB954)
     static let ytm = Color(hex: 0xFF0033)
     static let maro = Color(hex: 0x8A63D2)
+    // The playing copy's bitrate against the tier chosen in Settings: at it,
+    // or below it while the droplet fetches it. The same colours as desktop.
+    static let qualityGood = Color(hex: 0x6FBF73)
+    static let qualityWait = Color(hex: 0xE0B252)
 
     /** Accent of the running Omarchy theme (Dotrb). */
     static let themeAccent = Color(hex: 0xB14242)

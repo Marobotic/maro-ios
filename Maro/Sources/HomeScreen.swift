@@ -234,7 +234,18 @@ private struct NowPlayingRow: View {
                 } else if let track {
                     let meta = [track.album, Omp.originLabel(state.origin), state.queueName.isEmpty ? "" : "in \(state.queueName)"]
                         .filter { !$0.isEmpty }.joined(separator: "  ·  ")
-                    if !meta.isEmpty { OmpText(meta, size: Omp.TypeSize.caption, color: Omp.muted) }
+                    // The bitrate of the copy this phone is playing - what the
+                    // file measures on the droplet, not the tier asked for.
+                    let kbps = state.localKbps > 0 && track.id == state.localTrack?.id ? state.localKbps : 0
+                    if !meta.isEmpty || kbps > 0 {
+                        HStack(spacing: 0) {
+                            if !meta.isEmpty { OmpText(meta, size: Omp.TypeSize.caption, color: Omp.muted) }
+                            if kbps > 0 {
+                                OmpText((meta.isEmpty ? "" : "  ·  ") + "\(kbps) kbps", size: Omp.TypeSize.caption,
+                                        color: state.localInTier == false ? Omp.qualityWait : Omp.qualityGood)
+                            }
+                        }
+                    }
                 }
             }
         }

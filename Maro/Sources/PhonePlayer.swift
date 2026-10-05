@@ -15,24 +15,82 @@ import UIKit
 @MainActor
 enum AudioCache {
     static var session: () -> String? = { nil }
+    static var tier: () -> String = { "max" }
+    static var client: MaroClient?
+
+    /**
+     * Which stored copy of a song the droplet plays at the chosen tier: the
+     * best at or below it, else the original. The droplet keeps one copy per
+     * bitrate; `name` is the file ("m4a" is the original, "max.m4a" an
+     * upgrade) and `kbps` what it measures - the number the player shows.
+     */
+    struct Variant: Equatable, Sendable {
+        let name: String
+        let kbps: Int
+        let inTier: Bool
+        let tier: String
+        var at: Double
+    }
+
+    private static var variants: [String: Variant] = [:]
+
+    /** The tier as a rung the droplet stores: Spotify's 320 has no YouTube copy. */
+    static func rung() -> String {
+        let t = tier()
+        return t.isEmpty || t == "spotify" ? "max" : t
+    }
+
+    static func variant(_ videoId: String) -> Variant? {
+        guard let v = variants[videoId], v.tier == rung() else { return nil }
+        return v
+    }
+
+    /** Ask which copy each song plays as; songs asked recently are skipped. */
+    static func lookup(_ ids: [String], maxAge: Double = 120) async {
+        let now = Date().timeIntervalSince1970
+        let want = Array(Set(ids.filter { id in
+            !id.isEmpty && (variant(id).map { now - $0.at > maxAge } ?? true)
+        }))
+        guard !want.isEmpty, let client else { return }
+        let rung = rung()
+        if let found = await client.variants(want, tier: rung) {
+            for (id, var v) in found {
+                v.at = now
+                variants[id] = v
+            }
+        }
+    }
+
+    /** Key of the asset for the copy that plays now: a new copy is a new key. */
+    private static func key(_ videoId: String) -> String {
+        guard let v = variant(videoId), v.name.contains(".") else { return videoId }
+        return videoId + "/" + v.name
+    }
 
     private static var warmed: [String: AVURLAsset] = [:]
     private static var warmOrder: [String] = []
     private static let warmLimit = 16
 
     static func asset(_ videoId: String) -> AVURLAsset {
-        if let asset = warmed[videoId] { return asset }
+        if let asset = warmed[key(videoId)] { return asset }
         var headers: [String: String] = [:]
         if let token = session(), !token.isEmpty { headers["Authorization"] = "Bearer \(token)" }
-        return AVURLAsset(url: MaroClient.audioURL(videoId), options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
+        let url: URL
+        if let v = variant(videoId), v.name.contains(".") {
+            url = MaroClient.audioURL(videoId, copy: v.name)
+        } else {
+            url = MaroClient.audioURL(videoId)
+        }
+        return AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
     }
 
-    static func isWarm(_ videoId: String) -> Bool { warmed[videoId] != nil }
+    static func isWarm(_ videoId: String) -> Bool { warmed[key(videoId)] != nil }
 
     /** Load the start of a song in the background, once. */
     static func precache(_ videoId: String) {
-        guard !videoId.isEmpty, warmed[videoId] == nil else { return }
+        guard !videoId.isEmpty, warmed[key(videoId)] == nil else { return }
         let asset = asset(videoId)
+        let videoId = key(videoId)
         warmed[videoId] = asset
         warmOrder.append(videoId)
         if warmOrder.count > warmLimit { warmed.removeValue(forKey: warmOrder.removeFirst()) }
@@ -43,8 +101,10 @@ enum AudioCache {
     }
 
     static func forget(_ videoId: String) {
-        warmed.removeValue(forKey: videoId)
-        warmOrder.removeAll { $0 == videoId }
+        for k in [videoId, key(videoId)] {
+            warmed.removeValue(forKey: k)
+            warmOrder.removeAll { $0 == k }
+        }
     }
 
     static func clear() {
