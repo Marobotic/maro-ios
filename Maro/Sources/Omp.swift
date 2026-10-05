@@ -134,7 +134,9 @@ enum Omp {
         case "offline": return "Offline"
         case "ytm": return "YouTube Music"
         case "ytm-guest": return "YouTube · guest"
-        case "phone": return "This phone"
+        // "phone" says nothing: this phone playing is the normal case, and the
+        // line under the title is for where the audio comes from otherwise.
+        case "phone": return ""
         default: return ""
         }
     }
