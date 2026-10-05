@@ -1471,13 +1471,54 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         showStatus("\(service) link copied", "ok")
     }
 
+    /** Whether this song is in the queue the user is looking at. */
+    func isQueued(_ t: Track) -> Bool {
+        let queue = isPhone ? state.localQueue : state.queue
+        return !t.id.isEmpty && queue.contains { $0.id == t.id }
+    }
+
+    /**
+     * One song, tapped outside a list - search, Recent. It plays now and joins
+     * the queue right after the current song; the queue itself stays. A queue
+     * is only replaced by playing another list, or emptied by Clear all.
+     */
+    func playSingle(_ t: Track) {
+        if t.id.isEmpty { return }
+        if !isPhone {
+            remote("playtrack", ["track": t.toJSON()])
+            return
+        }
+        var queue = state.localQueue
+        let index: Int
+        if queue.isEmpty {
+            queue.append(giveVideoId(t))
+            index = 0
+        } else if let at = queue.firstIndex(where: { $0.id == t.id }) {
+            index = at
+        } else {
+            index = min(max(state.localQueueIndex + 1, 0), queue.count)
+            queue.insert(giveVideoId(t), at: index)
+        }
+        playLocalQueue(queue, index, name: state.localQueue.isEmpty ? t.title : state.localQueueName)
+    }
+
     func queueNext(_ t: Track) {
         if t.id.isEmpty { return }
         if isPhone {
             let t2 = giveVideoId(t)
             var queue = state.localQueue
-            queue.insert(t2, at: min(max(state.localQueueIndex + 1, 0), queue.count))
+            var index = state.localQueueIndex
+            // Already queued: move it to play next instead of adding a copy.
+            if let at = queue.firstIndex(where: { $0.id == t2.id }) {
+                if at == index { return }
+                let item = queue.remove(at: at)
+                if at < index { index -= 1 }
+                queue.insert(item, at: min(max(index + 1, 0), queue.count))
+            } else {
+                queue.insert(t2, at: min(max(index + 1, 0), queue.count))
+            }
             state.localQueue = queue
+            state.localQueueIndex = index
             warm([t2])
             showStatus("Playing next: \(t.title)", "ok")
             return
@@ -1488,7 +1529,13 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
 
     func addToQueue(_ t: Track) {
         if t.id.isEmpty { return }
-        if isPhone { state.localQueue.append(giveVideoId(t)) } else { remote("queue.add", ["track": t.toJSON()]) }
+        if isPhone {
+            // Already queued: nothing to add.
+            if state.localQueue.contains(where: { $0.id == t.id }) { return }
+            state.localQueue.append(giveVideoId(t))
+        } else {
+            remote("queue.add", ["track": t.toJSON()])
+        }
         showStatus("Added to queue: \(t.title)", "ok")
     }
 
@@ -1959,6 +2006,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         case "play.queue": playQueueIndex(p.int("index") + offset)
         case "queue.add": addToQueue(Track.from(p.obj("track")))
         case "queue.addNext": queueNext(Track.from(p.obj("track")))
+        case "playtrack": playSingle(Track.from(p.obj("track")))
         case "queue.remove": removeQueueIndex(p.int("index") + offset)
         case "queue.move": moveQueue(p.int("from") + offset, p.int("to") + offset)
         case "queue.clear": clearQueue()

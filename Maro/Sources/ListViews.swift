@@ -57,9 +57,12 @@ final class VisibleRows: ObservableObject {
 
 @MainActor
 private func trackMenu(_ track: Track, liked: Bool, vm: MaroViewModel) -> OmpDialog {
+    // "Add to queue" only for a song that is not queued yet; "Play next" moves one that is.
     .menu(title: track.title.ifBlank(track.id), items: [
         .init(icon: Omp.Icons.add, label: "Play next") { vm.queueNext(track) },
+    ] + (vm.isQueued(track) ? [] : [
         .init(icon: Omp.Icons.list, label: "Add to queue") { vm.addToQueue(track) },
+    ]) + [
         .init(icon: Omp.Icons.cloud, label: "Save offline") { vm.saveOffline(track) },
         .init(icon: Omp.Icons.paintbrush, label: "Download artwork") { vm.artFetch(track.artKey.ifBlank(track.id)) },
         .init(icon: liked ? Omp.Icons.like : Omp.Icons.likeFull, label: liked ? "Unlike" : "Like") { vm.likeTrack(track) },
@@ -420,7 +423,7 @@ private struct RecentView: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-            )) { i, t in vm.playTrack(t, context: state.recent, name: "Recently played", index: i) }
+            )) { _, t in vm.playSingle(t) }
         }
     }
 }
@@ -529,8 +532,8 @@ private struct SearchView: View {
             } else if state.searchResults.isEmpty {
                 Empty(message: "Type a query, then hit enter")
             } else {
-                TrackList(tracks: state.searchResults, state: state, vm: vm) { i, t in
-                    vm.playTrack(t, context: state.searchResults, name: "Search", index: i)
+                TrackList(tracks: state.searchResults, state: state, vm: vm) { _, t in
+                    vm.playSingle(t)
                 }
             }
         }
