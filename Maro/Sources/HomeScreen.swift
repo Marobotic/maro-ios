@@ -105,6 +105,18 @@ struct HomeScreen: View {
                     .padding(.horizontal, metrics.pt(4))
                 }
             }
+            // "?": over everything, under the top bar. Not modal - taps
+            // outside go through - so only its button opens and closes it.
+            .overlay(alignment: .topTrailing) {
+                if state.statsOpen && !state.settingsOpen {
+                    StatsPanel(state: shown, vm: vm)
+                        .frame(maxWidth: min(pane, metrics.pt(340)))
+                        .padding(.top, metrics.pt(44))
+                        .padding(.horizontal, metrics.pt(8))
+                        .frame(width: landscape ? pane : nil, alignment: .trailing)
+                        .frame(maxWidth: .infinity, alignment: landscape ? .leading : .trailing)
+                }
+            }
             .environment(\.omp, metrics)
         }
         .environment(\.presentDialog, { dialog = $0 })
@@ -159,6 +171,14 @@ private struct AccountStrip: View {
                 ]))
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            // "?": which service is really playing, how it got here, how well.
+            OmpButton(
+                icon: Omp.Icons.question,
+                selected: vm.state.statsOpen,
+                foreground: vm.state.statsOpen ? serviceColor(state.playingService) : Omp.foreground,
+                vertical: 6,
+                horizontal: 8
+            ) { vm.toggleStats() }
             // Where the music plays, one tap away. Not there while this phone
             // plays on its own.
             if !state.solo {
@@ -202,6 +222,155 @@ private struct OfflineLine: View {
     }
 }
 
+func serviceColor(_ service: String) -> Color {
+    switch service {
+    case "youtube": return Omp.ytm
+    case "spotify": return Omp.spotify
+    default: return Omp.themeAccent
+    }
+}
+
+/**
+ * The "?" panel: the service really playing, the hop when the song is from
+ * another one, how the audio arrives, the copy's per-second bitrate as a graph
+ * with the playhead, and the numbers behind it.
+ */
+private struct StatsPanel: View {
+    @Environment(\.omp) private var m
+    let state: UiState
+    @ObservedObject var vm: MaroViewModel
+
+    private var wantKbps: Int {
+        switch state.quality {
+        case "max": return 256
+        case "high": return 160
+        case "normal": return 128
+        case "low": return 64
+        default: return 0
+        }
+    }
+
+    private func rows(second: Int, duration: Double) -> [(String, String)] {
+        let track = state.track
+        let line = state.audioTimeline.filter { $0 > 0 }
+        let live: Int = {
+            if second >= 0 && second < state.audioTimeline.count, state.audioTimeline[second] > 0 {
+                return state.audioTimeline[second]
+            }
+            return state.audioKbps
+        }()
+        var out: [(String, String)] = []
+        if let track {
+            out.append(("Song", track.title + (track.artist.isEmpty ? "" : " — " + track.artist)))
+            out.append(("From", track.source == "spotify" ? "Spotify library"
+                                : track.source == "ytm" ? "YouTube Music library" : track.source))
+        } else {
+            out.append(("Song", "—"))
+        }
+        let delivery: String
+        switch state.audioRoute {
+        case "file": delivery = "Saved on this phone"
+        case "warm asset": delivery = "Start cached on this phone, rest streaming"
+        case "stream": delivery = "Streaming from your server"
+        case "engine": delivery = "Streaming, resolved by your server"
+        case "download": delivery = "Downloading to this phone"
+        case "remote": delivery = "Playing on " + state.playingDeviceName
+        default: delivery = "—"
+        }
+        out.append(("Delivery", delivery))
+        out.append(("Copy", state.audioCopy.isEmpty ? (state.audioVideoId.isEmpty ? "—" : "original") : state.audioCopy))
+        out.append(("Bitrate now", live > 0 ? "\(live) kbps" : "—"))
+        if !line.isEmpty {
+            let avg = Int((Double(line.reduce(0, +)) / Double(line.count)).rounded())
+            out.append(("Avg / low / peak", "\(avg) / \(line.min() ?? 0) / \(line.max() ?? 0) kbps"))
+        }
+        let tier = state.audioInTier == true ? " · at it" : state.audioInTier == false ? " · below it" : ""
+        out.append(("Quality", "asked for " + state.quality + tier))
+        out.append(("Position", Omp.fmtTime(Double(second)) + " / " + Omp.fmtTime(duration)))
+        out.append(("This device", state.deviceName.isEmpty ? "—" : state.deviceName))
+        out.append(("Playing on", state.playingDeviceName))
+        out.append(("Mode", state.solo ? "This phone only" : "Shared player"))
+        if !state.audioVideoId.isEmpty { out.append(("YouTube id", state.audioVideoId)) }
+        if let sid = track?.sourceId, !sid.isEmpty, sid != state.audioVideoId { out.append(("Spotify id", sid)) }
+        return out
+    }
+
+    var body: some View {
+        let progress = vm.progress
+        let service = state.playingService
+        let tint = serviceColor(service)
+        let shape = RoundedRectangle(cornerRadius: m.pt(Omp.labelGap))
+        TimelineView(.periodic(from: .now, by: progress.playing ? 0.5 : 3600)) { _ in
+            let second = Int(progress.at(uptime()))
+            let duration = progress.duration > 0 ? progress.duration : (state.track?.duration ?? 0)
+            VStack(alignment: .leading, spacing: m.pt(6)) {
+                HStack(spacing: m.pt(8)) {
+                    Circle().fill(tint).frame(width: m.pt(10), height: m.pt(10))
+                    OmpText(service == "youtube" ? "YouTube Music" : service == "spotify" ? "Spotify" : "Nothing playing",
+                            size: Omp.TypeSize.body, color: tint, bold: true)
+                }
+                if !state.gateText.isEmpty {
+                    OmpText("Couldn't play: " + state.gateText, size: Omp.TypeSize.caption, color: Omp.urgent, maxLines: 3)
+                } else if service == "youtube" && state.track?.source == "spotify" {
+                    OmpText("This is a Spotify song, playing YouTube Music's copy of it.",
+                            size: Omp.TypeSize.caption, color: Omp.muted, maxLines: 3)
+                }
+                BitrateGraph(line: state.audioTimeline, second: second, want: wantKbps, tint: tint)
+                    .frame(height: m.pt(80))
+                ForEach(Array(rows(second: second, duration: duration).enumerated()), id: \.offset) { _, row in
+                    HStack(alignment: .top, spacing: m.pt(8)) {
+                        OmpText(row.0, size: Omp.TypeSize.caption, color: Omp.muted)
+                            .frame(width: m.pt(100), alignment: .leading)
+                        OmpText(row.1, size: Omp.TypeSize.caption,
+                                color: row.0 == "Bitrate now" && state.audioInTier == false ? Omp.qualityWait : Omp.foreground,
+                                maxLines: 2)
+                        Spacer(minLength: 0)
+                    }
+                }
+            }
+            .padding(m.pt(10))
+            .background(Omp.card)
+            .clipShape(shape)
+            .overlay(shape.stroke(tint, lineWidth: 1))
+        }
+    }
+}
+
+/** Per-second kbps bars, brighter up to the playhead; dashed at the tier chosen. */
+private struct BitrateGraph: View {
+    let line: [Int]
+    let second: Int
+    let want: Int
+    let tint: Color
+
+    var body: some View {
+        ZStack {
+            Canvas { ctx, size in
+                ctx.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Omp.foreground.opacity(0.05)))
+                guard !line.isEmpty else { return }
+                let top = CGFloat(max(line.max() ?? 1, want, 1)) * 1.1
+                let bw = size.width / CGFloat(line.count)
+                for (i, k) in line.enumerated() {
+                    let bh = CGFloat(k) / top * size.height
+                    let rect = CGRect(x: CGFloat(i) * bw, y: size.height - bh, width: max(1, bw - 0.5), height: bh)
+                    ctx.fill(Path(rect), with: .color(tint.opacity(i <= second ? 0.85 : 0.30)))
+                }
+                if want > 0 {
+                    let y = size.height - CGFloat(want) / top * size.height
+                    var p = Path(); p.move(to: CGPoint(x: 0, y: y)); p.addLine(to: CGPoint(x: size.width, y: y))
+                    ctx.stroke(p, with: .color(Omp.foreground.opacity(0.5)), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                }
+                let x = min(size.width - 1, CGFloat(second) / CGFloat(line.count) * size.width)
+                var h = Path(); h.move(to: CGPoint(x: x, y: 0)); h.addLine(to: CGPoint(x: x, y: size.height))
+                ctx.stroke(h, with: .color(Omp.foreground), lineWidth: 1)
+            }
+            if line.isEmpty {
+                OmpText("No bitrate data yet", size: Omp.TypeSize.caption, color: Omp.muted)
+            }
+        }
+    }
+}
+
 /**
  * The bitrate of what is sounding, at this second of the song, on whichever
  * device is playing it: the droplet's per-second kbps of that exact copy, read
@@ -235,12 +404,20 @@ private struct NowPlayingRow: View {
     var body: some View {
         let track = state.track
         HStack(spacing: m.pt(10)) {
+            // The border is the service the sound is really from: red YouTube,
+            // green Spotify - the same colour as the playing row.
             CoverArt(
                 artKey: track?.artKey ?? "",
                 artUrl: track?.artUrl ?? "",
                 icon: Omp.sourceIcon(track?.source ?? ""),
                 size: Omp.nowArt,
                 busy: track.map { state.artworkProgress[$0.artKey] != nil } ?? false
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: m.pt(Omp.labelGap))
+                    .stroke(track != nil && !state.playingService.isEmpty
+                            ? serviceColor(state.playingService) : Color.clear,
+                            lineWidth: m.pt(2))
             )
             VStack(alignment: .leading, spacing: m.pt(2)) {
                 HStack(spacing: m.pt(6)) {
@@ -257,8 +434,9 @@ private struct NowPlayingRow: View {
                         OmpText(state.loadingStage.ifBlank("Loading…"), size: Omp.TypeSize.caption, color: Omp.accent)
                     }
                 } else if let track {
-                    let meta = [track.album, Omp.originLabel(state.origin)]
-                        .filter { !$0.isEmpty }.joined(separator: "  ·  ")
+                    // No platform word: it named where the song is from, not
+                    // where the sound is. The cover border and "?" say that.
+                    let meta = track.album
                     HStack(spacing: 0) {
                         if !meta.isEmpty { OmpText(meta, size: Omp.TypeSize.caption, color: Omp.muted) }
                         LiveBitrate(state: state, vm: vm, separator: !meta.isEmpty)

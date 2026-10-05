@@ -187,7 +187,12 @@ private struct QueueRow: View {
     let onMenu: () -> Void
 
     var body: some View {
-        let tint = Omp.sourceColor(isCurrent && track.viaYoutube ? "ytm" : track.source)
+        // The playing row says where the sound really comes from; the others
+        // say where the song is from.
+        let sounding = isCurrent ? vm.state.playingService : ""
+        let tint = sounding == "youtube" ? Omp.ytm
+            : sounding == "spotify" ? Omp.spotify
+            : Omp.sourceColor(isCurrent && track.viaYoutube ? "ytm" : track.source)
         let shape = RoundedRectangle(cornerRadius: m.pt(Omp.labelGap))
         HStack(spacing: m.pt(8)) {
             CoverArt(artKey: track.artKey, artUrl: track.artUrl, icon: Omp.sourceIcon(track.source), size: Omp.rowArt)
@@ -473,7 +478,12 @@ private struct TrackRow: View {
     let onMenu: () -> Void
 
     var body: some View {
-        let tint = Omp.sourceColor(isCurrent && track.viaYoutube ? "ytm" : track.source)
+        // The playing row says where the sound really comes from; the others
+        // say where the song is from.
+        let sounding = isCurrent ? vm.state.playingService : ""
+        let tint = sounding == "youtube" ? Omp.ytm
+            : sounding == "spotify" ? Omp.spotify
+            : Omp.sourceColor(isCurrent && track.viaYoutube ? "ytm" : track.source)
         let shape = RoundedRectangle(cornerRadius: m.pt(Omp.labelGap))
         let line: String = {
             if !available { return "not on this phone" }

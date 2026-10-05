@@ -449,7 +449,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             // shows the bitrate of the copy that device is playing.
             if let a = doc.obj("audio"), !a.str("videoId").isEmpty {
                 setSounding(a.str("videoId"), copy: a.str("copy"), kbps: a.int("kbps"),
-                            inTier: a["inTier"] as? Bool)
+                            inTier: a["inTier"] as? Bool, route: "remote")
             } else {
                 // The playing device did not say: nothing, not the last song's number.
                 setSounding("", copy: "", kbps: 0, inTier: nil)
@@ -911,9 +911,11 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
      * droplet once. Called for this phone's own playback and, from the shared
      * player, for whatever another device is playing.
      */
-    private func setSounding(_ videoId: String, copy: String, kbps: Int, inTier: Bool?) {
+    private func setSounding(_ videoId: String, copy: String, kbps: Int, inTier: Bool?, route: String? = nil) {
         let key = videoId + "/" + copy
         let known = timelines[key] ?? []
+        let how = videoId.isEmpty ? "" : (route ?? playRoute)
+        if state.audioRoute != how { state.audioRoute = how }
         if state.audioVideoId != videoId || state.audioCopy != copy || state.audioKbps != kbps
             || state.audioInTier != inTier || state.audioTimeline != known {
             state.audioVideoId = videoId
@@ -2106,6 +2108,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     // -- view ---------------------------------------------------------------
 
     func selectTab(_ key: String) { state.view = key }
+
+    func toggleStats() { state.statsOpen.toggle() }
 
     func toggleSettings() {
         state.settingsOpen.toggle()

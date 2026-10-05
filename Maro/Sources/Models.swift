@@ -254,6 +254,12 @@ struct UiState: Equatable {
     var audioKbps = 0
     var audioInTier: Bool?
     var audioTimeline: [Int] = []
+    /**
+     * How the sounding copy reaches the device playing it: "file" (saved on
+     * this phone), "warm asset", "stream", "engine", "download", or "remote"
+     * (another device plays it). For the stats panel.
+     */
+    var audioRoute = ""
     var downloadQuality = "max"
     var savingOffline = true
     var playbackSource = "auto"
@@ -314,6 +320,8 @@ struct UiState: Equatable {
     // View
     var view = Sync.viewQueue
     var settingsOpen = false
+    /** The "?" stats panel. Opened and closed by its button only. */
+    var statsOpen = false
 
     // Status footer
     var statusMsg = ""
@@ -346,6 +354,25 @@ struct UiState: Equatable {
         if playbackMode == .standalonePhone { return myDeviceId }
         if !playbackTarget.isEmpty && devices.contains(where: { $0.id == playbackTarget && $0.connected }) { return playbackTarget }
         return devices.first { $0.kind == "desktop" && $0.connected }?.id ?? ""
+    }
+
+    /**
+     * The service the sound is really from: "youtube", "spotify", or "".
+     *
+     * Not the row's own source. Every copy a phone or the Windows app plays is
+     * the droplet's, and the droplet's only audio is YouTube's - so a Spotify
+     * song is YouTube's copy of it, and drawing it green said otherwise. Only
+     * a desktop playing through Spotify itself reports "spotify".
+     */
+    var playingService: String {
+        if origin == "spotify" { return "spotify" }
+        if !audioVideoId.isEmpty { return "youtube" }
+        if ["ytm", "ytm-guest", "offline", "phone", "server", "droplet"].contains(origin) { return "youtube" }
+        guard let track else { return "" }
+        if track.viaYoutube { return "youtube" }
+        if track.source == "spotify" { return "spotify" }
+        if track.source == "ytm" { return "youtube" }
+        return ""
     }
 
     var playingDeviceName: String {
