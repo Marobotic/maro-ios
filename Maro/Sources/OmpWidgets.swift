@@ -63,15 +63,54 @@ struct OmpIcon: View {
 
 /** Rotating refresh glyph - the plugin's "waiting" spinner. */
 struct OmpSpinner: View {
+    @Environment(\.omp) private var m
     var size: CGFloat = Omp.TypeSize.caption
     var color: Color = Omp.accent
     @State private var spinning = false
 
+    // Drawn rather than taken from the font. The refresh glyph sits off-centre
+    // in its text box (padded with a space so iOS does not clip it), so
+    // rotating the box swung the arrows round a point beside them, in an oval.
+    // Drawn in a square, the centre of the circle is the centre of the turn.
     var body: some View {
-        OmpIcon(Omp.Icons.refresh, size: size, color: color)
+        let side = m.pt(size)
+        SpinnerArrow(color: color)
+            .frame(width: side, height: side)
             .rotationEffect(.degrees(spinning ? 360 : 0))
             .animation(.linear(duration: 1.1).repeatForever(autoreverses: false), value: spinning)
             .onAppear { spinning = true }
+    }
+}
+
+/** An open circle with an arrowhead at the end of its sweep. */
+private struct SpinnerArrow: View {
+    var color: Color
+
+    var body: some View {
+        GeometryReader { geo in
+            let d = min(geo.size.width, geo.size.height)
+            let stroke = d * 0.12
+            let r = d / 2 - stroke / 2 - d * 0.1
+            let c = CGPoint(x: geo.size.width / 2, y: geo.size.height / 2)
+            let a = 290.0 * Double.pi / 180
+            let tip = CGPoint(x: c.x + r * CGFloat(cos(a)), y: c.y + r * CGFloat(sin(a)))
+            let t = CGPoint(x: -CGFloat(sin(a)), y: CGFloat(cos(a)))
+            let n = CGPoint(x: CGFloat(cos(a)), y: CGFloat(sin(a)))
+            let h = stroke * 1.9
+            ZStack {
+                Path { p in
+                    p.addArc(center: c, radius: r, startAngle: .degrees(0), endAngle: .degrees(290), clockwise: false)
+                }
+                .stroke(color, style: StrokeStyle(lineWidth: stroke, lineCap: .round))
+                Path { p in
+                    p.move(to: CGPoint(x: tip.x + t.x * h, y: tip.y + t.y * h))
+                    p.addLine(to: CGPoint(x: tip.x + n.x * h, y: tip.y + n.y * h))
+                    p.addLine(to: CGPoint(x: tip.x - n.x * h, y: tip.y - n.y * h))
+                    p.closeSubpath()
+                }
+                .fill(color)
+            }
+        }
     }
 }
 
