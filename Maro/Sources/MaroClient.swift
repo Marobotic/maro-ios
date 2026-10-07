@@ -213,6 +213,20 @@ final class MaroClient: @unchecked Sendable {
         return TrackMap(map: out, cached: Set(cached))
     }
 
+    /**
+     * Forgot password: the account server mails a reset link to a page on
+     * marobotic.dev (the same answer for any email). nil on success, else the reason.
+     */
+    func forgotPassword(_ user: String) async -> String? {
+        do {
+            let resp = try await call("POST", "/auth/forgot", body: ["email": user, "app": "music"], timeout: 20)
+            let err = resp.str("error")
+            return err.isEmpty ? nil : err
+        } catch {
+            return "Can't reach the account server. Check your connection."
+        }
+    }
+
     func register(_ user: String, _ pass: String) async -> Bool { await authenticate("/auth/register", user, pass) }
 
     func login(_ user: String, _ pass: String) async -> Bool { await authenticate("/auth/login", user, pass) }

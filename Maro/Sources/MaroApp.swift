@@ -27,6 +27,9 @@ struct MaroApp: App {
 struct LoginScreen: View {
     @ObservedObject var vm: MaroViewModel
     @State private var creating = false
+    @State private var forgot = false // "Forgot password?": email only, sends a reset link
+    @State private var notice: String?
+    @State private var sending = false
     @State private var email = ""
     @State private var password = ""
     @State private var confirm = ""
@@ -35,7 +38,7 @@ struct LoginScreen: View {
 
     var body: some View {
         let state = vm.state
-        let error = problem ?? state.error
+        let error = problem ?? (forgot ? nil : state.error)
         ScrollView {
             VStack(spacing: 0) {
                 Image("LaunchNote").resizable().scaledToFit().frame(width: 84, height: 84)
@@ -45,21 +48,41 @@ struct LoginScreen: View {
                 text("Your music, on every device", 14, Omp.muted)
                 Spacer().frame(height: 28)
 
-                modeSwitch
+                if forgot {
+                    text("Forgot your password? Enter your email and we'll send you a link to choose a new one.", 14, Omp.foreground, align: .leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    modeSwitch
+                }
                 Spacer().frame(height: 22)
 
-                field("Email", $email, secure: false, keyboard: .emailAddress)
-                Spacer().frame(height: 14)
-                field("Password", $password, secure: !showPassword, trailing: showPassword ? "Hide" : "Show",
-                      onTrailing: { showPassword.toggle() }, submitsForm: !creating)
-                if creating {
+                field("Email", $email, secure: false, keyboard: .emailAddress, submitsForm: forgot)
+                if !forgot {
                     Spacer().frame(height: 14)
-                    field("Confirm password", $confirm, secure: !showPassword, submitsForm: true)
+                    field("Password", $password, secure: !showPassword, trailing: showPassword ? "Hide" : "Show",
+                          onTrailing: { showPassword.toggle() }, submitsForm: !creating)
+                    if creating {
+                        Spacer().frame(height: 14)
+                        field("Confirm password", $confirm, secure: !showPassword, submitsForm: true)
+                    }
+                    if !creating {
+                        Spacer().frame(height: 10)
+                        Button { setMode(creating: false, forgot: true) } label: {
+                            text("Forgot password?", 13, Omp.muted).padding(.vertical, 4)
+                        }
+                        .buttonStyle(.plain)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                    }
+                    Spacer().frame(height: 8)
+                    text(creating ? "At least 8 characters." : "Use the account your other devices are signed in to.",
+                         12, Omp.muted, align: .leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                Spacer().frame(height: 8)
-                text(creating ? "At least 8 characters." : "Use the account your other devices are signed in to.",
-                     12, Omp.muted, align: .leading)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                if let notice {
+                    Spacer().frame(height: 14)
+                    text(notice, 13, Omp.themeAccent, align: .leading).frame(maxWidth: .infinity, alignment: .leading)
+                }
 
                 if let error {
                     Spacer().frame(height: 14)
@@ -69,25 +92,23 @@ struct LoginScreen: View {
                 Spacer().frame(height: 22)
                 Button(action: submit) {
                     HStack(spacing: 10) {
-                        if state.busy { ProgressView().tint(.white) }
-                        text(state.busy ? (creating ? "Creating account…" : "Signing in…") : (creating ? "Create account" : "Sign in"),
-                             16, .white, bold: true)
+                        if state.busy || sending { ProgressView().tint(.white) }
+                        text(buttonTitle(state.busy), 16, .white, bold: true)
                     }
                     .frame(maxWidth: .infinity)
                     .frame(height: 52)
-                    .background(Omp.themeAccent.opacity(state.busy ? 0.45 : 1), in: RoundedRectangle(cornerRadius: 10))
+                    .background(Omp.themeAccent.opacity(state.busy || sending ? 0.45 : 1), in: RoundedRectangle(cornerRadius: 10))
                 }
                 .buttonStyle(.plain)
-                .disabled(state.busy)
+                .disabled(state.busy || sending)
 
                 Spacer().frame(height: 18)
                 HStack(spacing: 0) {
-                    text(creating ? "Already have an account? " : "New here? ", 14, Omp.muted)
+                    text(forgot ? "Remembered it? " : creating ? "Already have an account? " : "New here? ", 14, Omp.muted)
                     Button {
-                        creating.toggle()
-                        problem = nil
+                        setMode(creating: !creating && !forgot, forgot: false)
                     } label: {
-                        text(creating ? "Sign in" : "Create an account", 14, Omp.themeAccent, bold: true)
+                        text(forgot || creating ? "Sign in" : "Create an account", 14, Omp.themeAccent, bold: true)
                     }
                     .buttonStyle(.plain)
                 }
@@ -101,10 +122,38 @@ struct LoginScreen: View {
         .background(Omp.background.ignoresSafeArea())
     }
 
+    private func buttonTitle(_ busy: Bool) -> String {
+        if forgot { return sending ? "Sending…" : "Send reset link" }
+        return busy ? (creating ? "Creating account…" : "Signing in…") : (creating ? "Create account" : "Sign in")
+    }
+
+    private func setMode(creating: Bool, forgot: Bool) {
+        self.creating = creating
+        self.forgot = forgot
+        problem = nil
+        notice = nil
+    }
+
     // Checked here first, so the common mistakes never make a round trip.
     private func submit() {
-        if vm.state.busy { return }
+        if vm.state.busy || sending { return }
         let e = email.trimmingCharacters(in: .whitespaces)
+        notice = nil
+        if forgot {
+            if e.range(of: #"^[^\s@]+@[^\s@]+\.[^\s@]+$"#, options: .regularExpression) == nil {
+                problem = "Enter a valid email address."
+                return
+            }
+            problem = nil
+            sending = true
+            Task {
+                let err = await vm.forgotPassword(e)
+                problem = err
+                if err == nil { notice = "If \(e) has an account, a reset link is on its way. Open it on any device; it works for one hour." }
+                sending = false
+            }
+            return
+        }
         if e.range(of: #"^[^\s@]+@[^\s@]+\.[^\s@]+$"#, options: .regularExpression) == nil {
             problem = "Enter a valid email address."
         } else if password.count < 8 {

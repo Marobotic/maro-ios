@@ -1179,6 +1179,11 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         authenticate { [client] in await client.login(user.trimmingCharacters(in: .whitespaces), pass) }
     }
 
+    /** Forgot password: nil when the link is on its way, else the reason. */
+    func forgotPassword(_ user: String) async -> String? {
+        await client.forgotPassword(user.trimmingCharacters(in: .whitespaces))
+    }
+
     func register(_ user: String, _ pass: String) {
         authenticate(created: true) { [client] in await client.register(user.trimmingCharacters(in: .whitespaces), pass) }
     }
