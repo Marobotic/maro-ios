@@ -153,7 +153,7 @@ private struct AccountStrip: View {
             switch state.selectedAccount {
             case "spotify": return spotifyName
             case "ytm": return ytmName
-            default: return state.email.ifBlank("Omarchy Music Plugin")
+            default: return state.email.ifBlank("Jukebox")
             }
         }()
         HStack(spacing: m.pt(6)) {
@@ -165,7 +165,7 @@ private struct AccountStrip: View {
                 vertical: 6
             ) {
                 present(.menu(title: "Account", items: [
-                    .init(icon: Omp.Icons.cloud, label: state.email.ifBlank("Omarchy Music Plugin")) { vm.selectAccount("maro") },
+                    .init(icon: Omp.Icons.cloud, label: state.email.ifBlank("Jukebox")) { vm.selectAccount("maro") },
                     .init(icon: Omp.Icons.spotify, label: state.spotifyConnected ? spotifyName : "Spotify not connected") { vm.selectAccount("spotify") },
                     .init(icon: Omp.Icons.ytm, label: state.ytmConnected ? ytmName : "YouTube Music not connected") { vm.selectAccount("ytm") },
                 ]))

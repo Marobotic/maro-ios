@@ -2,7 +2,7 @@ import SwiftUI
 import UIKit
 
 /**
- * One-to-one translation of the Omarchy Music Plugin's design tokens, the
+ * One-to-one translation of Jukebox's design tokens, the
  * same ones the Android app uses.
  *
  * Colour values come from the plugin's Color.qml defaults and Panel.qml:

@@ -17,7 +17,7 @@ struct SettingsPage: View {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     SettingsHead(label: "Your account")
                     SettingsAccountCard(
-                        label: "Omarchy Music Plugin",
+                        label: "Jukebox",
                         icon: Omp.Icons.cloud,
                         value: state.email.ifBlank("Not signed in"),
                         note: "Your library and queue sync here.",

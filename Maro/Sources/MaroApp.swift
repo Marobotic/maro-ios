@@ -43,7 +43,7 @@ struct LoginScreen: View {
             VStack(spacing: 0) {
                 Image("LaunchNote").resizable().scaledToFit().frame(width: 84, height: 84)
                 Spacer().frame(height: 16)
-                text("Omarchy Music Plugin", 22, Omp.foreground, bold: true)
+                text("Jukebox", 22, Omp.foreground, bold: true)
                 Spacer().frame(height: 6)
                 text("Your music, on every device", 14, Omp.muted)
                 Spacer().frame(height: 28)
