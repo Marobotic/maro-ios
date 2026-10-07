@@ -118,6 +118,7 @@ struct LoginScreen: View {
             .padding(.vertical, 32)
             .frame(maxWidth: .infinity, minHeight: UIScreen.main.bounds.height * 0.85)
         }
+        .onAppear { if email.isEmpty { email = vm.state.email } }
         .scrollDismissesKeyboard(.interactively)
         .background(Omp.background.ignoresSafeArea())
     }

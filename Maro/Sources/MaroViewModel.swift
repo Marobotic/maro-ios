@@ -129,6 +129,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
 
     init() {
         AudioCache.session = { [client] in client.session }
+        client.onSessionRejected = { [weak self] in Task { @MainActor in self?.sessionRejected() } }
         AudioCache.client = client
         AudioCache.tier = { [weak self] in self?.state.quality ?? "max" }
         ArtLoader.shared.client = client
@@ -1214,18 +1215,35 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
 
     func logout() {
         Task {
-            phonePlayer?.stop()
-            pending.removeAll()
-            pumpStop = true
-            pump?.cancel()
-            pump = nil
             await client.logout()
-            var fresh = UiState()
-            fresh.myDeviceId = state.myDeviceId
-            fresh.deviceName = state.deviceName
-            state = fresh
-            progress = Progress()
+            resetToSignIn()
         }
+    }
+
+    /**
+     * The droplet turned the saved session away (a password reset signs
+     * every device out): back to the sign-in screen, the email filled in,
+     * instead of carrying on alone with every request refused.
+     */
+    private func sessionRejected() {
+        guard state.signedIn else { return }
+        log.info("session rejected by the droplet; signing in again")
+        resetToSignIn(email: state.email, error: "You were signed out of this account, maybe after a password change. Sign in again.")
+    }
+
+    private func resetToSignIn(email: String = "", error: String? = nil) {
+        phonePlayer?.stop()
+        pending.removeAll()
+        pumpStop = true
+        pump?.cancel()
+        pump = nil
+        var fresh = UiState()
+        fresh.myDeviceId = state.myDeviceId
+        fresh.deviceName = state.deviceName
+        fresh.email = email
+        fresh.error = error
+        state = fresh
+        progress = Progress()
     }
 
     /** The account's own sign-out, through the engine (saves the queue). */

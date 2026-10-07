@@ -36,6 +36,14 @@ final class MaroClient: @unchecked Sendable {
     private var _session: String?
     private var _email: String?
 
+    /**
+     * Called once when the droplet turns this phone's session away (a
+     * password reset signs every device out). Without it the phone kept
+     * polling with a dead session, every answer a 401, and showed only
+     * itself in the device picker. Set once at start-up.
+     */
+    var onSessionRejected: (@Sendable () -> Void)?
+
     let http: URLSession = {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = MaroClient.pollTimeout
@@ -104,15 +112,41 @@ final class MaroClient: @unchecked Sendable {
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.httpBody = JSONText.data(body)
         }
-        let (data, _) = try await http.data(for: req)
+        let (data, resp) = try await http.data(for: req)
+        if !path.hasPrefix("/auth/") { checkRejected(req, resp) }
         if data.isEmpty { return [:] }
         return JSONText.parse(data) as? JSON ?? [:]
     }
 
+    /**
+     * A 401 to the session this request carried: the account signed this
+     * phone out. Only the session still in use counts, so a late answer to a
+     * request from before a fresh sign-in does not sign that one out again.
+     */
+    private func checkRejected(_ req: URLRequest, _ resp: URLResponse) {
+        guard (resp as? HTTPURLResponse)?.statusCode == 401,
+              let sent = req.value(forHTTPHeaderField: "Authorization") else { return }
+        lock.lock()
+        let current = _session.map { "Bearer \($0)" } == sent
+        lock.unlock()
+        guard current else { return }
+        clearSession()
+        onSessionRejected?()
+    }
+
+    /** Drop the session but keep the email, to fill in the sign-in screen. */
+    private func clearSession() {
+        lock.lock()
+        _session = nil
+        lock.unlock()
+        defaults.removeObject(forKey: "session")
+    }
+
     /** Body bytes, or nil when the server answers non-2xx. */
     private func raw(_ req: URLRequest) async -> Data? {
-        guard let result = try? await http.data(for: req),
-              let code = (result.1 as? HTTPURLResponse)?.statusCode, (200..<300).contains(code) else { return nil }
+        guard let result = try? await http.data(for: req) else { return nil }
+        checkRejected(req, result.1)
+        guard let code = (result.1 as? HTTPURLResponse)?.statusCode, (200..<300).contains(code) else { return nil }
         return result.0
     }
 
@@ -318,6 +352,8 @@ final class MaroClient: @unchecked Sendable {
                     req.setValue("application/json", forHTTPHeaderField: "Accept")
                     let (data, resp) = try await http.data(for: req)
                     let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+                    checkRejected(req, resp)
+                    if code == 401 { return }
                     if (200..<300).contains(code), let body = JSONText.parse(data) as? JSON {
                         for case let msg as JSON in body.arr("messages") ?? [] { await onEvent(msg) }
                         let seq = body.int64("seq", after)
