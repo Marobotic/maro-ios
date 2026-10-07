@@ -74,7 +74,7 @@ struct LoginScreen: View {
                         .frame(maxWidth: .infinity, alignment: .trailing)
                     }
                     Spacer().frame(height: 8)
-                    text(creating ? "At least 8 characters." : "Use the account your other devices are signed in to.",
+                    text(creating ? "At least 8 characters." : "The same account as Hourglass. Your other devices use it too.",
                          12, Omp.muted, align: .leading)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
