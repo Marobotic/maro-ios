@@ -9,6 +9,8 @@ jobs:
   ipa:
     runs-on: macos-15
     timeout-minutes: 30
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -42,10 +44,25 @@ jobs:
           cp -R build/Build/Products/Release-iphoneos/Maro.app Payload/
           zip -qr Maro.ipa Payload
 
+      # The newest build as an asset of one rolling release in this (private)
+      # repo: release assets do not count against the account's Actions
+      # storage, which ran out and failed a good build at the upload.
+      # `mdeploy ios update Marobotic/maro-ios --tag latest-build` installs it.
+      - name: Publish to the latest-build release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view latest-build >/dev/null 2>&1 || \
+            gh release create latest-build --prerelease --title "Latest build" \
+              --notes "The newest build from main, replaced on every push."
+          gh release upload latest-build Maro.ipa --clobber
+
       - uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: Maro-ipa
           path: Maro.ipa
+          retention-days: 3
 
       - uses: actions/upload-artifact@v4
         if: failure()
