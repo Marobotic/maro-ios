@@ -442,8 +442,9 @@ enum Sync {
 
     /**
      * Flatten the library dict {"liked":[...],"spotify":[...],"ytm":[...],
-     * "local":[...]} into header rows + playlist rows, in the same order the
-     * panel's flattenLibrary uses: Liked, Spotify, YouTube Music, My Playlists.
+     * "sc":[...], "local":[...]} into header rows + playlist rows, in the
+     * same order the panel's flattenLibrary uses: Liked, Spotify, YouTube
+     * Music, SoundCloud, My Playlists.
      */
     static func library(_ dict: JSON?) -> [LibraryRow] {
         guard let dict else { return [] }
@@ -466,7 +467,22 @@ enum Sync {
         group("liked", "Liked")
         group("spotify", "Spotify")
         group("ytm", "YouTube Music")
+        group("sc", "SoundCloud")
         group("local", "My Playlists")
+        return out
+    }
+
+    /**
+     * The service playlists saved on the account, tracks and all
+     * ({"source:id": {"tracks": [...]}} in the snapshot). Kept as raw JSON:
+     * thousands of tracks are only parsed for the one playlist opened.
+     */
+    static func savedPlaylists(_ dict: JSON?) -> [String: JSON] {
+        guard let dict else { return [:] }
+        var out: [String: JSON] = [:]
+        for (key, value) in dict {
+            if let entry = value as? JSON, entry.arr("tracks") != nil { out[key] = entry }
+        }
         return out
     }
 }

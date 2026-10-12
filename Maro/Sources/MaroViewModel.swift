@@ -68,6 +68,9 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     private var pumpStop = false
     private var syncTask: Task<Void, Never>?
     private var lastSyncAt = ""
+    // Service playlists saved on the account ("source:id" -> entry with its
+    // tracks): opened straight from here, with no desktop to ask.
+    private var savedPlaylists: [String: JSON] = [:]
 
     // Which YouTube video plays each track, and what the droplet and phone hold.
     private var trackMap: [String: String] = [:]
@@ -654,6 +657,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         s.likedKeys = Sync.likedKeys(likedArr)
         s.likedIds = Set(Sync.tracks(likedArr).flatMap(\.trackIds))
         s.library = Sync.library(snap.obj("playlists"))
+        let saved = Sync.savedPlaylists(snap.obj("savedPlaylists"))
+        if !saved.isEmpty { savedPlaylists = saved }
         // What the desktop streams and downloads at: its setting, shared.
         if let quality = snap.obj("quality") {
             s.quality = quality.str("stream", s.quality).ifEmpty(s.quality)
@@ -1670,6 +1675,23 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         s.playlistHasMore = true
         s.playlistTotal = row.count
         s.playlistError = ""
+        // Saved on the account: every track is already here, whether or not
+        // a desktop is awake to fetch it from the service.
+        if let entry = savedPlaylists["\(row.source):\(row.id)"] {
+            let tracks = Sync.tracks(entry.arr("tracks")).map(giveVideoId)
+            if !tracks.isEmpty {
+                s.playlistTracks = tracks
+                s.playlistLoading = false
+                s.playlistHasMore = false
+                s.playlistTotal = tracks.count
+                state = s
+                if playWhenLoaded == row.id {
+                    playWhenLoaded = nil
+                    playList(tracks, 0, name: row.name)
+                }
+                return
+            }
+        }
         state = s
         Task {
             let key = playlistKey(row), cache = deviceCache

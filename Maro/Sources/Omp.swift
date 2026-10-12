@@ -20,6 +20,7 @@ enum Omp {
     static let muted = Color(hex: 0x707880)
     static let spotify = Color(hex: 0x1DB954)
     static let ytm = Color(hex: 0xFF0033)
+    static let sc = Color(hex: 0xFF5500)
     static let maro = Color(hex: 0x8A63D2)
     // The playing copy's bitrate against the tier chosen in Settings: at it,
     // or below it while the droplet fetches it. The same colours as desktop.
@@ -87,6 +88,7 @@ enum Omp {
         static let signin = "\u{F090}"
         static let spotify = "\u{F1BC}"
         static let ytm = "\u{F16A}"
+        static let sc = "\u{F1BE}"
         static let gear = "\u{F013}"
         static let bell = "\u{F0F3}"
         static let cloud = "\u{F0C2}"
@@ -146,6 +148,7 @@ enum Omp {
         switch src {
         case "spotify": return "Spotify"
         case "ytm": return "YouTube Music"
+        case "sc": return "SoundCloud"
         default: return src.isBlank ? "Queue" : src
         }
     }
@@ -154,6 +157,7 @@ enum Omp {
         switch src {
         case "spotify": return spotify
         case "ytm": return ytm
+        case "sc": return sc
         default: return accent
         }
     }
@@ -162,6 +166,7 @@ enum Omp {
         switch src {
         case "spotify": return Icons.spotify
         case "ytm": return Icons.ytm
+        case "sc": return Icons.sc
         default: return Icons.note
         }
     }
