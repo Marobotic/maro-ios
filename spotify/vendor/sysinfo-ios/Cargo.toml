@@ -1,0 +1,10 @@
+[package]
+name = "sysinfo"
+version = "0.36.99"
+edition = "2021"
+publish = false
+description = "Stand-in for sysinfo on iOS: librespot-core only asks for the OS and kernel version, and the real crate does not build for iOS."
+
+[features]
+default = []
+system = []

@@ -24,6 +24,8 @@ env_logger = "0.11"
 # "Jukebox:" in src/player.rs): the audio key is fetched alongside the file.
 [patch.crates-io]
 librespot-playback = { path = "vendor/librespot-playback" }
+# iOS only (this copy of the helper): see vendor/sysinfo-ios.
+sysinfo = { path = "vendor/sysinfo-ios" }
 
 [profile.release]
 opt-level = 3
