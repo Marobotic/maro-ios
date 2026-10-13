@@ -1372,22 +1372,22 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     }
 
     /**
-     * The services' sessions from the account. Needs the key, which only the
-     * password gives: a phone signed in before this existed asks for it once
-     * (Settings), and after that it is in the Keychain.
+     * The services' sessions from the account. They open with a key only the
+     * Jukebox password gives, taken at sign-in. A phone without it (signed in
+     * before this existed, or the password changed elsewhere) is signed out
+     * of Jukebox: signing in again brings every service with it.
      */
     func refreshServices() async {
         let sessions = ServiceSessions.shared
+        guard sessions.hasKey else {
+            return signInAgain("Sign in once more to bring your music services to this phone.")
+        }
         state.services = await sessions.refresh(client)
-        state.servicesLocked = !sessions.hasKey
+        if !sessions.hasKey {
+            // The account's sessions no longer open: the password changed.
+            return signInAgain("Your Jukebox password changed. Sign in again.")
+        }
         Spotify.shared.start()
-    }
-
-    /** Settings > "Bring your music services over": the password, once. */
-    func unlockServices(_ pass: String) async -> Bool {
-        guard await ServiceSessions.shared.unlock(password: pass, email: client.email ?? state.email) else { return false }
-        await refreshServices()
-        return !state.servicesLocked
     }
 
     /** Forgot password: nil when the link is on its way, else the reason. */
@@ -1422,6 +1422,17 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 state.busy = false
                 state.error = created ? "Could not create the account." : "Sign in failed. Check the email and password."
             }
+        }
+    }
+
+    /** Signed out on this phone only, back at sign-in with the email filled in. */
+    private func signInAgain(_ why: String) {
+        let email = state.email
+        Task {
+            await client.logout()
+            ServiceSessions.shared.forgetAll()
+            Spotify.shared.start()
+            resetToSignIn(email: email, error: why)
         }
     }
 
@@ -1499,7 +1510,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             return
         }
         guard ServiceSessions.shared.hasKey else {
-            showStatus("Enter your Jukebox password under Music services first", "info")
+            showStatus("Sign in to Jukebox again to connect music services.", "info")
             return
         }
         signIn = ServiceSignIn(service: key) { [weak self] outcome in

@@ -30,13 +30,6 @@ struct SettingsPage: View {
                     // The account's sessions: whichever device signs in puts
                     // it here, and every device uses it.
                     SettingsHead(label: "Music services")
-                    if state.servicesLocked {
-                        SettingsRow(icon: Omp.Icons.cloud, label: "Open your music services", meta: "Password", accent: true) {
-                            present(.password(title: "Your Jukebox password, once on this phone: it opens the Spotify, YouTube Music and SoundCloud sign-ins kept on your account.", confirm: "Unlock") { pass in
-                                Task { _ = await vm.unlockServices(pass) }
-                            })
-                        }
-                    }
                     ServiceCard(label: "Spotify", icon: Omp.Icons.spotify, tint: Omp.spotify,
                                 slot: ServiceSessions.librespot, name: Spotify.shared.user, state: state) { tapService("spotify", ServiceSessions.librespot) }
                     ServiceCard(label: "YouTube Music", icon: Omp.Icons.ytm, tint: Omp.ytm,
@@ -117,23 +110,7 @@ struct SettingsPage: View {
         present(.confirm(message: "Clear \(label)? This cannot be undone.", confirm: "Clear") { vm.purge(scope) })
     }
 
-    /**
-     * Connect / Sign out. Before this phone has the password that opens the
-     * account's sessions, Connect asks for it first; if the account turns out
-     * to hold that service already, that is all it takes.
-     */
-    private func tapService(_ key: String, _ slot: String) {
-        guard state.servicesLocked else { return vm.connectService(key) }
-        present(.password(title: "Your Jukebox password, once on this phone: it opens the music services kept on your account.", confirm: "Continue") { pass in
-            Task {
-                guard await vm.unlockServices(pass) else {
-                    vm.showStatus("That password didn't open your music services", "error")
-                    return
-                }
-                if !vm.state.services.contains(slot) { vm.connectService(key) }
-            }
-        })
-    }
+    private func tapService(_ key: String, _ slot: String) { vm.connectService(key) }
 }
 
 /** One music service as the account holds it, with Connect / Sign out. */
