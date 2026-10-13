@@ -153,6 +153,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             publishLocalAvailable()
             if state.signedIn {
                 ensurePhonePump()
+                Task { await refreshServices() }
                 await pullAccount()
                 await pullSync()
                 await syncPlayer()
@@ -870,6 +871,9 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             if let v = AudioCache.variant(videoId), abs(v.kbps - kbps) < 20, v.name.contains(".") { copy = v.name }
             setSounding(videoId, copy: copy, kbps: kbps, inTier: kbps > 0 ? AudioCache.inTier(kbps) : nil)
             phone.playFile(file, tag: tag, duration: track.duration)
+        } else if track.source == "sc" {
+            playRoute = "soundcloud"
+            playSoundCloud(track, tag: tag)
         } else if !videoId.isEmpty && (serverCached.contains(videoId) || !serverMapLoaded) {
             playRoute = AudioCache.isWarm(videoId) ? "warm asset" : "stream"
             playStreamAtTier(videoId, tag: tag, duration: track.duration)
@@ -877,6 +881,28 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             playRoute = "engine"
             phone.stop()
             requestCloud(videoId.isEmpty ? track : track.with(videoId: videoId), .play(tag: tag))
+        }
+    }
+
+    /**
+     * A SoundCloud song from SoundCloud itself, this phone's own request. One
+     * it will not stream (DRM, preview only) goes the way it always went.
+     */
+    private func playSoundCloud(_ track: Track, tag: Int) {
+        Task { @MainActor in
+            do {
+                let stream = try await SoundCloud.shared.resolve(track.id)
+                guard tag == playTag else { return }
+                setSounding("", copy: "", kbps: stream.kbps, inTier: nil, route: "soundcloud")
+                state.audioRoute = "soundcloud"
+                phone.playURL(stream.url, tag: tag, duration: track.duration)
+            } catch {
+                guard tag == playTag else { return }
+                log.info("soundcloud \(track.id) not playable here: \(String(describing: error))")
+                playRoute = "engine"
+                phone.stop()
+                requestCloud(track, .play(tag: tag))
+            }
         }
     }
 
@@ -1182,7 +1208,25 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     // -- auth ---------------------------------------------------------------
 
     func login(_ user: String, _ pass: String) {
-        authenticate { [client] in await client.login(user.trimmingCharacters(in: .whitespaces), pass) }
+        authenticate(password: pass) { [client] in await client.login(user.trimmingCharacters(in: .whitespaces), pass) }
+    }
+
+    /**
+     * The services' sessions from the account. Needs the key, which only the
+     * password gives: a phone signed in before this existed asks for it once
+     * (Settings), and after that it is in the Keychain.
+     */
+    func refreshServices() async {
+        let sessions = ServiceSessions.shared
+        state.services = await sessions.refresh(client)
+        state.servicesLocked = !sessions.hasKey
+    }
+
+    /** Settings > "Bring your music services over": the password, once. */
+    func unlockServices(_ pass: String) async -> Bool {
+        guard await ServiceSessions.shared.unlock(password: pass, email: client.email ?? state.email) else { return false }
+        await refreshServices()
+        return !state.servicesLocked
     }
 
     /** Forgot password: nil when the link is on its way, else the reason. */
@@ -1191,10 +1235,10 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     }
 
     func register(_ user: String, _ pass: String) {
-        authenticate(created: true) { [client] in await client.register(user.trimmingCharacters(in: .whitespaces), pass) }
+        authenticate(created: true, password: pass) { [client] in await client.register(user.trimmingCharacters(in: .whitespaces), pass) }
     }
 
-    private func authenticate(created: Bool = false, _ call: @escaping () async -> Bool) {
+    private func authenticate(created: Bool = false, password: String, _ call: @escaping () async -> Bool) {
         Task {
             state.busy = true
             state.error = nil
@@ -1202,6 +1246,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 state.signedIn = true
                 state.email = client.email ?? ""
                 state.busy = false
+                _ = await ServiceSessions.shared.unlock(password: password, email: state.email)
+                Task { await refreshServices() }
                 ensurePhonePump()
                 await pullAccount()
                 await pullSync()
@@ -1221,6 +1267,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     func logout() {
         Task {
             await client.logout()
+            ServiceSessions.shared.forgetAll()
             resetToSignIn()
         }
     }

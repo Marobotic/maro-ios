@@ -220,6 +220,10 @@ struct UiState: Equatable {
     var selectedAccount = "maro"
     var busy = false
     var error: String?
+    // Music services this phone holds a session for (ServiceSessions), and
+    // whether the account's copies are waiting on the password to open them.
+    var services: [String] = []
+    var servicesLocked = false
     var devices: [Device] = []
     var playbackTarget = ""
     // This phone's relay id and the name it shows up under.

@@ -43,12 +43,14 @@ enum OmpDialog: Identifiable {
     case menu(title: String, items: [Item])
     case name(title: String, placeholder: String, confirm: String, initial: String, onConfirm: (String) -> Void)
     case confirm(message: String, confirm: String, onConfirm: () -> Void)
+    case password(title: String, confirm: String, onConfirm: (String) -> Void)
 
     var id: String {
         switch self {
         case .menu(let t, _): return "menu:" + t
         case .name(let t, _, _, _, _): return "name:" + t
         case .confirm(let m, _, _): return "confirm:" + m
+        case .password(let t, _, _): return "password:" + t
         }
     }
 }
@@ -628,6 +630,18 @@ private struct DialogView: View {
                 OmpTextField(text: $text, placeholder: placeholder, onSubmit: submit)
                 HStack(spacing: 4) {
                     OmpButton(text: confirm, enabled: !text.isBlank, foreground: Omp.accent, bordered: true, action: submit)
+                    OmpButton(text: "Cancel", action: dismiss)
+                }
+            }
+            .padding(10)
+        case .password(let title, let confirm, let onConfirm):
+            // Not trimmed: a password's spaces are part of it.
+            let submit = { if !text.isEmpty { onConfirm(text); dismiss() } }
+            VStack(alignment: .leading, spacing: 8) {
+                OmpText(title, size: Omp.TypeSize.caption, color: Omp.muted, maxLines: 3)
+                OmpTextField(text: $text, placeholder: "Password", password: true, onSubmit: submit)
+                HStack(spacing: 4) {
+                    OmpButton(text: confirm, enabled: !text.isEmpty, foreground: Omp.accent, bordered: true, action: submit)
                     OmpButton(text: "Cancel", action: dismiss)
                 }
             }

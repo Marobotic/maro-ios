@@ -289,6 +289,24 @@ final class MaroClient: @unchecked Sendable {
 
     func account() async -> JSON? { try? await call("GET", "/account") }
 
+    /**
+     * One music service's sealed session, as the desktop stored it (see
+     * ServiceSessions). "" when the account holds none, nil when the droplet
+     * could not be asked - the two must not be confused, or a dropped
+     * connection would sign the phone out of the service.
+     */
+    func serviceBlob(_ name: String) async -> String? {
+        var req = request(Self.base + "/service/" + Self.escape(name), timeout: 15)
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        guard let (data, resp) = try? await http.data(for: req) else { return nil }
+        checkRejected(req, resp)
+        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        let body = JSONText.parse(data) as? JSON ?? [:]
+        if code == 404 || body.str("error") == "no stored credential" { return "" }
+        guard (200..<300).contains(code) else { return nil }
+        return body.str("blob")
+    }
+
     func setPlayback(_ device: String) async -> Bool {
         guard let resp = try? await call("POST", "/account/playback", body: ["device": device]) else { return false }
         return resp.str("playback") == device

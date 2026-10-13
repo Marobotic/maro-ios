@@ -230,6 +230,9 @@ final class PhonePlayer {
 
     func playFile(_ file: URL, tag: Int, duration: Double) { start(AVURLAsset(url: file), tag: tag, duration: duration) }
 
+    /** A stream straight from the service (SoundCloud's own CDN). */
+    func playURL(_ url: URL, tag: Int, duration: Double) { start(AVURLAsset(url: url), tag: tag, duration: duration) }
+
     func playStream(_ videoId: String, tag: Int, duration: Double) {
         let asset = AudioCache.asset(videoId)
         AudioCache.forget(videoId)

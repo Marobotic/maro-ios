@@ -47,6 +47,17 @@ struct SettingsPage: View {
                         tint: Omp.ytm,
                         connected: state.ytmConnected
                     ) { vm.connectService("ytm") }
+                    SettingsHead(label: "On this phone")
+                    if state.servicesLocked {
+                        SettingsRow(icon: Omp.Icons.cloud, label: "Bring your music services over", meta: "Password", accent: true) {
+                            present(.password(title: "Your Jukebox password, once: it opens the Spotify, YouTube and SoundCloud sign-ins your desktop keeps on the account.", confirm: "Unlock") { pass in
+                                Task { _ = await vm.unlockServices(pass) }
+                            })
+                        }
+                    }
+                    PhoneServiceRow(label: "Spotify", icon: Omp.Icons.spotify, tint: Omp.spotify, slot: ServiceSessions.librespot, state: state)
+                    PhoneServiceRow(label: "YouTube Music", icon: Omp.Icons.ytm, tint: Omp.ytm, slot: ServiceSessions.ytm, state: state)
+                    PhoneServiceRow(label: "SoundCloud", icon: Omp.Icons.sc, tint: Omp.sc, slot: ServiceSessions.soundcloud, state: state)
                     SettingsHead(label: "Devices")
                     SettingsRow(icon: Omp.Icons.edit, label: "Device name", meta: state.deviceName, accent: true) {
                         present(.name(title: "Device name", placeholder: Omp.defaultPhoneName, confirm: "Save", initial: state.deviceName) { vm.setDeviceName($0) })
@@ -106,6 +117,30 @@ struct SettingsPage: View {
     }
 }
 
+/** One service as this phone holds it: its own sign-in, the account's copy
+ *  from the desktop, or nothing yet. */
+private struct PhoneServiceRow: View {
+    let label: String
+    let icon: String
+    let tint: Color
+    let slot: String
+    let state: UiState
+
+    var body: some View {
+        let has = state.services.contains(slot)
+        let origin = ServiceSessions.shared.origin(slot)
+        SettingsAccountCard(
+            label: label,
+            icon: icon,
+            value: !has ? "Not on this phone" : origin == "phone" ? "Signed in here" : "From your desktop",
+            note: has ? "Plays on this phone directly." : state.servicesLocked ? "Unlock above to use your desktop's sign-in." : "Sign in on the desktop and it comes over.",
+            action: "",
+            tint: tint,
+            connected: has
+        ) {}
+    }
+}
+
 private struct SettingsHead: View {
     @Environment(\.omp) private var m
     let label: String
@@ -139,15 +174,17 @@ private struct SettingsAccountCard: View {
                 OmpText(note, size: Omp.TypeSize.caption, color: Omp.foreground.opacity(0.45))
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            OmpButton(
-                text: action,
-                foreground: action == "Sign out" ? Omp.urgent : tint,
-                fontSize: Omp.TypeSize.caption,
-                vertical: 4,
-                horizontal: 8,
-                bordered: true,
-                action: onAction
-            )
+            if !action.isEmpty {
+                OmpButton(
+                    text: action,
+                    foreground: action == "Sign out" ? Omp.urgent : tint,
+                    fontSize: Omp.TypeSize.caption,
+                    vertical: 4,
+                    horizontal: 8,
+                    bordered: true,
+                    action: onAction
+                )
+            }
         }
         .padding(.leading, m.pt(10))
         .padding(.trailing, m.pt(8))
