@@ -103,6 +103,7 @@ final class ArtLoader: ObservableObject, @unchecked Sendable {
     }
 
     /** The copy kept for a cover fetched straight from its URL. */
+    @MainActor
     func invalidate(url: String) {
         try? FileManager.default.removeItem(at: diskFile(url))
         memory.removeAllObjects()
