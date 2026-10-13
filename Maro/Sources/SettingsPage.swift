@@ -37,14 +37,14 @@ struct SettingsPage: View {
                             })
                         }
                     }
-                    ServiceCard(label: "Spotify", icon: Omp.Icons.spotify, tint: Omp.spotify, key: "spotify",
-                                slot: ServiceSessions.librespot, name: Spotify.shared.user, state: state, vm: vm)
-                    ServiceCard(label: "YouTube Music", icon: Omp.Icons.ytm, tint: Omp.ytm, key: "ytm",
-                                slot: ServiceSessions.ytm, name: "", state: state, vm: vm)
-                    ServiceCard(label: "SoundCloud", icon: Omp.Icons.sc, tint: Omp.sc, key: "sc",
+                    ServiceCard(label: "Spotify", icon: Omp.Icons.spotify, tint: Omp.spotify,
+                                slot: ServiceSessions.librespot, name: Spotify.shared.user, state: state) { tapService("spotify", ServiceSessions.librespot) }
+                    ServiceCard(label: "YouTube Music", icon: Omp.Icons.ytm, tint: Omp.ytm,
+                                slot: ServiceSessions.ytm, name: "", state: state) { tapService("ytm", ServiceSessions.ytm) }
+                    ServiceCard(label: "SoundCloud", icon: Omp.Icons.sc, tint: Omp.sc,
                                 slot: ServiceSessions.soundcloud,
                                 name: ServiceSessions.shared.session(ServiceSessions.soundcloud)?.obj("user")?.str("name") ?? "",
-                                state: state, vm: vm)
+                                state: state) { tapService("sc", ServiceSessions.soundcloud) }
                     OmpText("Signed in here or on any other device, a service is on your account and every device uses it. Signing out of one signs every device out of it.",
                             size: Omp.TypeSize.caption, color: Omp.muted, maxLines: 3)
                         .padding(.horizontal, m.pt(4))
@@ -116,6 +116,24 @@ struct SettingsPage: View {
         }
         present(.confirm(message: "Clear \(label)? This cannot be undone.", confirm: "Clear") { vm.purge(scope) })
     }
+
+    /**
+     * Connect / Sign out. Before this phone has the password that opens the
+     * account's sessions, Connect asks for it first; if the account turns out
+     * to hold that service already, that is all it takes.
+     */
+    private func tapService(_ key: String, _ slot: String) {
+        guard state.servicesLocked else { return vm.connectService(key) }
+        present(.password(title: "Your Jukebox password, once on this phone: it opens the music services kept on your account.", confirm: "Continue") { pass in
+            Task {
+                guard await vm.unlockServices(pass) else {
+                    vm.showStatus("That password didn't open your music services", "error")
+                    return
+                }
+                if !vm.state.services.contains(slot) { vm.connectService(key) }
+            }
+        })
+    }
 }
 
 /** One music service as the account holds it, with Connect / Sign out. */
@@ -123,11 +141,10 @@ private struct ServiceCard: View {
     let label: String
     let icon: String
     let tint: Color
-    let key: String
     let slot: String
     let name: String
     let state: UiState
-    @ObservedObject var vm: MaroViewModel
+    let onTap: () -> Void
 
     var body: some View {
         let on = state.services.contains(slot)
@@ -136,10 +153,10 @@ private struct ServiceCard: View {
             icon: icon,
             value: on ? (name.isEmpty ? "Signed in" : name) : "Not signed in",
             note: on ? "On your account, used by every device." : "Sign in here; every device gets it.",
-            action: state.servicesLocked ? "" : (on ? "Sign out" : "Connect"),
+            action: on ? "Sign out" : "Connect",
             tint: tint,
             connected: on
-        ) { vm.connectService(key) }
+        ) { onTap() }
     }
 }
 
