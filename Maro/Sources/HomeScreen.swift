@@ -228,6 +228,7 @@ func serviceColor(_ service: String) -> Color {
     switch service {
     case "youtube": return Omp.ytm
     case "spotify": return Omp.spotify
+    case "soundcloud": return Omp.sc
     default: return Omp.themeAccent
     }
 }
@@ -265,7 +266,8 @@ private struct StatsPanel: View {
         if let track {
             out.append(("Song", track.title + (track.artist.isEmpty ? "" : " — " + track.artist)))
             out.append(("From", track.source == "spotify" ? "Spotify library"
-                                : track.source == "ytm" ? "YouTube Music library" : track.source))
+                                : track.source == "ytm" ? "YouTube Music library"
+                                : track.source == "sc" ? "SoundCloud" : track.source))
         } else {
             out.append(("Song", "—"))
         }
@@ -277,10 +279,14 @@ private struct StatsPanel: View {
         case "engine": delivery = "Streaming, resolved by your server"
         case "download": delivery = "Downloading to this phone"
         case "remote": delivery = "Playing on " + state.playingDeviceName
+        case "soundcloud": delivery = "Streaming from SoundCloud"
+        case "youtube": delivery = "Streaming from YouTube (guest, until the server has its copy)"
         default: delivery = "—"
         }
         out.append(("Delivery", delivery))
-        out.append(("Copy", state.audioCopy.isEmpty ? (state.audioVideoId.isEmpty ? "—" : "original") : state.audioCopy))
+        if !state.audioCopy.hasPrefix("sc:") && !state.audioCopy.hasPrefix("yt:") {
+            out.append(("Copy", state.audioCopy.isEmpty ? (state.audioVideoId.isEmpty ? "—" : "original") : state.audioCopy))
+        }
         out.append(("Bitrate now", live > 0 ? "\(live) kbps" : "—"))
         if !line.isEmpty {
             let avg = Int((Double(line.reduce(0, +)) / Double(line.count)).rounded())
@@ -293,6 +299,7 @@ private struct StatsPanel: View {
         out.append(("Playing on", state.playingDeviceName))
         out.append(("Mode", state.solo ? "This phone only" : "Shared player"))
         if !state.audioVideoId.isEmpty { out.append(("YouTube id", state.audioVideoId)) }
+        if state.audioCopy.hasPrefix("sc:") { out.append(("SoundCloud id", String(state.audioCopy.dropFirst(3)))) }
         if let sid = track?.sourceId, !sid.isEmpty, sid != state.audioVideoId { out.append(("Spotify id", sid)) }
         return out
     }
@@ -308,13 +315,17 @@ private struct StatsPanel: View {
             VStack(alignment: .leading, spacing: m.pt(6)) {
                 HStack(spacing: m.pt(8)) {
                     Circle().fill(tint).frame(width: m.pt(10), height: m.pt(10))
-                    OmpText(service == "youtube" ? "YouTube Music" : service == "spotify" ? "Spotify" : "Nothing playing",
+                    OmpText(service == "youtube" ? "YouTube Music" : service == "spotify" ? "Spotify"
+                            : service == "soundcloud" ? "SoundCloud" : "Nothing playing",
                             size: Omp.TypeSize.body, color: tint, bold: true)
                 }
                 if !state.gateText.isEmpty {
                     OmpText("Couldn't play: " + state.gateText, size: Omp.TypeSize.caption, color: Omp.urgent, maxLines: 3)
                 } else if service == "youtube" && state.track?.source == "spotify" {
                     OmpText("This is a Spotify song, playing YouTube Music's copy of it.",
+                            size: Omp.TypeSize.caption, color: Omp.muted, maxLines: 3)
+                } else if service == "soundcloud", let src = state.track?.source, src != "sc" {
+                    OmpText("This is a \(src == "spotify" ? "Spotify" : "YouTube Music") song, playing SoundCloud's copy of it.",
                             size: Omp.TypeSize.caption, color: Omp.muted, maxLines: 3)
                 }
                 BitrateGraph(line: state.audioTimeline, second: second, want: wantKbps, tint: tint)

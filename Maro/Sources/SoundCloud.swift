@@ -23,6 +23,7 @@ actor SoundCloud {
         let url: URL
         let kbps: Int
         let codec: String
+        let hls: Bool
     }
 
     private static let api = "https://api-v2.soundcloud.com"
@@ -120,6 +121,103 @@ actor SoundCloud {
         return items.filter { $0.str("kind") == "track" }.map(normalise)
     }
 
+    /** The tracks behind a pasted SoundCloud link: a song, a set, or a profile. */
+    func open(link: String) async throws -> [Track] {
+        var url = link.trimmingCharacters(in: .whitespaces)
+        if url.contains("on.soundcloud.com") || url.contains("snd.sc/"), let short = URL(string: url) {
+            // Short links are redirects to the page they name.
+            var req = URLRequest(url: short, timeoutInterval: 15)
+            req.setValue(Self.ua, forHTTPHeaderField: "User-Agent")
+            if let (_, resp) = try? await http.data(for: req), let final = resp.url { url = final.absoluteString }
+        }
+        url = String(url.split(separator: "?", maxSplits: 1).first ?? "")
+            .replacingOccurrences(of: "://m.soundcloud.com", with: "://soundcloud.com")
+        let data = try await call("/resolve", ["url": url])
+        switch data.str("kind") {
+        case "track":
+            return [normalise(data)]
+        case "playlist":
+            // A set lists only its first few tracks in full; the rest by id.
+            let items = (data["tracks"] as? [JSON]) ?? []
+            let missing = items.filter { $0["title"] == nil }.map { "\($0["id"] ?? "")" }
+            var full: [String: JSON] = [:]
+            for chunk in stride(from: 0, to: missing.count, by: 50) {
+                let ids = missing[chunk..<min(chunk + 50, missing.count)].joined(separator: ",")
+                if let got = try? await callList("/tracks", ["ids": ids]) {
+                    for t in got { full["\(t["id"] ?? "")"] = t }
+                }
+            }
+            return items.compactMap { t in
+                let id = "\(t["id"] ?? "")"
+                return t["title"] != nil ? normalise(t) : full[id].map(normalise)
+            }
+        case "user":
+            let tracks = try await call("/users/\(data["id"] ?? "")/tracks", ["limit": "50"])
+            return ((tracks["collection"] as? [JSON]) ?? []).filter { $0.str("kind") == "track" }.map(normalise)
+        default:
+            return []
+        }
+    }
+
+    private func callList(_ path: String, _ params: [String: String]) async throws -> [JSON] {
+        var c = URLComponents(string: Self.api + path)!
+        c.queryItems = params.map { URLQueryItem(name: $0.key, value: $0.value) }
+            + [URLQueryItem(name: "client_id", value: try await id(refresh: false))]
+        let (data, code) = try await get(c.url!)
+        guard (200..<300).contains(code) else { return [] }
+        return JSONText.parse(data) as? [JSON] ?? []
+    }
+
+    // -- the same song from another service ---------------------------------
+
+    private var matches: [String: Track] = [:]
+
+    /**
+     * The same song on SoundCloud, streamed in full, or nil - the desktop's
+     * soundcloud_equivalent. Normally only the artist's own upload counts.
+     * `loose` is for when SoundCloud was picked for this song by hand: if the
+     * official copy is a preview, a full-length upload of the same recording by
+     * someone else will do (same title, the artist named, within three
+     * seconds of the same length, no remix/cover/live/sped-up marker).
+     */
+    func equivalent(of track: Track, loose: Bool) async -> Track? {
+        let title = track.title.trimmingCharacters(in: .whitespaces)
+        let artist = track.artist.trimmingCharacters(in: .whitespaces)
+        if title.isEmpty { return nil }
+        let key = track.source + ":" + track.id
+        if let hit = matches[key] ?? (loose ? matches[key + "~any"] : nil) { return hit }
+        guard let found = try? await search("\(title) \(artist)".trimmingCharacters(in: .whitespaces), limit: 20) else { return nil }
+        let wantTitle = Match.words(title), wantArtist = Match.words(artist)
+        let mine = Match.spaced(title)
+        let versions = Match.versionWords + ["boosted", "bass", "fast", "reverb", "copy", "quality", "type beat", "prod", "loop"]
+        let candidates = found.filter { c in
+            guard let raw = tracks[c.id], !Self.streams(raw).isEmpty, !["SNIP", "BLOCK"].contains(raw.str("policy")) else { return false }
+            let theirs = Match.spaced(c.title)
+            if versions.contains(where: { theirs.contains(" \($0) ") && !mine.contains(" \($0) ") }) { return false }
+            return Match.overlap(wantTitle, Match.words(c.title)) >= 0.6
+        }
+        func official(_ c: Track) -> Bool {
+            if !wantArtist.isEmpty && Match.overlap(wantArtist, Match.words(c.artist)) < 0.5 { return false }
+            let d = track.duration, got = c.duration
+            return !(d > 0 && got > 0 && abs(got - d) > max(10, d * 0.1))
+        }
+        func reupload(_ c: Track) -> Bool {
+            if !wantArtist.isEmpty && Match.overlap(wantArtist, Match.words(c.artist + " " + c.title)) < 0.5 { return false }
+            return track.duration > 0 && c.duration > 0 && abs(c.duration - track.duration) <= 3
+        }
+        if let pick = candidates.first(where: official) {
+            matches[key] = pick
+            return pick
+        }
+        if loose, let pick = candidates.first(where: reupload) {
+            // Kept apart, so the standing "Prefer SoundCloud" never picks up a
+            // re-upload from an earlier one-off choice.
+            matches[key + "~any"] = pick
+            return pick
+        }
+        return nil
+    }
+
     /**
      * A URL AVPlayer can open for this track: HLS AAC, then the MP3 file, then
      * anything else plain. Throws Unplayable for DRM-only and preview-only.
@@ -151,7 +249,8 @@ actor SoundCloud {
             let mime = tc.obj("format")?.str("mime_type") ?? ""
             let aac = mime.contains("mp4") || mime.contains("aac")
             return Stream(url: url, kbps: aac ? 160 : mime.contains("ogg") ? 64 : 128,
-                          codec: aac ? "aac" : mime.contains("mpeg") ? "mp3" : "opus")
+                          codec: aac ? "aac" : mime.contains("mpeg") ? "mp3" : "opus",
+                          hls: tc.obj("format")?.str("protocol") == "hls")
         }
         throw Unplayable(reason: "SoundCloud only streams this track with DRM")
     }

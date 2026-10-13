@@ -370,6 +370,7 @@ struct UiState: Equatable {
      */
     var playingService: String {
         if origin == "spotify" { return "spotify" }
+        if origin == "sc" || (audioRoute == "soundcloud" && audioVideoId.isEmpty) { return "soundcloud" }
         if !audioVideoId.isEmpty { return "youtube" }
         if ["ytm", "ytm-guest", "offline", "phone", "server", "droplet"].contains(origin) { return "youtube" }
         guard let track else { return "" }

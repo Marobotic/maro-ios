@@ -233,6 +233,12 @@ final class PhonePlayer {
     /** A stream straight from the service (SoundCloud's own CDN). */
     func playURL(_ url: URL, tag: Int, duration: Double) { start(AVURLAsset(url: url), tag: tag, duration: duration) }
 
+    /** YouTube's own CDN wants the same browser the URL was asked for as. */
+    func playYouTube(_ url: URL, tag: Int, duration: Double) {
+        let headers = ["User-Agent": YouTubeDirect.ua]
+        start(AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers]), tag: tag, duration: duration)
+    }
+
     func playStream(_ videoId: String, tag: Int, duration: Double) {
         let asset = AudioCache.asset(videoId)
         AudioCache.forget(videoId)

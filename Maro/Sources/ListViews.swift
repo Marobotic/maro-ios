@@ -59,12 +59,18 @@ final class VisibleRows: ObservableObject {
 private func trackMenu(_ track: Track, liked: Bool, vm: MaroViewModel) -> OmpDialog {
     // "Add to queue" only for a song that is not queued yet; "Play next" moves one that is.
     .menu(title: track.title.ifBlank(track.id), items: [
+        // Clicking the row already plays it; this is for when you care
+        // where it comes from. Each falls back if that service cannot.
+        .init(icon: Omp.Icons.spotify, label: "Play on Spotify", tint: Omp.spotify) { vm.playOn(track, "spotify") },
+        .init(icon: Omp.Icons.ytm, label: "Play on YouTube Music", tint: Omp.ytm) { vm.playOn(track, "ytm") },
+        .init(icon: Omp.Icons.sc, label: "Play on SoundCloud", tint: Omp.sc) { vm.playOn(track, "sc") },
         .init(icon: Omp.Icons.add, label: "Play next") { vm.queueNext(track) },
     ] + (vm.isQueued(track) ? [] : [
         .init(icon: Omp.Icons.list, label: "Add to queue") { vm.addToQueue(track) },
     ]) + [
         .init(icon: Omp.Icons.cloud, label: "Save offline") { vm.saveOffline(track) },
-        .init(icon: Omp.Icons.paintbrush, label: "Download artwork") { vm.artFetch(track.artKey.ifBlank(track.id)) },
+        // A cover that is wrong, broken or blurry: thrown away and fetched again.
+        .init(icon: Omp.Icons.paintbrush, label: "Fix artwork") { vm.fixArtwork(track) },
         .init(icon: liked ? Omp.Icons.like : Omp.Icons.likeFull, label: liked ? "Unlike" : "Like") { vm.likeTrack(track) },
         .init(icon: Omp.Icons.bell, label: "Set as alarm") { vm.setAsAlarm(track) },
         .init(icon: Omp.Icons.spotify, label: "Share on Spotify") { vm.shareSpotifyLink(track) },
@@ -513,7 +519,7 @@ private struct TrackRow: View {
     }
 }
 
-private let searchSources: [(String, String)] = [("", "All"), ("spotify", "Spotify"), ("ytm", "YouTube Music")]
+private let searchSources: [(String, String)] = [("", "All"), ("spotify", "Spotify"), ("ytm", "YouTube Music"), ("sc", "SoundCloud")]
 
 private struct SearchView: View {
     @Environment(\.omp) private var m

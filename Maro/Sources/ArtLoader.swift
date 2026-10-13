@@ -102,6 +102,13 @@ final class ArtLoader: ObservableObject, @unchecked Sendable {
         epoch += 1
     }
 
+    /** The copy kept for a cover fetched straight from its URL. */
+    func invalidate(url: String) {
+        try? FileManager.default.removeItem(at: diskFile(url))
+        memory.removeAllObjects()
+        epoch += 1
+    }
+
     func has(_ artKey: String) -> Bool { Self.size(of: diskFile("key:\(artKey)")) > 0 }
 
     func diskBytes() -> Int64 {

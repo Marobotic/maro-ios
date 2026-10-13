@@ -745,7 +745,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             let q = p.str("q")
             if !q.isEmpty && q == state.searchText.trimmingCharacters(in: .whitespaces) {
                 state.searching = false
-                state.searchResults = Sync.tracks(p.arr("results"))
+                let extra = scResults.q == q ? scResults.rows : []
+                state.searchResults = Self.merge(Sync.tracks(p.arr("results")), extra)
             }
         default:
             break
@@ -858,6 +859,31 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         tapAt = uptime()
         saveTask?.cancel()
         progress = Progress(position: 0, duration: track.duration, playing: false, anchor: tapAt)
+        sounding = nil
+        // "Play on SoundCloud" for this one song, or "Prefer SoundCloud" in
+        // Settings. Picked by hand, a full upload by someone else will do and
+        // a saved copy is skipped (as on the desktop); the standing setting
+        // only takes the artist's own upload.
+        let oneOff = oneOffPrefer.removeValue(forKey: track.id)
+        let prefer = oneOff ?? state.playbackSource
+        if prefer == "sc" && track.source != "sc" {
+            playRoute = "soundcloud"
+            Task { @MainActor in
+                let alt = await SoundCloud.shared.equivalent(of: track, loose: oneOff != nil)
+                guard tag == playTag else { return }
+                if let alt {
+                    playSoundCloud(alt, tag: tag, fallback: track)
+                } else {
+                    if oneOff != nil { showStatus("SoundCloud has no full-length copy of this song - playing it the usual way", "info") }
+                    startUsual(track, tag: tag)
+                }
+            }
+            return
+        }
+        startUsual(track, tag: tag)
+    }
+
+    private func startUsual(_ track: Track, tag: Int) {
         let videoId = videoIdOf(track)
         if let file = localFiles[videoId], FileManager.default.fileExists(atPath: file.path) {
             playRoute = "file"
@@ -871,12 +897,21 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             if let v = AudioCache.variant(videoId), abs(v.kbps - kbps) < 20, v.name.contains(".") { copy = v.name }
             setSounding(videoId, copy: copy, kbps: kbps, inTier: kbps > 0 ? AudioCache.inTier(kbps) : nil)
             phone.playFile(file, tag: tag, duration: track.duration)
+            // A saved file is on the phone already: count it now, for free,
+            // when the droplet has no graph of that copy.
+            Task { @MainActor in
+                guard let line = await RateMeter.shared.measure(key: "file:" + file.lastPathComponent, file: file),
+                      tag == playTag, state.audioTimeline.isEmpty else { return }
+                state.audioTimeline = line
+            }
         } else if track.source == "sc" {
             playRoute = "soundcloud"
-            playSoundCloud(track, tag: tag)
+            playSoundCloud(track, tag: tag, fallback: nil)
         } else if !videoId.isEmpty && (serverCached.contains(videoId) || !serverMapLoaded) {
             playRoute = AudioCache.isWarm(videoId) ? "warm asset" : "stream"
             playStreamAtTier(videoId, tag: tag, duration: track.duration)
+        } else if !videoId.isEmpty {
+            playYouTubeDirect(videoId, track: track, tag: tag)
         } else {
             playRoute = "engine"
             phone.stop()
@@ -888,21 +923,99 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
      * A SoundCloud song from SoundCloud itself, this phone's own request. One
      * it will not stream (DRM, preview only) goes the way it always went.
      */
-    private func playSoundCloud(_ track: Track, tag: Int) {
+    private func playSoundCloud(_ track: Track, tag: Int, fallback: Track?) {
         Task { @MainActor in
             do {
                 let stream = try await SoundCloud.shared.resolve(track.id)
                 guard tag == playTag else { return }
-                setSounding("", copy: "", kbps: stream.kbps, inTier: nil, route: "soundcloud")
+                let copy = "sc:" + track.id
+                sounding = (copy, stream.url, stream.hls)
+                setSounding("", copy: copy, kbps: stream.kbps, inTier: nil, route: "soundcloud")
                 state.audioRoute = "soundcloud"
-                phone.playURL(stream.url, tag: tag, duration: track.duration)
+                phone.playURL(stream.url, tag: tag, duration: track.duration > 0 ? track.duration : (fallback?.duration ?? 0))
+                if state.statsOpen { measureSounding() }
             } catch {
                 guard tag == playTag else { return }
                 log.info("soundcloud \(track.id) not playable here: \(String(describing: error))")
+                // A stand-in that will not play: the row's own song, the usual way.
+                if let fallback { return startUsual(fallback, tag: tag) }
                 playRoute = "engine"
                 phone.stop()
                 requestCloud(track, .play(tag: tag))
             }
+        }
+    }
+
+    /**
+     * A YouTube song the droplet has no copy of: straight from YouTube, the
+     * guest stream, so it plays with the desktop asleep. The droplet is still
+     * asked for its Premium copy, which the next play gets.
+     */
+    private func playYouTubeDirect(_ videoId: String, track: Track, tag: Int) {
+        playRoute = "youtube"
+        Task { @MainActor in
+            do {
+                let stream = try await YouTubeDirect.shared.audio(videoId)
+                guard tag == playTag else { return }
+                let copy = "yt:" + videoId
+                sounding = (copy, stream.url, false)
+                setSounding(videoId, copy: copy, kbps: stream.kbps, inTier: AudioCache.inTier(stream.kbps), route: "youtube")
+                phone.playYouTube(stream.url, tag: tag, duration: track.duration)
+                if state.statsOpen { measureSounding() }
+                requestCloud(track.with(videoId: videoId), .warm)
+            } catch {
+                guard tag == playTag else { return }
+                log.info("youtube \(videoId) direct refused: \(String(describing: error))")
+                playRoute = "engine"
+                phone.stop()
+                requestCloud(track.with(videoId: videoId), .play(tag: tag))
+            }
+        }
+    }
+
+    // -- where a song plays from -----------------------------------------
+
+    /** "Play on..." for one press: the service picked for that song. */
+    private var oneOffPrefer: [String: String] = [:]
+    /** A stream this phone plays straight from a service, for the meter. */
+    private var sounding: (copy: String, url: URL, hls: Bool)?
+
+    /**
+     * Play this song from the service picked. Here, SoundCloud plays from
+     * SoundCloud and YouTube from YouTube; Spotify's own player comes to the
+     * phone in a later update, so it is YouTube's copy until then. On the
+     * desktop, the desktop does exactly what its own menu does.
+     */
+    func playOn(_ t: Track, _ service: String) {
+        if !isPhone {
+            remote("playtrack", ["track": t.toJSON(), "prefer": service])
+            return
+        }
+        if service == "spotify" {
+            showStatus("Spotify isn't on the phone yet - playing YouTube Music's copy", "info")
+        }
+        oneOffPrefer[t.id] = service
+        playTrack(t)
+    }
+
+    /** Count the stream playing now, once: for the "?" panel's graph. */
+    private func measureSounding() {
+        guard let s = sounding else { return }
+        Task { @MainActor in
+            guard let line = await RateMeter.shared.measure(key: s.copy, stream: s.url, hls: s.hls) else { return }
+            timelines["/" + s.copy] = line
+            if state.audioCopy == s.copy { state.audioTimeline = line }
+        }
+    }
+
+    /** Throw the cover away, here and on the account, and fetch it again. */
+    func fixArtwork(_ t: Track) {
+        let key = t.artKey.ifBlank(t.id)
+        ArtLoader.shared.invalidate(key)
+        if !t.artUrl.isEmpty { ArtLoader.shared.invalidate(url: t.artUrl) }
+        Task {
+            let delivered = await client.postAction("art.refresh", ["ids": t.trackIds])
+            showStatus(delivered ? "Fetching the artwork for \(t.title) again" : "Artwork cleared on this phone", "ok")
         }
     }
 
@@ -2189,19 +2302,61 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         doSearch()
     }
 
+    /** SoundCloud's own answers to a search, merged into the desktop's. */
+    private var scResults: (q: String, rows: [Track]) = ("", [])
+
     func doSearch() {
         let q = state.searchText.trimmingCharacters(in: .whitespaces)
         if q.isEmpty { return }
         state.searching = true
         state.searchResults = []
-        send("search", ["q": q, "source": state.searchSource])
+        // A pasted SoundCloud link opens the song (or set, or profile) itself.
+        if q.contains("soundcloud.com/") || q.contains("snd.sc/") {
+            Task { @MainActor in
+                let found = (try? await SoundCloud.shared.open(link: q)) ?? []
+                guard q == state.searchText.trimmingCharacters(in: .whitespaces) else { return }
+                state.searching = false
+                state.searchResults = found
+                if found.isEmpty { showStatus("SoundCloud didn't recognise that link", "error") }
+            }
+            return
+        }
+        let source = state.searchSource
+        // SoundCloud is asked from here, so it answers with the desktop asleep.
+        if source == "sc" || source.isEmpty {
+            scResults = (q, [])
+            Task { @MainActor in
+                let found = (try? await SoundCloud.shared.search(q)) ?? []
+                guard q == state.searchText.trimmingCharacters(in: .whitespaces) else { return }
+                scResults = (q, found)
+                if source == "sc" { state.searching = false }
+                state.searchResults = Self.merge(state.searchResults, found)
+            }
+            if source == "sc" { return }
+        }
+        send("search", ["q": q, "source": source])
+    }
+
+    /**
+     * One row per song: a SoundCloud result the list already has from another
+     * service is left out, as the desktop's own merge does.
+     */
+    static func merge(_ rows: [Track], _ extra: [Track]) -> [Track] {
+        var out = rows
+        for t in extra where !out.contains(where: { $0.id == t.id || Match.sameSong($0, t) }) {
+            out.append(t)
+        }
+        return out
     }
 
     // -- view ---------------------------------------------------------------
 
     func selectTab(_ key: String) { state.view = key }
 
-    func toggleStats() { state.statsOpen.toggle() }
+    func toggleStats() {
+        state.statsOpen.toggle()
+        if state.statsOpen { measureSounding() }
+    }
 
     func toggleSettings() {
         state.settingsOpen.toggle()

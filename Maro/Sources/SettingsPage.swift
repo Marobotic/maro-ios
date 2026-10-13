@@ -97,12 +97,22 @@ struct SettingsPage: View {
                     SettingsActionRow(label: "Offline songs on the desktop", action: "Clear") { purge("songs") }
                     SettingsActionRow(label: "Recently played", action: "Clear") { purge("history") }
                     SettingsActionRow(label: "Reset everything", action: "Reset", value: "accounts, playlists, downloads", danger: true) { purge("all") }
+                    SettingsHead(label: "About")
+                    SettingsRow(icon: Omp.Icons.note, label: "Version", meta: Self.version) {}
                 }
                 .padding(.bottom, m.pt(14))
             }
         }
         .padding(.horizontal, m.pt(4))
     }
+
+    /** "0.1.6 (7)": the version and build this phone is running. */
+    static let version: String = {
+        let info = Bundle.main.infoDictionary ?? [:]
+        let v = info["CFBundleShortVersionString"] as? String ?? "?"
+        let b = info["CFBundleVersion"] as? String ?? "?"
+        return "\(v) (\(b))"
+    }()
 
     private func purge(_ scope: String) {
         let label: String

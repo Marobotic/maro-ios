@@ -185,6 +185,7 @@ enum Omp {
         ("auto", "Whichever is available"),
         ("spotify", "Prefer Spotify  ·  320 kbps"),
         ("ytm", "Prefer YouTube Music"),
+        ("sc", "Prefer SoundCloud"),
     ]
 
     static func fmtTime(_ seconds: Double) -> String {
