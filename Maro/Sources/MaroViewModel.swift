@@ -866,6 +866,23 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         // only takes the artist's own upload.
         let oneOff = oneOffPrefer.removeValue(forKey: track.id)
         let prefer = oneOff ?? state.playbackSource
+        if prefer == "spotify" && track.source == "spotify" && Spotify.shared.hasLogin {
+            return playSpotifyHere(track, tag: tag)
+        }
+        if oneOff == "spotify" && track.source != "spotify" && Spotify.shared.hasLogin {
+            playRoute = "spotify"
+            Task { @MainActor in
+                let found = await Spotify.shared.search("\(track.title) \(track.artist)")
+                guard tag == playTag else { return }
+                if let alt = found.first(where: { Match.sameSong($0, track) }) {
+                    playSpotifyHere(alt, tag: tag, display: track)
+                } else {
+                    showStatus("Spotify doesn't have this song - playing it the usual way", "info")
+                    startUsual(track, tag: tag)
+                }
+            }
+            return
+        }
         if prefer == "sc" && track.source != "sc" {
             playRoute = "soundcloud"
             Task { @MainActor in
@@ -904,6 +921,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                       tag == playTag, state.audioTimeline.isEmpty else { return }
                 state.audioTimeline = line
             }
+        } else if track.source == "spotify" && Spotify.shared.hasLogin {
+            playSpotifyHere(track, tag: tag)
         } else if track.source == "sc" {
             playRoute = "soundcloud"
             playSoundCloud(track, tag: tag, fallback: nil)
@@ -973,6 +992,32 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         }
     }
 
+    /**
+     * A Spotify song on this phone's own Spotify player (Spotify.swift), at
+     * 320 kbps. `display` is the row on screen when it is a stand-in for a
+     * song from another service.
+     */
+    private func playSpotifyHere(_ track: Track, tag: Int, display: Track? = nil) {
+        playRoute = "spotify"
+        Spotify.shared.start()
+        sounding = nil
+        setSounding("", copy: "", kbps: 0, inTier: nil, route: "spotify")
+        state.audioRoute = "spotify"
+        phone.onSpotifyRate = { [weak self] line, kbps, nominal in
+            guard let self, tag == self.playTag else { return }
+            self.state.audioTimeline = line
+            self.state.audioKbps = kbps
+            self.state.audioInTier = nominal > 0 ? nominal >= 320 : nil
+        }
+        phone.playSpotify("spotify:track:" + track.id, tag: tag,
+                          duration: track.duration > 0 ? track.duration : (display?.duration ?? 0))
+        // The queue's next Spotify song waits loaded on a standby player.
+        let q = state.localQueue, i = state.localQueueIndex
+        if let next = q[safe: i + 1], next.source == "spotify", !next.id.isEmpty {
+            phone.stageSpotify("spotify:track:" + next.id)
+        }
+    }
+
     // -- where a song plays from -----------------------------------------
 
     /** "Play on..." for one press: the service picked for that song. */
@@ -991,8 +1036,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             remote("playtrack", ["track": t.toJSON(), "prefer": service])
             return
         }
-        if service == "spotify" {
-            showStatus("Spotify isn't on the phone yet - playing YouTube Music's copy", "info")
+        if service == "spotify" && !Spotify.shared.hasLogin {
+            showStatus("Sign in to Spotify on the desktop first - playing YouTube Music's copy", "info")
         }
         oneOffPrefer[t.id] = service
         playTrack(t)
@@ -1333,6 +1378,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         let sessions = ServiceSessions.shared
         state.services = await sessions.refresh(client)
         state.servicesLocked = !sessions.hasKey
+        Spotify.shared.start()
     }
 
     /** Settings > "Bring your music services over": the password, once. */
@@ -1381,6 +1427,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         Task {
             await client.logout()
             ServiceSessions.shared.forgetAll()
+            Spotify.shared.start()      // no login left: stops it
             resetToSignIn()
         }
     }
@@ -2322,6 +2369,18 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             return
         }
         let source = state.searchSource
+        // Spotify too, from this phone's own player, when it has the login.
+        if (source == "spotify" || source.isEmpty) && Spotify.shared.hasLogin {
+            Spotify.shared.start()
+            Task { @MainActor in
+                let found = await Spotify.shared.search(q)
+                guard q == state.searchText.trimmingCharacters(in: .whitespaces) else { return }
+                if source == "spotify" { state.searching = false }
+                // Spotify first, as the desktop orders them.
+                state.searchResults = Self.merge(found, state.searchResults)
+            }
+            if source == "spotify" { return }
+        }
         // SoundCloud is asked from here, so it answers with the desktop asleep.
         if source == "sc" || source.isEmpty {
             scResults = (q, [])

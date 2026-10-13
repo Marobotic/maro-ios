@@ -1,0 +1,30 @@
+[package]
+name = "jukebox-spotify"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Plays Spotify on this computer for the Jukebox engine: signs in with
+# Spotify's own login page once, then takes commands on stdin and reports on
+# stdout, one JSON object per line. Audio goes straight to the speakers.
+
+[dependencies]
+librespot-core = { version = "0.8.0", default-features = false, features = ["rustls-tls-native-roots"] }
+librespot-oauth = { version = "0.8.0", default-features = false, features = ["rustls-tls-native-roots"] }
+librespot-playback = { version = "0.8.0", default-features = false, features = ["rodio-backend", "rustls-tls-native-roots"] }
+librespot-protocol = "0.8.0"
+protobuf = "3"
+http = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "sync", "time"] }
+serde_json = "1"
+log = "0.4"
+env_logger = "0.11"
+
+# librespot-playback with one change (vendor/librespot-playback, see
+# "Jukebox:" in src/player.rs): the audio key is fetched alongside the file.
+[patch.crates-io]
+librespot-playback = { path = "vendor/librespot-playback" }
+
+[profile.release]
+opt-level = 3
+strip = true

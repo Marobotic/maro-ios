@@ -17,6 +17,21 @@ jobs:
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode_16.4.app || sudo xcode-select -s "$(ls -d /Applications/Xcode_16*.app | sort -V | tail -1)"
 
+      # The Spotify player: the desktop's librespot helper (spotify/), as a
+      # static library the app links (Spotify-Bridging.h).
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: spotify
+
+      - name: Spotify player (Rust, aarch64-apple-ios)
+        env:
+          IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+        run: |
+          rustup target add aarch64-apple-ios
+          cd spotify
+          cargo rustc --release --lib --target aarch64-apple-ios --crate-type staticlib 2>&1 | tail -40
+          test -f target/aarch64-apple-ios/release/libjukebox_spotify.a
+
       - name: Generate project
         run: |
           brew install xcodegen

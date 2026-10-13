@@ -214,18 +214,114 @@ final class PhonePlayer {
     }
 
     /** True once a real song is loaded. */
-    var hasMedia: Bool { tag > 0 && player.currentItem != nil }
+    var hasMedia: Bool { tag > 0 && (spotifyUri != nil || player.currentItem != nil) }
 
-    var isPlaying: Bool { player.timeControlStatus != .paused }
+    var isPlaying: Bool { spotifyUri != nil ? spotifyPlaying : player.timeControlStatus != .paused }
 
     var currentPosition: Double {
+        if spotifyUri != nil {
+            let at = spotifyPlaying ? spotifyMs / 1000 + (uptime() - spotifyAt) : spotifyMs / 1000
+            return max(0, at)
+        }
         let t = player.currentTime().seconds
         return t.isFinite ? max(0, t) : 0
     }
 
     var volume: Float {
         get { player.volume }
-        set { player.volume = newValue }
+        set {
+            player.volume = newValue
+            Spotify.shared.volume(Double(newValue))
+        }
+    }
+
+    // -- Spotify: the same controls, the librespot player behind them ------
+
+    /** The Spotify song this player is on, or nil when AVPlayer is. */
+    private var spotifyUri: String?
+    private var spotifyPlaying = false
+    private var spotifyMs: Double = 0
+    private var spotifyAt: Double = 0
+    private var spotifyTick: Task<Void, Never>?
+    /** Spotify's per-second bitrate of the song playing: (line, now, file). */
+    var onSpotifyRate: (([Int], Int, Int) -> Void)?
+    private var spotifyLine: [Int] = []
+
+    func playSpotify(_ uri: String, tag: Int, duration: Double, at ms: Int = 0) {
+        player.pause()
+        player.replaceCurrentItem(with: nil)
+        if let boundaryObserver { player.removeTimeObserver(boundaryObserver) }
+        boundaryObserver = nil
+        self.tag = tag
+        started = false
+        expected = duration
+        spotifyUri = uri
+        spotifyPlaying = false
+        spotifyMs = Double(ms)
+        spotifyAt = uptime()
+        spotifyLine = []
+        try? AVAudioSession.sharedInstance().setActive(true)
+        let sp = Spotify.shared
+        sp.onEvent = { [weak self] ev in self?.spotifyEvent(ev, tag: tag) }
+        sp.load(uri, play: true, ms: ms)
+        // librespot reports a position only when it changes state: the lock
+        // screen and the bar are kept moving from here.
+        spotifyTick?.cancel()
+        spotifyTick = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard let self, self.tag == tag, self.spotifyUri != nil else { return }
+                if self.spotifyPlaying { self.report() }
+            }
+        }
+    }
+
+    /** Queue the next Spotify song on a standby player: it starts at once. */
+    func stageSpotify(_ uri: String) { Spotify.shared.stage(uri) }
+
+    private func spotifyEvent(_ ev: Spotify.Event, tag: Int) {
+        guard tag == self.tag, let mine = spotifyUri else { return }
+        switch ev {
+        case .playing(let uri, let ms) where uri == mine:
+            spotifyPlaying = true
+            spotifyMs = Double(ms)
+            spotifyAt = uptime()
+            if !started {
+                started = true
+                events?.onStarted(tag: tag)
+            }
+            report()
+        case .paused(let uri, let ms) where uri == mine:
+            spotifyPlaying = false
+            spotifyMs = Double(ms)
+            spotifyAt = uptime()
+            report()
+        case .ended(let uri) where uri == mine:
+            spotifyPlaying = false
+            events?.onEnded()
+        case .unavailable(let uri) where uri == mine:
+            events?.onFailed(tag: tag, notOnServer: true, message: "Spotify won't play this song here")
+        case .bitrate(let uri, let ms, let kbps, let nominal) where uri == mine:
+            let second = ms / 1000
+            if second >= 0 && second < 7200 {
+                if spotifyLine.count <= second { spotifyLine += Array(repeating: 0, count: second - spotifyLine.count + 1) }
+                spotifyLine[second] = kbps
+            }
+            onSpotifyRate?(spotifyLine, kbps, nominal)
+        case .signedOut(let message), .error(let message):
+            if !started { events?.onFailed(tag: tag, notOnServer: true, message: message) }
+        default:
+            break
+        }
+    }
+
+    private func leaveSpotify() {
+        guard spotifyUri != nil else { return }
+        Spotify.shared.stop()
+        spotifyUri = nil
+        spotifyPlaying = false
+        spotifyTick?.cancel()
+        spotifyTick = nil
     }
 
     func playFile(_ file: URL, tag: Int, duration: Double) { start(AVURLAsset(url: file), tag: tag, duration: duration) }
@@ -246,6 +342,7 @@ final class PhonePlayer {
     }
 
     private func start(_ asset: AVURLAsset, tag: Int, duration: Double) {
+        leaveSpotify()
         self.tag = tag
         started = false
         expected = duration
@@ -313,6 +410,10 @@ final class PhonePlayer {
 
     private func report() {
         guard tag > 0 else { return }
+        if spotifyUri != nil {
+            events?.onProgress(position: min(currentPosition, expected > 0 ? expected : .infinity), duration: expected, playing: spotifyPlaying)
+            return
+        }
         let d = player.currentItem?.duration.seconds ?? 0
         let length = expected > 1 ? expected : (d.isFinite ? d : 0)
         events?.onProgress(position: min(currentPosition, length > 0 ? length : .infinity), duration: length, playing: player.timeControlStatus != .paused)
@@ -320,18 +421,29 @@ final class PhonePlayer {
 
     func play() {
         try? AVAudioSession.sharedInstance().setActive(true)
+        if spotifyUri != nil { return Spotify.shared.play() }
         player.play()
     }
 
-    func pause() { player.pause() }
+    func pause() {
+        if spotifyUri != nil { return Spotify.shared.pause() }
+        player.pause()
+    }
 
     func seek(to seconds: Double) {
+        if spotifyUri != nil {
+            spotifyMs = max(0, seconds) * 1000
+            spotifyAt = uptime()
+            Spotify.shared.seek(ms: Int(spotifyMs))
+            return report()
+        }
         player.seek(to: CMTime(seconds: max(0, seconds), preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
             Task { @MainActor in self?.report() }
         }
     }
 
     func stop() {
+        leaveSpotify()
         tag = 0
         if let boundaryObserver { player.removeTimeObserver(boundaryObserver) }
         boundaryObserver = nil

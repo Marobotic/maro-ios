@@ -280,6 +280,7 @@ private struct StatsPanel: View {
         case "download": delivery = "Downloading to this phone"
         case "remote": delivery = "Playing on " + state.playingDeviceName
         case "soundcloud": delivery = "Streaming from SoundCloud"
+        case "spotify": delivery = "Streaming from Spotify, on this phone"
         case "youtube": delivery = "Streaming from YouTube (guest, until the server has its copy)"
         default: delivery = "—"
         }
