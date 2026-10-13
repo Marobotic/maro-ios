@@ -163,6 +163,15 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             }
         }
         startConnectivityWatch()
+        // Sessions signed in to (or out of) on another client arrive here
+        // without a restart.
+        Task { [weak self] in
+            while true {
+                await sleep(seconds: 300)
+                guard let self else { return }
+                if self.state.signedIn { await self.refreshServices() }
+            }
+        }
         Task { [weak self] in
             while true {
                 await sleep(seconds: 5)
@@ -742,12 +751,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         case "playlist.tracks":
             onPlaylistPage(p)
         case "search":
-            let q = p.str("q")
-            if !q.isEmpty && q == state.searchText.trimmingCharacters(in: .whitespaces) {
-                state.searching = false
-                let extra = scResults.q == q ? scResults.rows : []
-                state.searchResults = Self.merge(Sync.tracks(p.arr("results")), extra)
-            }
+            break       // searches are answered on this phone itself now
         default:
             break
         }
@@ -967,8 +971,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
 
     /**
      * A YouTube song the droplet has no copy of: straight from YouTube, the
-     * guest stream, so it plays with the desktop asleep. The droplet is still
-     * asked for its Premium copy, which the next play gets.
+     * guest stream. Nothing is asked of any other device.
      */
     private func playYouTubeDirect(_ videoId: String, track: Track, tag: Int) {
         playRoute = "youtube"
@@ -981,7 +984,6 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 setSounding(videoId, copy: copy, kbps: stream.kbps, inTier: AudioCache.inTier(stream.kbps), route: "youtube")
                 phone.playYouTube(stream.url, tag: tag, duration: track.duration)
                 if state.statsOpen { measureSounding() }
-                requestCloud(track.with(videoId: videoId), .warm)
             } catch {
                 guard tag == playTag else { return }
                 log.info("youtube \(videoId) direct refused: \(String(describing: error))")
@@ -1458,14 +1460,13 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         progress = Progress()
     }
 
-    /** The account's own sign-out, through the engine (saves the queue). */
+    /**
+     * Sign this phone out of Jukebox. Only this phone: every other device
+     * stays signed in, and the account keeps its music services for them.
+     */
     func signOutMaro() {
-        send("logout", ["target": "maro"])
-        showStatus("Signed out. Your queue is saved to your account.", "ok")
-        Task {
-            await sleep(seconds: 1.2)
-            logout()
-        }
+        showStatus("Signed out of Jukebox on this phone.", "ok")
+        logout()
     }
 
     // -- commands -----------------------------------------------------------
@@ -1476,18 +1477,59 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         }
     }
 
+    /** The sign-in page open on this phone, if any (shown as a sheet). */
+    @Published var signIn: ServiceSignIn?
+
+    /**
+     * Connect: sign in on this phone, on the service's own page; the session
+     * goes onto the account, where every client takes it. Sign out: off the
+     * account, so every client is signed out of it. `key` is "spotify",
+     * "ytm" or "sc".
+     */
     func connectService(_ key: String) {
-        let connected = key == "spotify" ? state.spotifyConnected : state.ytmConnected
-        let label = key == "spotify" ? "Spotify" : "YouTube Music"
-        if connected {
-            send("logout", ["target": key])
-            showStatus("Disconnecting \(label) on the desktop.", "info")
-        } else {
-            send(key == "spotify" ? "login.spotifyd" : "login.ytm")
-            // A desktop engine opens it there; the cloud engine sends the
-            // link back here ("login"), which shows it on this phone.
-            showStatus("Starting the \(label) sign-in…", "info")
+        let slot = key == "spotify" ? ServiceSessions.librespot : key == "ytm" ? ServiceSessions.ytm : ServiceSessions.soundcloud
+        let label = key == "spotify" ? "Spotify" : key == "ytm" ? "YouTube Music" : "SoundCloud"
+        if state.services.contains(slot) {
+            Task {
+                await ServiceSessions.shared.signOut(slot, client: client)
+                if slot == ServiceSessions.librespot { Spotify.shared.start() }   // no login: stops it
+                state.services = ServiceSessions.shared.available
+                showStatus("Signed out of \(label) on every device", "ok")
+            }
+            return
         }
+        guard ServiceSessions.shared.hasKey else {
+            showStatus("Enter your Jukebox password under Music services first", "info")
+            return
+        }
+        signIn = ServiceSignIn(service: key) { [weak self] outcome in
+            guard let self else { return }
+            self.signIn = nil
+            switch outcome {
+            case .session(let payload):
+                Task { await self.saveSession(slot, payload, label: label) }
+            case .spotifyToken(let token):
+                showStatus("Signing in to Spotify…", "info")
+                Spotify.shared.onLoggedIn = { [weak self] creds in
+                    Task { await self?.saveSession(ServiceSessions.librespot, ["credentials": creds], label: "Spotify") }
+                }
+                Spotify.shared.signIn(token: token)
+            case .failed(let why):
+                showStatus(why, "error")
+            case .cancelled:
+                break
+            }
+        }
+    }
+
+    private func saveSession(_ slot: String, _ payload: JSON, label: String) async {
+        if let why = await ServiceSessions.shared.publish(slot, payload, client: client) {
+            showStatus(why, "error")
+            return
+        }
+        state.services = ServiceSessions.shared.available
+        if slot == ServiceSessions.librespot { Spotify.shared.start() }
+        showStatus("Signed in to \(label) - on your account, so every device has it", "ok")
     }
 
     func artFetch(_ artKey: String) {
@@ -2349,19 +2391,25 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         doSearch()
     }
 
-    /** SoundCloud's own answers to a search, merged into the desktop's. */
-    private var scResults: (q: String, rows: [Track]) = ("", [])
+    /**
+     * Search every service from this phone itself - Spotify through its own
+     * player, YouTube Music and SoundCloud through their sites - and merge
+     * them into one row per song. Nothing goes through another device.
+     */
+    private var searchToken = 0
 
     func doSearch() {
         let q = state.searchText.trimmingCharacters(in: .whitespaces)
         if q.isEmpty { return }
+        searchToken += 1
+        let token = searchToken
         state.searching = true
         state.searchResults = []
         // A pasted SoundCloud link opens the song (or set, or profile) itself.
         if q.contains("soundcloud.com/") || q.contains("snd.sc/") {
             Task { @MainActor in
                 let found = (try? await SoundCloud.shared.open(link: q)) ?? []
-                guard q == state.searchText.trimmingCharacters(in: .whitespaces) else { return }
+                guard token == searchToken else { return }
                 state.searching = false
                 state.searchResults = found
                 if found.isEmpty { showStatus("SoundCloud didn't recognise that link", "error") }
@@ -2369,31 +2417,28 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             return
         }
         let source = state.searchSource
-        // Spotify too, from this phone's own player, when it has the login.
-        if (source == "spotify" || source.isEmpty) && Spotify.shared.hasLogin {
-            Spotify.shared.start()
-            Task { @MainActor in
-                let found = await Spotify.shared.search(q)
-                guard q == state.searchText.trimmingCharacters(in: .whitespaces) else { return }
-                if source == "spotify" { state.searching = false }
-                // Spotify first, as the desktop orders them.
-                state.searchResults = Self.merge(found, state.searchResults)
+        let wantSpotify = (source.isEmpty || source == "spotify") && Spotify.shared.hasLogin
+        let wantYouTube = source.isEmpty || source == "ytm"
+        let wantSoundCloud = source.isEmpty || source == "sc"
+        if wantSpotify { Spotify.shared.start() }
+        Task { @MainActor in
+            async let sp: [Track] = wantSpotify ? Spotify.shared.search(q) : []
+            async let yt: [Track] = wantYouTube ? YouTubeDirect.shared.search(q) : []
+            async let sc: [Track] = wantSoundCloud ? ((try? await SoundCloud.shared.search(q)) ?? []) : []
+            let (a, b, c) = await (sp, yt, sc)
+            guard token == searchToken else { return }
+            // The preferred service's copy first, then Spotify, YouTube, SoundCloud.
+            var lists = ["spotify": a, "ytm": b, "sc": c]
+            let order = [state.playbackSource] + ["spotify", "ytm", "sc"]
+            var merged: [Track] = []
+            for key in order where lists[key] != nil {
+                merged = Self.merge(merged, lists[key] ?? [])
+                lists[key] = nil
             }
-            if source == "spotify" { return }
+            state.searching = false
+            state.searchResults = merged
+            if merged.isEmpty { showStatus("Nothing found for \(q)", "info") }
         }
-        // SoundCloud is asked from here, so it answers with the desktop asleep.
-        if source == "sc" || source.isEmpty {
-            scResults = (q, [])
-            Task { @MainActor in
-                let found = (try? await SoundCloud.shared.search(q)) ?? []
-                guard q == state.searchText.trimmingCharacters(in: .whitespaces) else { return }
-                scResults = (q, found)
-                if source == "sc" { state.searching = false }
-                state.searchResults = Self.merge(state.searchResults, found)
-            }
-            if source == "sc" { return }
-        }
-        send("search", ["q": q, "source": source])
     }
 
     /**

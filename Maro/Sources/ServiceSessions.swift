@@ -4,27 +4,27 @@ import Foundation
 import Security
 
 /**
- * The music-service sessions the account holds, so this phone can play from
- * Spotify, YouTube Music and SoundCloud itself instead of through the desktop.
+ * The music-service sessions, which live on the Jukebox account.
  *
- * The desktop uploads each of its sign-ins to the droplet at /service/<name>,
- * sealed with a key derived from the account password (the droplet only ever
- * holds ciphertext). This derives the same key at sign-in, keeps it in the
- * Keychain, and pulls and opens each session. A sign-in made on this phone
- * itself always wins over the account's copy.
+ * Every client - this phone, the desktop, any other - is independent: it can
+ * sign in to Spotify, YouTube Music and SoundCloud itself, and whichever
+ * client signs in puts that session on the account (/service/<name>, sealed
+ * with a key derived from the account password, so the droplet only holds
+ * ciphertext). Every client takes the account's copy. The newest sign-in wins
+ * everywhere, and a service signed out of anywhere is signed out everywhere.
+ * Nothing comes from another device; any client works with the rest off.
  *
- * Mirrors the desktop's sidecar/service_creds.py byte for byte: change one,
- * change both.
+ * Mirrors the desktop's sidecar/service_creds.py and service_sync.sync() byte
+ * for byte: change one, change both.
  */
 final class ServiceSessions: @unchecked Sendable {
     static let shared = ServiceSessions()
 
-    /// Slot names on the droplet. "librespot" is the Spotify player's own
-    /// login (what plays audio); "spotify" is the old Web API token.
+    /// Slot names on the account. "librespot" is the Spotify player's login.
     static let soundcloud = "soundcloud"
     static let ytm = "ytm"
     static let librespot = "librespot"
-    static let all = [soundcloud, ytm, librespot]
+    static let all = [librespot, ytm, soundcloud]
 
     private static let iterations: UInt32 = 210_000
     private static let info = "maro.music/service-credentials/v1"
@@ -32,7 +32,7 @@ final class ServiceSessions: @unchecked Sendable {
     private static let keyItem = "account-key"
 
     private let lock = NSLock()
-    private var sessions: [String: JSON] = [:]
+    private var cache: [String: JSON] = [:]
 
     // -- the key ---------------------------------------------------------
 
@@ -71,7 +71,7 @@ final class ServiceSessions: @unchecked Sendable {
 
     var hasKey: Bool { Keychain.get(Self.keyItem) != nil }
 
-    // -- the blobs -------------------------------------------------------
+    // -- sealing ---------------------------------------------------------
 
     static func open(_ blob: String, key: Data) -> JSON? {
         guard let raw = Data(base64Encoded: blob), raw.count > 12 + 16,
@@ -83,65 +83,95 @@ final class ServiceSessions: @unchecked Sendable {
         return JSONText.parse(plain) as? JSON
     }
 
+    static func seal(_ payload: JSON, key: Data) -> String? {
+        let plain = JSONText.data(payload)
+        guard let box = try? AES.GCM.seal(plain, using: SymmetricKey(data: key), nonce: AES.GCM.Nonce(),
+                                          authenticating: Data(blobVersion)),
+              let combined = box.combined else { return nil }
+        return combined.base64EncodedString()       // nonce + ciphertext + tag
+    }
+
+    // -- in step with the account ----------------------------------------
+
     /**
-     * Pull every slot the account holds. A missing slot leaves what this phone
-     * already has; a slot the key cannot open means the password changed, and
-     * the key is dropped so Settings asks for it again.
-     * Returns the services now usable.
+     * Take every session the account holds that is newer than this phone's
+     * copy, and drop the ones signed out of elsewhere. Returns the services
+     * this phone can use. A slot the key cannot open means the password
+     * changed: the key is dropped so Settings asks for it again.
      */
     @discardableResult
     func refresh(_ client: MaroClient) async -> [String] {
         guard let key = Keychain.get(Self.keyItem) else { return available }
         for name in Self.all {
-            if Keychain.get("own." + name) != nil { continue }   // signed in here: keep it
-            guard let blob = await client.serviceBlob(name) else { continue }
-            if blob.isEmpty {
-                Keychain.remove("account." + name)               // signed out on the desktop
+            guard let got = await client.serviceBlob(name) else { continue }      // unreachable: keep ours
+            let mine = Keychain.get("at." + name).map { String(decoding: $0, as: UTF8.self) }
+            if got.blob.isEmpty {
+                // Gone from the account: signed out of somewhere.
+                if mine != nil { forgetLocal(name) }
                 continue
             }
-            guard let payload = Self.open(blob, key: key) else {
+            if got.at == mine && Keychain.get("svc." + name) != nil { continue }
+            guard let payload = Self.open(got.blob, key: key) else {
                 Keychain.remove(Self.keyItem)
                 break
             }
-            Keychain.set(JSONText.data(payload), "account." + name)
+            store(name, payload, at: got.at)
         }
-        lock.lock(); sessions = [:]; lock.unlock()
         return available
     }
 
-    /** This phone's own sign-in to a service, which outranks the account's. */
-    func setOwn(_ name: String, _ payload: JSON?) {
-        if let payload { Keychain.set(JSONText.data(payload), "own." + name) }
-        else { Keychain.remove("own." + name) }
-        lock.lock(); sessions[name] = nil; lock.unlock()
+    /**
+     * A sign-in made on this phone: onto the account first (it is where the
+     * session lives), then kept here. Returns nil, or why it failed.
+     */
+    func publish(_ name: String, _ payload: JSON, client: MaroClient) async -> String? {
+        guard let key = Keychain.get(Self.keyItem) else { return "Enter your Jukebox password in Settings first" }
+        guard let blob = Self.seal(payload, key: key) else { return "Could not seal the session" }
+        guard let at = await client.putServiceBlob(name, blob) else { return "Could not save the session to your account" }
+        store(name, payload, at: at)
+        return nil
+    }
+
+    /** Signed out of here is signed out everywhere: off the account, then here. */
+    func signOut(_ name: String, client: MaroClient) async {
+        _ = await client.deleteServiceBlob(name)
+        forgetLocal(name)
+    }
+
+    private func store(_ name: String, _ payload: JSON, at: String) {
+        Keychain.set(JSONText.data(payload), "svc." + name)
+        Keychain.set(Data(at.utf8), "at." + name)
+        lock.lock(); cache[name] = payload; lock.unlock()
+    }
+
+    private func forgetLocal(_ name: String) {
+        Keychain.remove("svc." + name)
+        Keychain.remove("at." + name)
+        lock.lock(); cache[name] = nil; lock.unlock()
     }
 
     func session(_ name: String) -> JSON? {
         lock.lock(); defer { lock.unlock() }
-        if let s = sessions[name] { return s }
-        let data = Keychain.get("own." + name) ?? Keychain.get("account." + name)
-        let s = data.flatMap { JSONText.parse($0) as? JSON }
-        sessions[name] = s
+        if let s = cache[name] { return s }
+        let s = Keychain.get("svc." + name).flatMap { JSONText.parse($0) as? JSON }
+        cache[name] = s
         return s
-    }
-
-    /** Where a service's session came from: "phone", "account" or "". */
-    func origin(_ name: String) -> String {
-        if Keychain.get("own." + name) != nil { return "phone" }
-        if Keychain.get("account." + name) != nil { return "account" }
-        return ""
     }
 
     var available: [String] { Self.all.filter { session($0) != nil } }
 
-    /** Signing out of the Jukebox account forgets every service with it. */
+    /**
+     * Signing out of Jukebox on this phone: its key and its copies go. The
+     * account's sessions stay - every other client is still signed in.
+     */
     func forgetAll() {
         Keychain.remove(Self.keyItem)
+        for name in Self.all { forgetLocal(name) }
+        // The first build kept these under other names.
         for name in Self.all {
             Keychain.remove("own." + name)
             Keychain.remove("account." + name)
         }
-        lock.lock(); sessions = [:]; lock.unlock()
     }
 }
 

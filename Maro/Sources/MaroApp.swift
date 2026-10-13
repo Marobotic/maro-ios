@@ -9,6 +9,7 @@ struct MaroApp: App {
             Group {
                 if vm.state.signedIn {
                     HomeScreen(vm: vm)
+                        .sheet(item: $vm.signIn) { ServiceSignInSheet(signIn: $0) }
                 } else {
                     LoginScreen(vm: vm)
                 }

@@ -290,21 +290,32 @@ final class MaroClient: @unchecked Sendable {
     func account() async -> JSON? { try? await call("GET", "/account") }
 
     /**
-     * One music service's sealed session, as the desktop stored it (see
-     * ServiceSessions). "" when the account holds none, nil when the droplet
+     * One music service's sealed session on the account, and when it was
+     * stored. An empty blob when the account holds none; nil when the droplet
      * could not be asked - the two must not be confused, or a dropped
      * connection would sign the phone out of the service.
      */
-    func serviceBlob(_ name: String) async -> String? {
+    func serviceBlob(_ name: String) async -> (blob: String, at: String)? {
         var req = request(Self.base + "/service/" + Self.escape(name), timeout: 15)
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         guard let (data, resp) = try? await http.data(for: req) else { return nil }
         checkRejected(req, resp)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
         let body = JSONText.parse(data) as? JSON ?? [:]
-        if code == 404 || body.str("error") == "no stored credential" { return "" }
+        if code == 404 || body.str("error") == "no stored credential" { return ("", "") }
         guard (200..<300).contains(code) else { return nil }
-        return body.str("blob")
+        return (body.str("blob"), body.str("at"))
+    }
+
+    /** Store a sealed session on the account; the time it was stored, or nil. */
+    func putServiceBlob(_ name: String, _ blob: String) async -> String? {
+        guard let resp = try? await call("PUT", "/service/" + Self.escape(name), body: ["blob": blob, "v": 1], timeout: 20),
+              (resp["ok"] as? Bool) == true else { return nil }
+        return resp.str("at")
+    }
+
+    func deleteServiceBlob(_ name: String) async -> Bool {
+        ((try? await call("DELETE", "/service/" + Self.escape(name), timeout: 15))?["ok"] as? Bool) == true
     }
 
     func setPlayback(_ device: String) async -> Bool {

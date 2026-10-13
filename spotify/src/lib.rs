@@ -129,16 +129,39 @@ fn uri(u: &SpotifyUri) -> String {
 /// closes or a "quit" arrives. The desktop feeds it stdin; iOS, jb_send().
 pub async fn serve(dir: PathBuf, mut lines: tokio::sync::mpsc::UnboundedReceiver<String>) {
     let c = cache(&dir);
-    let Some(creds) = c.credentials() else {
-        emit(json!({"ev": "error", "code": "signed_out", "message": "Not signed in to Spotify."}));
-        return;
+    // No login yet: wait for one. {"cmd":"login","token":"<access token>"}
+    // is a sign-in the app did on Spotify's own page (the phone's web view);
+    // connecting once with it stores a reusable login in `dir`, which the
+    // app then keeps on the account.
+    let mut fresh = false;
+    let creds = match c.credentials() {
+        Some(creds) => creds,
+        None => {
+            emit(json!({"ev": "error", "code": "signed_out", "message": "Not signed in to Spotify."}));
+            loop {
+                let Some(line) = lines.recv().await else { return };
+                let Ok(cmd) = serde_json::from_str::<Value>(&line) else { continue };
+                match cmd["cmd"].as_str().unwrap_or("") {
+                    "login" => {
+                        let token = cmd["token"].as_str().unwrap_or("").to_string();
+                        if !token.is_empty() {
+                            fresh = true;
+                            break Credentials::with_access_token(token);
+                        }
+                    }
+                    "quit" => return,
+                    _ => {}
+                }
+            }
+        }
     };
     let session = Session::new(SessionConfig::default(), Some(c));
     if let Err(e) = session.connect(creds, true).await {
         emit(json!({"ev": "error", "code": "signed_out", "message": format!("Spotify would not sign in: {e}")}));
         return;
     }
-    emit(json!({"ev": "ready", "user": session.username()}));
+    // "login": true when this start just turned a sign-in into a stored login.
+    emit(json!({"ev": "ready", "user": session.username(), "login": fresh}));
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<pool::Tagged>();
     let mut volume: u16 = u16::MAX;

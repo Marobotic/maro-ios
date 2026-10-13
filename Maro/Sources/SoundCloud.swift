@@ -38,6 +38,19 @@ actor SoundCloud {
 
     var signedIn: Bool { !token.isEmpty }
 
+    /** Who a SoundCloud login belongs to: {"id", "name"}, the desktop's shape. */
+    func me(token: String) async -> JSON? {
+        guard let cid = try? await id(refresh: false),
+              let url = URL(string: Self.api + "/me?client_id=" + cid) else { return nil }
+        var req = URLRequest(url: url, timeoutInterval: 15)
+        req.setValue(Self.ua, forHTTPHeaderField: "User-Agent")
+        req.setValue("OAuth " + token, forHTTPHeaderField: "Authorization")
+        guard let (data, resp) = try? await http.data(for: req), (resp as? HTTPURLResponse)?.statusCode == 200,
+              let me = JSONText.parse(data) as? JSON else { return nil }
+        let id = "\(me["id"] ?? "")"
+        return id.isEmpty ? nil : ["id": id, "name": me.str("username").ifEmpty(me.str("permalink"))]
+    }
+
     // -- transport --------------------------------------------------------
 
     private func get(_ url: URL, json: Bool = true) async throws -> (Data, Int) {

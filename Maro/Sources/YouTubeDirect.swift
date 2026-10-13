@@ -73,6 +73,58 @@ actor YouTubeDirect {
         return JSONText.parse(data) as? JSON ?? [:]
     }
 
+    /**
+     * Songs on YouTube Music for a search, asked from this phone (the
+     * site's own search, songs only). Each row: title, then artists · album ·
+     * length.
+     */
+    func search(_ q: String) async -> [Track] {
+        let body: JSON = [
+            "context": ["client": ["clientName": "WEB_REMIX", "clientVersion": "1.20251006.01.00", "hl": "en", "gl": "US"]],
+            "query": q,
+            "params": "EgWKAQIIAWoKEAkQBRAKEAMQBA%3D%3D",      // songs
+        ]
+        var req = URLRequest(url: URL(string: "https://music.youtube.com/youtubei/v1/search?prettyPrint=false")!, timeoutInterval: 12)
+        req.httpMethod = "POST"
+        req.httpBody = JSONText.data(body)
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("https://music.youtube.com", forHTTPHeaderField: "Origin")
+        req.setValue(Self.ua, forHTTPHeaderField: "User-Agent")
+        guard let (data, _) = try? await http.data(for: req), let d = JSONText.parse(data) as? JSON else { return [] }
+        let tabs = (d.obj("contents")?.obj("tabbedSearchResultsRenderer")?["tabs"] as? [JSON]) ?? []
+        let sections = (tabs.first?.obj("tabRenderer")?.obj("content")?.obj("sectionListRenderer")?["contents"] as? [JSON]) ?? []
+        var out: [Track] = []
+        for section in sections {
+            for item in (section.obj("musicShelfRenderer")?["contents"] as? [JSON]) ?? [] {
+                guard let r = item.obj("musicResponsiveListItemRenderer"),
+                      let videoId = r.obj("playlistItemData")?.str("videoId"), !videoId.isEmpty else { continue }
+                let cols = ((r["flexColumns"] as? [JSON]) ?? []).map { col -> [String] in
+                    ((col.obj("musicResponsiveListItemFlexColumnRenderer")?.obj("text")?["runs"] as? [JSON]) ?? []).map { $0.str("text") }
+                }
+                let meta = cols.count > 1 ? cols[1] : []
+                // Runs between " • " separators: artists, album, length.
+                var groups: [[String]] = [[]]
+                for run in meta {
+                    if run.trimmingCharacters(in: .whitespaces) == "\u{2022}" { groups.append([]) } else { groups[groups.count - 1].append(run) }
+                }
+                var t = Track()
+                t.source = "ytm"
+                t.id = videoId
+                t.videoId = videoId
+                t.title = cols.first?.joined() ?? ""
+                t.artist = groups.first?.joined().trimmingCharacters(in: .whitespaces) ?? ""
+                t.album = groups.count > 2 ? groups[1].joined().trimmingCharacters(in: .whitespaces) : ""
+                if let length = groups.last?.joined().trimmingCharacters(in: .whitespaces), length.contains(":") {
+                    t.duration = length.split(separator: ":").reduce(0) { $0 * 60 + (Double($1) ?? 0) }
+                }
+                let thumbs = (r.obj("thumbnail")?.obj("musicThumbnailRenderer")?.obj("thumbnail")?["thumbnails"] as? [JSON]) ?? []
+                t.artUrl = thumbs.last?.str("url") ?? ""
+                out.append(t)
+            }
+        }
+        return out
+    }
+
     /** The best AAC stream AVPlayer can open for this video, and its rate. */
     func audio(_ videoId: String) async throws -> Stream {
         if let hit = cache[videoId], hit.expires - Date().timeIntervalSince1970 > 300 { return hit }

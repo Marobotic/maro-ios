@@ -25,39 +25,30 @@ struct SettingsPage: View {
                         tint: Omp.maro,
                         connected: state.signedIn
                     ) {
-                        present(.confirm(message: "Sign out? Playback keeps running on the desktop.", confirm: "Sign out") { vm.signOutMaro() })
+                        present(.confirm(message: "Sign out of Jukebox on this phone? Your other devices stay signed in.", confirm: "Sign out") { vm.signOutMaro() })
                     }
-                    SettingsHead(label: "Connected services")
-                    SettingsAccountCard(
-                        label: "Spotify",
-                        icon: Omp.Icons.spotify,
-                        value: state.spotifyConnected ? state.spotifyAccountName.ifBlank("Connected") : "Not connected",
-                        note: !state.spotifyConnected ? "Full quality with a subscription."
-                            : !state.spotifyApiConnected ? "Playback only - reconnect for search." : "Playback, search and playlists.",
-                        action: state.spotifyConnected ? "Sign out" : "Connect",
-                        tint: Omp.spotify,
-                        connected: state.spotifyConnected
-                    ) { vm.connectService("spotify") }
-                    SettingsAccountCard(
-                        label: "YouTube Music",
-                        icon: Omp.Icons.ytm,
-                        value: state.ytmConnected ? state.ytmAccountName.ifBlank("Connected") : "Not connected",
-                        note: state.ytmConnected ? "Your library and uploads." : "Your browser session.",
-                        action: state.ytmConnected ? "Sign out" : "Connect",
-                        tint: Omp.ytm,
-                        connected: state.ytmConnected
-                    ) { vm.connectService("ytm") }
-                    SettingsHead(label: "On this phone")
+                    // The account's sessions: whichever device signs in puts
+                    // it here, and every device uses it.
+                    SettingsHead(label: "Music services")
                     if state.servicesLocked {
-                        SettingsRow(icon: Omp.Icons.cloud, label: "Bring your music services over", meta: "Password", accent: true) {
-                            present(.password(title: "Your Jukebox password, once: it opens the Spotify, YouTube and SoundCloud sign-ins your desktop keeps on the account.", confirm: "Unlock") { pass in
+                        SettingsRow(icon: Omp.Icons.cloud, label: "Open your music services", meta: "Password", accent: true) {
+                            present(.password(title: "Your Jukebox password, once on this phone: it opens the Spotify, YouTube Music and SoundCloud sign-ins kept on your account.", confirm: "Unlock") { pass in
                                 Task { _ = await vm.unlockServices(pass) }
                             })
                         }
                     }
-                    PhoneServiceRow(label: "Spotify", icon: Omp.Icons.spotify, tint: Omp.spotify, slot: ServiceSessions.librespot, state: state)
-                    PhoneServiceRow(label: "YouTube Music", icon: Omp.Icons.ytm, tint: Omp.ytm, slot: ServiceSessions.ytm, state: state)
-                    PhoneServiceRow(label: "SoundCloud", icon: Omp.Icons.sc, tint: Omp.sc, slot: ServiceSessions.soundcloud, state: state)
+                    ServiceCard(label: "Spotify", icon: Omp.Icons.spotify, tint: Omp.spotify, key: "spotify",
+                                slot: ServiceSessions.librespot, name: Spotify.shared.user, state: state, vm: vm)
+                    ServiceCard(label: "YouTube Music", icon: Omp.Icons.ytm, tint: Omp.ytm, key: "ytm",
+                                slot: ServiceSessions.ytm, name: "", state: state, vm: vm)
+                    ServiceCard(label: "SoundCloud", icon: Omp.Icons.sc, tint: Omp.sc, key: "sc",
+                                slot: ServiceSessions.soundcloud,
+                                name: ServiceSessions.shared.session(ServiceSessions.soundcloud)?.obj("user")?.str("name") ?? "",
+                                state: state, vm: vm)
+                    OmpText("Signed in here or on any other device, a service is on your account and every device uses it. Signing out of one signs every device out of it.",
+                            size: Omp.TypeSize.caption, color: Omp.muted, maxLines: 3)
+                        .padding(.horizontal, m.pt(4))
+                        .padding(.vertical, m.pt(6))
                     SettingsHead(label: "Devices")
                     SettingsRow(icon: Omp.Icons.edit, label: "Device name", meta: state.deviceName, accent: true) {
                         present(.name(title: "Device name", placeholder: Omp.defaultPhoneName, confirm: "Save", initial: state.deviceName) { vm.setDeviceName($0) })
@@ -127,27 +118,28 @@ struct SettingsPage: View {
     }
 }
 
-/** One service as this phone holds it: its own sign-in, the account's copy
- *  from the desktop, or nothing yet. */
-private struct PhoneServiceRow: View {
+/** One music service as the account holds it, with Connect / Sign out. */
+private struct ServiceCard: View {
     let label: String
     let icon: String
     let tint: Color
+    let key: String
     let slot: String
+    let name: String
     let state: UiState
+    @ObservedObject var vm: MaroViewModel
 
     var body: some View {
-        let has = state.services.contains(slot)
-        let origin = ServiceSessions.shared.origin(slot)
+        let on = state.services.contains(slot)
         SettingsAccountCard(
             label: label,
             icon: icon,
-            value: !has ? "Not on this phone" : origin == "phone" ? "Signed in here" : "From your desktop",
-            note: has ? "Plays on this phone directly." : state.servicesLocked ? "Unlock above to use your desktop's sign-in." : "Sign in on the desktop and it comes over.",
-            action: "",
+            value: on ? (name.isEmpty ? "Signed in" : name) : "Not signed in",
+            note: on ? "On your account, used by every device." : "Sign in here; every device gets it.",
+            action: state.servicesLocked ? "" : (on ? "Sign out" : "Connect"),
             tint: tint,
-            connected: has
-        ) {}
+            connected: on
+        ) { vm.connectService(key) }
     }
 }
 

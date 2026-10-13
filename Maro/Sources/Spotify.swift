@@ -27,6 +27,9 @@ final class Spotify {
     }
 
     var onEvent: ((Event) -> Void)?
+    /** A sign-in on this phone became a stored login: librespot's credentials. */
+    var onLoggedIn: ((JSON) -> Void)?
+    private var signingIn = false
 
     private(set) var ready = false
     private(set) var user = ""
@@ -40,8 +43,25 @@ final class Spotify {
         return base.appendingPathComponent("spotify", isDirectory: true)
     }
 
-    /** True when the account (or this phone) holds a Spotify login. */
+    /** True when the account holds a Spotify login. */
     var hasLogin: Bool { ServiceSessions.shared.session(ServiceSessions.librespot)?.obj("credentials") != nil }
+
+    /**
+     * Signing in on this phone: the player starts with no login, takes the
+     * access token from Spotify's page, and connects once with it - which
+     * leaves a reusable login in its folder. onLoggedIn hands that over, for
+     * the account.
+     */
+    func signIn(token: String) {
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? FileManager.default.removeItem(at: dir.appendingPathComponent("credentials.json"))
+        signingIn = true
+        started = true
+        ready = false
+        startedWith = nil
+        _ = dir.path.withCString { jb_spotify_start($0, spotifyEvent) }
+        send(["cmd": "login", "token": token])
+    }
 
     /**
      * Start the player on the login the account holds, or restart it when
@@ -138,6 +158,14 @@ final class Spotify {
         case "ready":
             ready = true
             user = ev.str("user")
+            if (ev["login"] as? Bool) == true {
+                signingIn = false
+                let file = dir.appendingPathComponent("credentials.json")
+                if let data = try? Data(contentsOf: file), let creds = JSONText.parse(data) as? JSON {
+                    startedWith = JSONText.data(creds)
+                    onLoggedIn?(creds)
+                }
+            }
         case "reply":
             let id = (ev["rid"] as? Int) ?? -1
             waiting.removeValue(forKey: id)?.resume(returning: (ev["ok"] as? Bool) == true ? ev["data"] : nil)
@@ -149,7 +177,11 @@ final class Spotify {
         case "bitrate":
             onEvent?(.bitrate(uri: uri, ms: ms, kbps: (ev["kbps"] as? Int) ?? 0, nominal: (ev["nominal"] as? Int) ?? 0))
         case "error":
+            if ev.str("code") == "signed_out" && signingIn && !ev.str("message").contains("would not") {
+                break       // the player waiting for the token just sent
+            }
             if ev.str("code") == "signed_out" {
+                signingIn = false
                 ready = false
                 started = false
                 onEvent?(.signedOut(ev.str("message")))
