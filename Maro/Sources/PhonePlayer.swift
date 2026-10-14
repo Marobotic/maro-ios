@@ -126,7 +126,7 @@ enum AudioCache {
      * art is loaded the same way the rows load it.
      */
     static func artwork(_ track: Track) async -> UIImage? {
-        await ArtLoader.shared.load(artKey: track.artKey, artUrl: track.artUrl, px: 300)
+        await ArtLoader.shared.loadSong(track, px: 600)
     }
 }
 

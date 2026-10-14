@@ -421,8 +421,7 @@ private struct NowPlayingRow: View {
             // The border is the service the sound is really from: red YouTube,
             // green Spotify - the same colour as the playing row.
             CoverArt(
-                artKey: track?.artKey ?? "",
-                artUrl: track?.artUrl ?? "",
+                track: track,
                 icon: Omp.sourceIcon(track?.source ?? ""),
                 size: Omp.nowArt,
                 busy: track.map { state.artworkProgress[$0.artKey] != nil } ?? false

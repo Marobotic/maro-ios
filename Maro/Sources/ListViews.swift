@@ -201,7 +201,7 @@ private struct QueueRow: View {
             : Omp.sourceColor(isCurrent && track.viaYoutube ? "ytm" : track.source)
         let shape = RoundedRectangle(cornerRadius: m.pt(Omp.labelGap))
         HStack(spacing: m.pt(8)) {
-            CoverArt(artKey: track.artKey, artUrl: track.artUrl, icon: Omp.sourceIcon(track.source), size: Omp.rowArt)
+            CoverArt(track: track, icon: Omp.sourceIcon(track.source), size: Omp.rowArt)
             HeartButton(liked: liked) { vm.likeTrack(track) }
             VStack(alignment: .leading, spacing: 0) {
                 OmpText(track.title.ifBlank(track.id), size: Omp.TypeSize.bodySmall, bold: isCurrent)
@@ -497,7 +497,7 @@ private struct TrackRow: View {
             return meta.isEmpty ? track.artist : meta
         }()
         HStack(spacing: m.pt(8)) {
-            CoverArt(artKey: track.artKey, artUrl: track.artUrl, icon: Omp.sourceIcon(track.source), size: Omp.rowArt)
+            CoverArt(track: track, icon: Omp.sourceIcon(track.source), size: Omp.rowArt)
             HeartButton(liked: liked) { vm.likeTrack(track) }
             VStack(alignment: .leading, spacing: 0) {
                 OmpText(track.title.ifBlank(track.id), size: Omp.TypeSize.bodySmall, bold: isCurrent)

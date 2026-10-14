@@ -136,6 +136,14 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         AudioCache.client = client
         AudioCache.tier = { [weak self] in self?.state.quality ?? "max" }
         ArtLoader.shared.client = client
+        // Covers changed on the account (Fix artwork on another device, a
+        // song's first proper cover): checked now and every two minutes.
+        Task.detached(priority: .utility) {
+            while !Task.isCancelled {
+                await ArtLoader.shared.syncChanges()
+                try? await Task.sleep(nanoseconds: 120_000_000_000)
+            }
+        }
         Omp.customPhoneName = prefs.string(forKey: "deviceName") ?? ""
         var s = UiState()
         s.myDeviceId = deviceId()
@@ -1055,14 +1063,20 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         }
     }
 
-    /** Throw the cover away, here and on the account, and fetch it again. */
+    /**
+     * Fix artwork: the droplet chooses the song's cover again from the best
+     * source there is, and every device - this one first - gets the new one.
+     * Straight to the droplet: no desktop needs to be on.
+     */
     func fixArtwork(_ t: Track) {
-        let key = t.artKey.ifBlank(t.id)
-        ArtLoader.shared.invalidate(key)
-        if !t.artUrl.isEmpty { ArtLoader.shared.invalidate(url: t.artUrl) }
+        let key = t.artKey
+        if key.isEmpty || state.artworkProgress[key] != nil { return }
+        state.artworkProgress[key] = 5
+        showStatus("Fixing the artwork for \(t.title)…", "info")
         Task {
-            let delivered = await client.postAction("art.refresh", ["ids": t.trackIds])
-            showStatus(delivered ? "Fetching the artwork for \(t.title) again" : "Artwork cleared on this phone", "ok")
+            let ok = await ArtLoader.shared.refresh(t)
+            state.artworkProgress[key] = nil
+            showStatus(ok ? "Artwork fixed" : "No better artwork was found", ok ? "ok" : "error")
         }
     }
 

@@ -168,6 +168,42 @@ final class MaroClient: @unchecked Sendable {
         return await raw(req)
     }
 
+    /**
+     * A song's one cover, as the droplet chose it: the bytes, the master it is
+     * filed under (shared by every id of the song) and its version. An old
+     * per-id copy comes back with no master. Waits up to ~20 s while the
+     * droplet finds a cover it has never had; nil for "not yet" or "none".
+     */
+    func songCover(_ key: String, query: String) async -> (bytes: Data, master: String, version: Int64)? {
+        var req = request(Self.base + "/covers/" + Self.escape(key) + (query.isEmpty ? "" : "?" + query), timeout: 30)
+        req.setValue("image/*", forHTTPHeaderField: "Accept")
+        guard let (data, resp) = try? await http.data(for: req) else { return nil }
+        checkRejected(req, resp)
+        guard let h = resp as? HTTPURLResponse, (200..<300).contains(h.statusCode), !data.isEmpty else { return nil }
+        let master = h.value(forHTTPHeaderField: "X-Cover-Master") ?? ""
+        let version = Int64(h.value(forHTTPHeaderField: "X-Cover-Version") ?? "") ?? 0
+        return (data, master, version)
+    }
+
+    /** The master a song's cover is filed under now, without its bytes; "" when it has none yet. */
+    func songCoverMaster(_ key: String) async -> String {
+        let req = request(Self.base + "/covers/" + Self.escape(key), method: "HEAD")
+        guard let (_, resp) = try? await http.data(for: req),
+              let h = resp as? HTTPURLResponse, (200..<300).contains(h.statusCode) else { return "" }
+        return h.value(forHTTPHeaderField: "X-Cover-Master") ?? ""
+    }
+
+    /** Fix artwork: the droplet chooses this song's cover again. */
+    func refreshCover(_ key: String, hints: JSON) async -> Bool {
+        guard let resp = try? await call("POST", "/covers/" + Self.escape(key) + "/refresh", body: hints, timeout: 90) else { return false }
+        return resp.bool("ok")
+    }
+
+    /** {now, ids, all}: the songs whose cover changed since `since`. */
+    func coversChanged(since: Int64) async -> JSON? {
+        try? await call("GET", "/covers-changed?since=\(since)")
+    }
+
     /** Lyrics the desktop engine already looked up for this song, or nil. */
     func lyrics(_ key: String) async -> JSON? {
         var req = request(Self.base + "/lyrics/" + Self.escape(key))

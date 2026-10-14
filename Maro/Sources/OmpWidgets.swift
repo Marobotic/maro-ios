@@ -227,8 +227,11 @@ struct CoverArt: View {
     @Environment(\.omp) private var m
     @Environment(\.displayScale) private var displayScale
     @ObservedObject private var loader = ArtLoader.shared
-    let artKey: String
-    let artUrl: String
+    /** A song: its one picture from the droplet, scaled to exactly this box. */
+    var track: Track? = nil
+    /** A playlist tile: its sleeve, by the droplet's key or a CDN URL. */
+    var artKey: String = ""
+    var artUrl: String = ""
     let icon: String
     let size: CGFloat
     var radius: CGFloat = Omp.labelGap
@@ -238,7 +241,7 @@ struct CoverArt: View {
     var body: some View {
         let side = m.pt(size)
         let px = Int((side * displayScale).rounded())
-        let key = loader.key(artKey: artKey, artUrl: artUrl, px: px)
+        let key = track.map { loader.songKey($0, px: px) } ?? loader.key(artKey: artKey, artUrl: artUrl, px: px)
         ZStack {
             Omp.normalFill
             if let image {
@@ -254,13 +257,20 @@ struct CoverArt: View {
         .task(id: "\(key)#\(loader.epoch)") {
             image = loader.cached(key)
             guard image == nil, !key.isEmpty else { return }
-            for attempt in 0..<3 {
-                if let got = await loader.load(artKey: artKey, artUrl: artUrl, px: px) {
+            // A song's cover may still be being chosen on the droplet.
+            let tries = track == nil ? 3 : 4
+            for attempt in 0..<tries {
+                let got: UIImage?
+                if let track { got = await loader.loadSong(track, px: px) }
+                else { got = await loader.load(artKey: artKey, artUrl: artUrl, px: px) }
+                if let got {
                     image = got
                     return
                 }
                 if Task.isCancelled { return }
-                if attempt < 2 { await sleep(seconds: 0.7 * Double(attempt + 1)) }
+                if attempt < tries - 1 {
+                    await sleep(seconds: track == nil ? 0.7 * Double(attempt + 1) : 5 * Double(attempt + 1))
+                }
             }
         }
     }
