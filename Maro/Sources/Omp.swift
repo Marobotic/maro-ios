@@ -27,6 +27,23 @@ enum Omp {
     static let qualityGood = Color(hex: 0x6FBF73)
     static let qualityWait = Color(hex: 0xE0B252)
 
+    /**
+     * The one colour scale for a bitrate, wherever one is shown: how good the
+     * number is, whichever service it came from. Same steps on every client.
+     */
+    private static let kbpsScale: [(Int, Color)] = [
+        (320, Color(hex: 0x4FD1C5)),   // Spotify 320 and up
+        (256, Color(hex: 0x6FBF73)),   // very high
+        (192, Color(hex: 0xA5C85A)),   // high
+        (128, Color(hex: 0xE0B252)),   // normal
+        (96, Color(hex: 0xE8833A)),    // low
+        (1, Color(hex: 0xE5534B)),     // very low
+    ]
+
+    static func kbpsColor(_ kbps: Int) -> Color {
+        kbpsScale.first { kbps >= $0.0 }?.1 ?? muted
+    }
+
     /** Accent of the running Omarchy theme (Dotrb). */
     static let themeAccent = Color(hex: 0xB14242)
 

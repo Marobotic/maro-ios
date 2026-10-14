@@ -330,13 +330,15 @@ private struct StatsPanel: View {
                             size: Omp.TypeSize.caption, color: Omp.muted, maxLines: 3)
                 }
                 BitrateGraph(line: state.audioTimeline, second: second, want: wantKbps, tint: tint)
-                    .frame(height: m.pt(80))
+                    .frame(height: m.pt(110))
                 ForEach(Array(rows(second: second, duration: duration).enumerated()), id: \.offset) { _, row in
                     HStack(alignment: .top, spacing: m.pt(8)) {
                         OmpText(row.0, size: Omp.TypeSize.caption, color: Omp.muted)
                             .frame(width: m.pt(100), alignment: .leading)
                         OmpText(row.1, size: Omp.TypeSize.caption,
-                                color: row.0 == "Bitrate now" && state.audioInTier == false ? Omp.qualityWait : Omp.foreground,
+                                // A rate row leads with its number: that number's colour.
+                                color: row.0 == "Bitrate now" || row.0 == "Avg / low / peak"
+                                    ? Omp.kbpsColor(Int(row.1.prefix(while: { $0.isNumber })) ?? 0) : Omp.foreground,
                                 maxLines: 2)
                         Spacer(minLength: 0)
                     }
@@ -350,7 +352,12 @@ private struct StatsPanel: View {
     }
 }
 
-/** Per-second kbps bars, brighter up to the playhead; dashed at the tier chosen. */
+/**
+ * Per-second kbps of the copy sounding: each bar that second's rate in its
+ * colour (Omp.kbpsColor), bright up to the playhead. Numbers on both axes, the
+ * tier chosen dashed and labelled, and the playhead says where it is and how
+ * fast the audio is there.
+ */
 private struct BitrateGraph: View {
     let line: [Int]
     let second: Int
@@ -359,24 +366,64 @@ private struct BitrateGraph: View {
 
     var body: some View {
         ZStack {
-            Canvas { ctx, size in
-                ctx.fill(Path(CGRect(origin: .zero, size: size)), with: .color(Omp.foreground.opacity(0.05)))
+            Canvas { context, size in
+                // A copy draws to the same canvas; the helpers below use it.
+                var ctx = context
+                let font = Omp.font(9)
+                func label(_ s: String, _ color: Color) -> GraphicsContext.ResolvedText {
+                    ctx.resolve(Text(s).font(font).foregroundColor(color))
+                }
+                let axis = label("320", Omp.foreground).measure(in: size)
+                let left = axis.width + 6
+                let y0 = axis.height / 2
+                let w = size.width - left
+                let h = size.height - (axis.height + 6) - y0
+                ctx.fill(Path(CGRect(x: left, y: y0, width: w, height: h)), with: .color(Omp.foreground.opacity(0.05)))
                 guard !line.isEmpty else { return }
-                let top = CGFloat(max(line.max() ?? 1, want, 1)) * 1.1
-                let bw = size.width / CGFloat(line.count)
-                for (i, k) in line.enumerated() {
-                    let bh = CGFloat(k) / top * size.height
-                    let rect = CGRect(x: CGFloat(i) * bw, y: size.height - bh, width: max(1, bw - 0.5), height: bh)
-                    ctx.fill(Path(rect), with: .color(tint.opacity(i <= second ? 0.85 : 0.30)))
+                let peak = max(line.max() ?? 1, want, 1)
+                let step = peak > 128 ? 64 : 32
+                let top = Int((Double(peak) * 1.05 / Double(step)).rounded(.up)) * step
+                func yOf(_ k: Int) -> CGFloat { y0 + h - CGFloat(k) / CGFloat(top) * h }
+                func put(_ s: String, x: CGFloat, y: CGFloat, color: Color, align: CGFloat, backing: Bool = false) {
+                    let t = label(s, color)
+                    let ts = t.measure(in: size)
+                    let tx = min(max(0, x - ts.width * align), size.width - ts.width)
+                    if backing {
+                        ctx.fill(Path(CGRect(x: tx - 4, y: y - 2, width: ts.width + 8, height: ts.height + 4)),
+                                 with: .color(Color(white: 0.07).opacity(0.95)))
+                    }
+                    ctx.draw(t, in: CGRect(x: tx, y: y, width: ts.width, height: ts.height))
+                }
+                var g = 0
+                while g <= top {
+                    let gy = yOf(g)
+                    var p = Path(); p.move(to: CGPoint(x: left, y: gy)); p.addLine(to: CGPoint(x: left + w, y: gy))
+                    ctx.stroke(p, with: .color(Omp.foreground.opacity(g == 0 ? 0.35 : 0.12)), lineWidth: 1)
+                    put("\(g)", x: left - 4, y: gy - axis.height / 2, color: Omp.foreground.opacity(0.55), align: 1)
+                    g += step
+                }
+                let bw = w / CGFloat(line.count)
+                for (i, k) in line.enumerated() where k > 0 {
+                    let by = yOf(k)
+                    let rect = CGRect(x: left + CGFloat(i) * bw, y: by, width: max(1, bw - 0.5), height: y0 + h - by)
+                    ctx.fill(Path(rect), with: .color(Omp.kbpsColor(k).opacity(i <= second ? 0.9 : 0.3)))
                 }
                 if want > 0 {
-                    let y = size.height - CGFloat(want) / top * size.height
-                    var p = Path(); p.move(to: CGPoint(x: 0, y: y)); p.addLine(to: CGPoint(x: size.width, y: y))
-                    ctx.stroke(p, with: .color(Omp.foreground.opacity(0.5)), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                    let wy = yOf(want)
+                    var p = Path(); p.move(to: CGPoint(x: left, y: wy)); p.addLine(to: CGPoint(x: left + w, y: wy))
+                    ctx.stroke(p, with: .color(Omp.foreground.opacity(0.6)), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                    put("asked \(want)", x: left + w - 4, y: wy - axis.height - 3, color: Omp.foreground, align: 1, backing: true)
                 }
-                let x = min(size.width - 1, CGFloat(second) / CGFloat(line.count) * size.width)
-                var h = Path(); h.move(to: CGPoint(x: x, y: 0)); h.addLine(to: CGPoint(x: x, y: size.height))
-                ctx.stroke(h, with: .color(Omp.foreground), lineWidth: 1)
+                let ty = y0 + h + 3
+                put(Omp.fmtTime(0), x: left, y: ty, color: Omp.foreground.opacity(0.55), align: 0)
+                put(Omp.fmtTime(Double(line.count) / 2), x: left + w / 2, y: ty, color: Omp.foreground.opacity(0.55), align: 0.5)
+                put(Omp.fmtTime(Double(line.count)), x: left + w, y: ty, color: Omp.foreground.opacity(0.55), align: 1)
+                let x = left + min(w - 1, CGFloat(second) / CGFloat(line.count) * w)
+                var ph = Path(); ph.move(to: CGPoint(x: x, y: y0)); ph.addLine(to: CGPoint(x: x, y: y0 + h))
+                ctx.stroke(ph, with: .color(Omp.foreground), lineWidth: 1)
+                let here = line[min(line.count - 1, max(0, second))]
+                put(Omp.fmtTime(Double(second)) + (here > 0 ? "  \(here) kbps" : ""), x: x, y: y0,
+                    color: here > 0 ? Omp.kbpsColor(here) : Omp.foreground, align: 0.5, backing: true)
             }
             if line.isEmpty {
                 OmpText("No bitrate data yet", size: Omp.TypeSize.caption, color: Omp.muted)
@@ -389,7 +436,7 @@ private struct BitrateGraph: View {
  * The bitrate of what is sounding, at this second of the song, on whichever
  * device is playing it: the droplet's per-second kbps of that exact copy, read
  * at the playhead. Before the timeline arrives it is the copy's average.
- * Green at the tier chosen in Settings, amber below it.
+ * Coloured by how high it is (Omp.kbpsColor), the same scale everywhere.
  */
 private struct LiveBitrate: View {
     let state: UiState
@@ -404,7 +451,7 @@ private struct LiveBitrate: View {
             let kbps = live > 0 ? live : state.audioKbps
             if kbps > 0 {
                 OmpText((separator ? "  ·  " : "") + "\(kbps) kbps", size: Omp.TypeSize.caption,
-                        color: state.audioInTier == false ? Omp.qualityWait : Omp.qualityGood)
+                        color: Omp.kbpsColor(kbps))
             }
         }
     }
