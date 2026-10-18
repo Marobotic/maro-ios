@@ -71,6 +71,13 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     // Service playlists saved on the account ("source:id" -> entry with its
     // tracks): opened straight from here, with no desktop to ask.
     private var savedPlaylists: [String: JSON] = [:]
+    /**
+     * Every liked song, from the account's snapshot (the list the hearts come
+     * from). The Liked playlist is drawn from this: asked page by page, it
+     * came from the cloud engine's own copy, which had fallen behind, and
+     * stopped at its first 50.
+     */
+    private var likedTracks: [Track] = []
 
     // Which YouTube video plays each track, and what the droplet and phone hold.
     private var trackMap: [String: String] = [:]
@@ -702,7 +709,12 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         if !shared && (!cur.title.isEmpty || !cur.id.isEmpty) { s.track = cur }
         if !recent.isEmpty { s.recent = recent }
         s.likedKeys = Sync.likedKeys(likedArr)
-        s.likedIds = Set(Sync.tracks(likedArr).flatMap(\.trackIds))
+        likedTracks = Sync.tracks(likedArr).map(giveVideoId)
+        s.likedIds = Set(likedTracks.flatMap(\.trackIds))
+        if s.selectedPlaylist?.source == "liked" {
+            s.playlistTracks = likedTracks
+            s.playlistTotal = likedTracks.count
+        }
         s.library = Sync.library(snap.obj("playlists"))
         let saved = Sync.savedPlaylists(snap.obj("savedPlaylists"))
         if !saved.isEmpty { savedPlaylists = saved }
@@ -2005,9 +2017,15 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         if liked {
             s.likedKeys = s.likedKeys.filter { !$0.hasSuffix(":" + t.id) }
             s.likedIds.subtract(t.trackIds)
+            likedTracks.removeAll { $0.sameAs(t) }
         } else {
             if !t.source.isEmpty { s.likedKeys.insert(t.source + ":" + t.id) }
             s.likedIds.formUnion(t.trackIds)
+            likedTracks.append(t)
+        }
+        if s.selectedPlaylist?.source == "liked" {
+            s.playlistTracks = likedTracks
+            s.playlistTotal = likedTracks.count
         }
         state = s
         send("song.like", ["track": t.toJSON()])
@@ -2028,6 +2046,19 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         s.playlistHasMore = true
         s.playlistTotal = row.count
         s.playlistError = ""
+        // Liked: the whole list is here already, as the account has it.
+        if row.source == "liked" {
+            s.playlistTracks = likedTracks
+            s.playlistLoading = false
+            s.playlistHasMore = false
+            s.playlistTotal = likedTracks.count
+            state = s
+            if playWhenLoaded == row.id {
+                playWhenLoaded = nil
+                playList(likedTracks, 0, name: row.name)
+            }
+            return
+        }
         // Saved on the account: every track is already here, whether or not
         // a desktop is awake to fetch it from the service.
         if let entry = savedPlaylists["\(row.source):\(row.id)"] {
