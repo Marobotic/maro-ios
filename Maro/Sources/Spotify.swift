@@ -29,6 +29,11 @@ final class Spotify {
     var onEvent: ((Event) -> Void)?
     /** A sign-in on this phone became a stored login: librespot's credentials. */
     var onLoggedIn: ((JSON) -> Void)?
+    /** A reconnect() finished: true when a new connection is up. */
+    var onReconnected: ((Bool) -> Void)?
+
+    /** Whether the player has been started (it may still be connecting). */
+    var isStarted: Bool { started }
     private var signingIn = false
 
     private(set) var ready = false
@@ -109,8 +114,18 @@ final class Spotify {
     /** Load the next song paused on a standby player, so it starts at once. */
     func stage(_ uri: String) { send(["cmd": "stage", "uri": uri, "role": "next"]) }
 
+    /**
+     * The phone changed networks (Wi-Fi to 4G, or back): the connection made
+     * on the old one is dead though nothing says so, and every song would
+     * wait on it forever. The player opens a new one; onReconnected follows.
+     */
+    func reconnect() {
+        guard started else { return }
+        send(["cmd": "reconnect"])
+    }
+
     /** A library call ("search", "liked", "playlists", "playlist"): its data, or nil. */
-    func ask(_ cmd: String, _ args: JSON = [:]) async -> Any? {
+    func ask(_ cmd: String, _ args: JSON = [:], wait: Double = 20) async -> Any? {
         guard started else { return nil }
         rid += 1
         let id = rid
@@ -125,7 +140,7 @@ final class Spotify {
             }
             // A reply that never comes must not hang a search forever.
             Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 20_000_000_000)
+                try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
                 self.waiting.removeValue(forKey: id)?.resume(returning: nil)
             }
         }
@@ -133,6 +148,24 @@ final class Spotify {
 
     func search(_ q: String) async -> [Track] {
         ((await ask("search", ["q": q])) as? [JSON] ?? []).map(Self.track)
+    }
+
+    /** A playlist's songs. The helper retries a hung call on a new connection, so it may take long. */
+    func playlist(_ id: String) async -> [Track]? {
+        ((await ask("playlist", ["id": id], wait: 100)) as? [JSON])?.map(Self.track)
+    }
+
+    /** A song's radio: Spotify's "<song> Radio" playlist, and its songs. */
+    func radio(_ trackId: String) async -> (id: String, tracks: [Track])? {
+        guard let data = await ask("radio", ["uri": "spotify:track:" + trackId], wait: 100) as? JSON else { return nil }
+        return (data.str("id"), (data.arr("tracks") as? [JSON] ?? []).map(Self.track))
+    }
+
+    /** The playlists on Spotify's home page by section ({title, items: [{id, name, description, art}]}). */
+    func home(hash: String) async -> [JSON]? {
+        let tz = TimeZone.current.identifier
+        guard let data = await ask("home", ["hash": hash, "tz": tz], wait: 100) as? JSON else { return nil }
+        return data.arr("sections") as? [JSON]
     }
 
     /** The helper's Web-API-shaped track, as a row. */
@@ -166,6 +199,8 @@ final class Spotify {
                     onLoggedIn?(creds)
                 }
             }
+        case "reconnected":
+            onReconnected?((ev["ok"] as? Bool) == true)
         case "reply":
             let id = (ev["rid"] as? Int) ?? -1
             waiting.removeValue(forKey: id)?.resume(returning: (ev["ok"] as? Bool) == true ? ev["data"] : nil)

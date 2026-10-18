@@ -4,6 +4,7 @@ private let tabs: [(key: String, label: String)] = [
     (Sync.viewQueue, "Queue"),
     (Sync.viewLyrics, "Lyrics"),
     (Sync.viewPlaylists, "Playlists"),
+    (Sync.viewDiscover, "Discover"),
     (Sync.viewSongs, "Songs"),
     (Sync.viewRecent, "Recent"),
     (Sync.viewSearch, "Search"),

@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use librespot_core::{Error, SpotifyId, session::Session};
+use librespot_core::{Error, SpotifyId, SpotifyUri, session::Session};
 use librespot_protocol::{
     extended_metadata::{BatchedEntityRequest, EntityRequest, ExtensionQuery},
     extension_kind::ExtensionKind,
@@ -149,6 +149,91 @@ pub async fn search(session: &Session, q: &str) -> Result<Vec<Value>, Error> {
         .take(30)
         .collect();
     tracks(session, &uris).await
+}
+
+/// A song's radio: Spotify's "<song> Radio" playlist for it, with its tracks.
+pub async fn radio(session: &Session, uri: &str) -> Result<Value, Error> {
+    let seed = SpotifyUri::from_uri(uri)?;
+    let res = session.spclient().get_radio_for_track(&seed).await?;
+    let v: Value = serde_json::from_slice(&res)?;
+    let Some(id) = v["mediaItems"][0]["uri"].as_str().and_then(|u| u.strip_prefix("spotify:playlist:")).map(String::from) else {
+        return Err(Error::not_found("Spotify has no radio for this song"));
+    };
+    let tracks = playlist(session, &id).await?;
+    Ok(json!({"id": id, "tracks": tracks}))
+}
+
+// The web player's home page, through the same query it sends. `hash` is the
+// query's id, read from the web player's own script by the app (it changes
+// when Spotify ships a new web player).
+const PATHFINDER: &str = "https://api-partner.spotify.com/pathfinder/v2/query";
+
+/// The playlists on Spotify's home page, section by section: Made For You
+/// (Discover Weekly, Release Radar, Daily Mixes), stations, mixes.
+pub async fn home(session: &Session, hash: &str, tz: &str) -> Result<Value, Error> {
+    let token = session.login5().auth_token().await?;
+    let client_token = session.spclient().client_token().await.unwrap_or_default();
+    let body = json!({
+        "variables": {"timeZone": tz, "sp_t": "", "facet": "", "sectionItemsLimit": 20, "includeHomeChapterVideoCards": false,
+                      "homeEndUserIntegration": "INTEGRATION_WEB_PLAYER", "includeEpisodeContentRatingsV2": false},
+        "operationName": "home",
+        "extensions": {"persistedQuery": {"version": 1, "sha256Hash": hash}},
+    });
+    let req = http::Request::builder()
+        .method(http::Method::POST)
+        .uri(PATHFINDER)
+        .header("authorization", format!("Bearer {}", token.access_token))
+        .header("client-token", client_token)
+        .header("content-type", "application/json;charset=UTF-8")
+        .header("app-platform", "WebPlayer")
+        .body(bytes::Bytes::from(body.to_string()))?;
+    let res = session.http_client().request_body(req).await?;
+    let v: Value = serde_json::from_slice(&res)?;
+    let home = &v["data"]["home"];
+    if home.is_null() {
+        let why = v["errors"][0]["message"].as_str().unwrap_or("no home page").to_string();
+        return Err(Error::unavailable(why));
+    }
+    let mut sections = Vec::new();
+    for sec in home["sectionContainer"]["sections"]["items"].as_array().into_iter().flatten() {
+        let title = &sec["data"]["title"];
+        let title = title["transformedLabel"].as_str().or(title["text"].as_str()).unwrap_or("");
+        let items: Vec<Value> = sec["sectionItems"]["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|it| {
+                let d = &it["content"]["data"];
+                let id = d["uri"].as_str().or(it["uri"].as_str())?.strip_prefix("spotify:playlist:")?;
+                Some(json!({
+                    "id": id,
+                    "name": d["name"].as_str().unwrap_or(""),
+                    "description": strip_tags(d["description"].as_str().unwrap_or("")),
+                    "art": d["images"]["items"][0]["sources"][0]["url"].as_str().unwrap_or(""),
+                    "count": d["content"]["totalCount"].as_u64().unwrap_or(0),
+                }))
+            })
+            .collect();
+        if !items.is_empty() {
+            sections.push(json!({"title": title, "items": items}));
+        }
+    }
+    Ok(json!({"sections": sections}))
+}
+
+/// "<a href=…>Fall Out Boy</a>, P!nk &amp; more" -> "Fall Out Boy, P!nk & more".
+fn strip_tags(s: &str) -> String {
+    let mut out = String::new();
+    let mut tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => tag = true,
+            '>' => tag = false,
+            _ if !tag => out.push(c),
+            _ => {}
+        }
+    }
+    out.replace("&amp;", "&").replace("&quot;", "\"").replace("&#x27;", "'").replace("&#39;", "'")
 }
 
 fn url_escape(s: &str) -> String {

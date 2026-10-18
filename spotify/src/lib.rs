@@ -15,7 +15,12 @@
 //! Library, answered with {"ev":"reply","rid":…,"ok":…,"data"|"error":…}:
 //! {"cmd":"playlists","rid":1}, {"cmd":"playlist","id":"…","rid":2},
 //! {"cmd":"liked","rid":3}, {"cmd":"search","q":"…","rid":4},
-//! {"cmd":"tracks","uris":["spotify:track:…"],"rid":5}.
+//! {"cmd":"tracks","uris":["spotify:track:…"],"rid":5}, {"cmd":"radio","uri":…}
+//! (a song's radio playlist), {"cmd":"home","hash":…,"tz":…} (Spotify's home
+//! page: Discover Weekly, Daily Mixes, stations).
+//! {"cmd":"reconnect"}: the phone changed networks (Wi-Fi to 4G), so the
+//! connection made on the old one is dead though nothing says so: a new one,
+//! answered with {"ev":"reconnected","ok":…}.
 //! Events: ready, loading, playing, paused, stopped, end, unavailable, track,
 //! token, error - each with "ev" and the fields that apply.
 
@@ -24,6 +29,8 @@ mod pool;
 pub mod ffi;
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
 use librespot_core::{
     SpotifyUri, authentication::Credentials, cache::Cache, config::SessionConfig, session::Session,
@@ -121,6 +128,82 @@ pub async fn login(dir: PathBuf) {
     }
 }
 
+/// A new session from the login stored in `dir`. Never waits more than 20 s:
+/// a connect that hangs would hold up every command behind it.
+async fn reconnect(dir: &PathBuf) -> Option<Session> {
+    let creds = cache(dir).credentials()?;
+    let session = Session::new(SessionConfig::default(), Some(cache(dir)));
+    match tokio::time::timeout(Duration::from_secs(20), session.connect(creds, true)).await {
+        Ok(Ok(())) => Some(session),
+        Ok(Err(e)) => {
+            log::warn!("Spotify would not connect again: {e}");
+            None
+        }
+        Err(_) => {
+            log::warn!("Spotify did not answer the new connection within 20 s");
+            None
+        }
+    }
+}
+
+// One library answer may take this long (a 1,000-song playlist is three
+// metadata batches); past it the connection is taken to be dead.
+const LIBRARY_WAIT: Duration = Duration::from_secs(40);
+
+/// The connection library calls use, and how many times it was replaced.
+/// It starts as the player's; when a call hangs or fails it is replaced by a
+/// connection of its own, so the music playing is never interrupted.
+type Library = Arc<tokio::sync::Mutex<(Session, u64)>>;
+
+async fn library_call(session: &Session, cmd: &Value) -> Result<Value, String> {
+    let r = match cmd["cmd"].as_str().unwrap_or("") {
+        "playlists" => library::playlists(session).await.map(Value::from),
+        "playlist" => library::playlist(session, cmd["id"].as_str().unwrap_or("")).await.map(Value::from),
+        "liked" => library::liked(session).await.map(Value::from),
+        "search" => library::search(session, cmd["q"].as_str().unwrap_or("")).await.map(Value::from),
+        "radio" => library::radio(session, cmd["uri"].as_str().unwrap_or("")).await,
+        "home" => library::home(session, cmd["hash"].as_str().unwrap_or(""), cmd["tz"].as_str().unwrap_or("UTC")).await,
+        _ => {
+            let uris: Vec<String> = cmd["uris"].as_array().map(|a| a.iter().filter_map(|u| u.as_str().map(String::from)).collect()).unwrap_or_default();
+            library::tracks(session, &uris).await.map(Value::from)
+        }
+    };
+    r.map_err(|e| e.to_string())
+}
+
+/// Answer one library command: on the library connection, and once more on
+/// a new one when that one hangs, has closed, or fails.
+async fn answer(cmd: Value, lib: Library, dir: PathBuf) {
+    let rid = cmd["rid"].clone();
+    let what = cmd["cmd"].as_str().unwrap_or("").to_string();
+    let mut result = Err(String::new());
+    for attempt in 0..2 {
+        let (session, epoch) = lib.lock().await.clone();
+        result = if session.is_invalid() {
+            Err("the connection was closed".into())
+        } else {
+            tokio::time::timeout(LIBRARY_WAIT, library_call(&session, &cmd)).await.unwrap_or_else(|_| Err("Spotify did not answer in time".into()))
+        };
+        let Err(e) = &result else { break };
+        if attempt == 1 {
+            break;
+        }
+        log::warn!("Spotify {what} failed ({e}); trying again on a new connection");
+        let mut guard = lib.lock().await;
+        // Another call may have replaced it while this one waited.
+        if guard.1 == epoch {
+            match reconnect(&dir).await {
+                Some(s) => *guard = (s, epoch + 1),
+                None => break,
+            }
+        }
+    }
+    match result {
+        Ok(data) => emit(json!({"ev": "reply", "rid": rid, "ok": true, "data": data})),
+        Err(e) => emit(json!({"ev": "reply", "rid": rid, "ok": false, "error": e})),
+    }
+}
+
 fn uri(u: &SpotifyUri) -> String {
     u.to_uri().unwrap_or_default()
 }
@@ -155,10 +238,18 @@ pub async fn serve(dir: PathBuf, mut lines: tokio::sync::mpsc::UnboundedReceiver
             }
         }
     };
-    let session = Session::new(SessionConfig::default(), Some(c));
-    if let Err(e) = session.connect(creds, true).await {
-        emit(json!({"ev": "error", "code": "signed_out", "message": format!("Spotify would not sign in: {e}")}));
-        return;
+    let mut session = Session::new(SessionConfig::default(), Some(c));
+    match tokio::time::timeout(Duration::from_secs(30), session.connect(creds, true)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            emit(json!({"ev": "error", "code": "signed_out", "message": format!("Spotify would not sign in: {e}")}));
+            return;
+        }
+        Err(_) => {
+            // Offline or Spotify not answering: the app starts it again on the next use.
+            emit(json!({"ev": "error", "code": "signed_out", "message": "Spotify did not answer. Check the connection."}));
+            return;
+        }
     }
     // "login": true when this start just turned a sign-in into a stored login.
     emit(json!({"ev": "ready", "user": session.username(), "login": fresh}));
@@ -168,6 +259,43 @@ pub async fn serve(dir: PathBuf, mut lines: tokio::sync::mpsc::UnboundedReceiver
     let mut generation: u64 = 0;
     let mut slots = pool::open(&session, None, volume, generation, &tx);
     let mut active: usize = 0;
+    // The last song loaded on the playing player, so a load that failed on a
+    // worn-out connection can be tried again on a new one, once.
+    let mut last_load: Option<(String, u32, bool)> = None;
+    let mut retried: Option<String> = None;
+    let mut connected_at = std::time::Instant::now();
+    let lib: Library = Arc::new(tokio::sync::Mutex::new((session.clone(), 0)));
+
+    // Spotify drops the connection after some hours and librespot does not
+    // reconnect: every song then fails as "unavailable" until a restart. A
+    // new session (from the stored login) and new players replace the old.
+    macro_rules! renew {
+        () => {{
+            match reconnect(&dir).await {
+                Some(s) => {
+                    for old in &slots {
+                        old.player.stop();
+                        if let Some(u) = &old.staged {
+                            emit(json!({"ev": "stage_failed", "uri": u}));
+                        }
+                    }
+                    generation += 1;
+                    session = s;
+                    slots = pool::open(&session, None, volume, generation, &tx);
+                    active = 0;
+                    connected_at = std::time::Instant::now();
+                    // A library connection that died with the old one moves to the new.
+                    if let Ok(mut l) = lib.try_lock() {
+                        if l.0.is_invalid() {
+                            *l = (session.clone(), l.1 + 1);
+                        }
+                    }
+                    true
+                }
+                None => false,
+            }
+        }};
+    }
 
     loop {
         tokio::select! {
@@ -176,13 +304,22 @@ pub async fn serve(dir: PathBuf, mut lines: tokio::sync::mpsc::UnboundedReceiver
                 let Ok(cmd) = serde_json::from_str::<Value>(&line) else { continue };
                 let pos = cmd["pos"].as_u64().unwrap_or(0) as u32;
                 let want = cmd["uri"].as_str().unwrap_or("").to_string();
-                match cmd["cmd"].as_str().unwrap_or("") {
+                let what = cmd["cmd"].as_str().unwrap_or("");
+                if session.is_invalid() && !matches!(what, "pause" | "stop" | "volume" | "quit" | "reconnect") {
+                    log::warn!("Spotify's connection was closed; connecting again");
+                    renew!();
+                }
+                match what {
                     "load" => {
                         let Ok(u) = SpotifyUri::from_uri(&want) else {
                             emit(json!({"ev": "error", "message": "not a Spotify track"}));
                             continue;
                         };
                         let play = cmd["play"].as_bool().unwrap_or(true);
+                        if retried.as_deref() != Some(want.as_str()) {
+                            retried = None;
+                        }
+                        last_load = Some((want.clone(), pos, play));
                         if let Some(i) = pool::staged(&slots, active, &want) {
                             // Staged: already loaded and paused at its start.
                             slots[active].player.stop();
@@ -237,26 +374,18 @@ pub async fn serve(dir: PathBuf, mut lines: tokio::sync::mpsc::UnboundedReceiver
                         Ok(t) => emit(json!({"ev": "token", "access_token": t.access_token, "expires_in": t.expires_in.as_secs()})),
                         Err(e) => emit(json!({"ev": "error", "message": format!("no Spotify token: {e}")})),
                     },
-                    "playlists" | "playlist" | "liked" | "search" | "tracks" => {
+                    "reconnect" => {
+                        // Not again when the connection is seconds old.
+                        let ok = connected_at.elapsed().as_secs() < 3 || renew!();
+                        if ok {
+                            let mut l = lib.lock().await;
+                            *l = (session.clone(), l.1 + 1);
+                        }
+                        emit(json!({"ev": "reconnected", "ok": ok}));
+                    }
+                    "playlists" | "playlist" | "liked" | "search" | "tracks" | "radio" | "home" => {
                         // In the background: a big library must not hold up play/pause.
-                        let session = session.clone();
-                        tokio::spawn(async move {
-                            let rid = cmd["rid"].clone();
-                            let result = match cmd["cmd"].as_str().unwrap_or("") {
-                                "playlists" => library::playlists(&session).await,
-                                "playlist" => library::playlist(&session, cmd["id"].as_str().unwrap_or("")).await,
-                                "liked" => library::liked(&session).await,
-                                "search" => library::search(&session, cmd["q"].as_str().unwrap_or("")).await,
-                                _ => {
-                                    let uris: Vec<String> = cmd["uris"].as_array().map(|a| a.iter().filter_map(|u| u.as_str().map(String::from)).collect()).unwrap_or_default();
-                                    library::tracks(&session, &uris).await
-                                }
-                            };
-                            match result {
-                                Ok(data) => emit(json!({"ev": "reply", "rid": rid, "ok": true, "data": data})),
-                                Err(e) => emit(json!({"ev": "reply", "rid": rid, "ok": false, "error": e.to_string()})),
-                            }
-                        });
+                        tokio::spawn(answer(cmd, lib.clone(), dir.clone()));
                     }
                     "quit" => break,
                     _ => {}
@@ -288,7 +417,27 @@ pub async fn serve(dir: PathBuf, mut lines: tokio::sync::mpsc::UnboundedReceiver
                     PlayerEvent::Paused { track_id, position_ms, .. } => emit(json!({"ev": "paused", "uri": uri(&track_id), "pos": position_ms})),
                     PlayerEvent::Stopped { track_id, .. } => emit(json!({"ev": "stopped", "uri": uri(&track_id)})),
                     PlayerEvent::EndOfTrack { track_id, .. } => emit(json!({"ev": "end", "uri": uri(&track_id)})),
-                    PlayerEvent::Unavailable { track_id, .. } => emit(json!({"ev": "unavailable", "uri": uri(&track_id)})),
+                    PlayerEvent::Unavailable { track_id, .. } => {
+                        // Once per song, on a connection older than a minute:
+                        // a new one, and the song again. A song Spotify
+                        // really will not play fails the same way twice.
+                        let u = uri(&track_id);
+                        let again = match &last_load {
+                            Some((l, pos, play)) if *l == u && retried.as_deref() != Some(u.as_str()) && connected_at.elapsed().as_secs() > 60 => Some((*pos, *play)),
+                            _ => None,
+                        };
+                        if let Some((pos, play)) = again {
+                            retried = Some(u.clone());
+                            log::warn!("Spotify could not load {u}; connecting again and trying once more");
+                            if renew!() {
+                                if let Ok(su) = SpotifyUri::from_uri(&u) {
+                                    slots[active].player.load(su, play, pos);
+                                    continue;
+                                }
+                            }
+                        }
+                        emit(json!({"ev": "unavailable", "uri": u}));
+                    }
                     PlayerEvent::Bitrate { track_id, position_ms, kbps, nominal_kbps } => emit(json!({"ev": "bitrate", "uri": uri(&track_id), "pos": position_ms, "kbps": kbps, "nominal": nominal_kbps})),
                     PlayerEvent::TrackChanged { audio_item } => emit(json!({"ev": "track", "uri": audio_item.uri, "name": audio_item.name, "duration": audio_item.duration_ms})),
                     _ => {}

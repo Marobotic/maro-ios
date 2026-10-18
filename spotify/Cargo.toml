@@ -15,6 +15,7 @@ librespot-playback = { version = "0.8.0", default-features = false, features = [
 librespot-protocol = "0.8.0"
 protobuf = "3"
 http = "1"
+bytes = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "sync", "time"] }
 serde_json = "1"
 log = "0.4"

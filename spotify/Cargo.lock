@@ -1314,6 +1314,7 @@ dependencies = [
 name = "jukebox-spotify"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "env_logger",
  "http",
  "librespot-core",

@@ -121,6 +121,7 @@ enum Omp {
         static let paintbrush = "\u{F1FC}"
         static let broadcast = "\u{F1EB}"
         static let question = "\u{F059}"
+        static let radio = "\u{F2CE}"
     }
 
     /** The name picked under Settings > Device name; blank means the default. */

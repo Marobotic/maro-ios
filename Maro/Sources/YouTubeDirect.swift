@@ -125,6 +125,12 @@ actor YouTubeDirect {
         return out
     }
 
+    /**
+     * YouTube's stream addresses are tied to the address they were asked
+     * from: after a change of network every kept one answers 403.
+     */
+    func forgetStreams() { cache.removeAll() }
+
     /** The best AAC stream AVPlayer can open for this video, and its rate. */
     func audio(_ videoId: String) async throws -> Stream {
         if let hit = cache[videoId], hit.expires - Date().timeIntervalSince1970 > 300 { return hit }

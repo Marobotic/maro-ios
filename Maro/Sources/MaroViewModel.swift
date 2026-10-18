@@ -91,6 +91,9 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     private var saveTask: Task<Void, Never>?
     private var playWhenLoaded: String?
     private var failStreak = 0
+    /** The last play that really started (onStarted), for the start watchdog. */
+    private var startedTag = 0
+    private let network = NetworkWatch()
 
     // When the user last cleared the queue, so an empty account snapshot can
     // be adopted instead of the merge guard holding onto the old songs.
@@ -171,6 +174,13 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             }
         }
         startConnectivityWatch()
+        network.onChange = { [weak self] old, new in self?.networkChanged(old, new) }
+        network.start()
+        Spotify.shared.onReconnected = { [weak self] ok in
+            guard let self else { return }
+            log.info("spotify reconnected: \(ok)")
+            if ok && self.isPhone && self.phonePlayer?.onSpotify == true { self.phonePlayer?.reloadSpotify() }
+        }
         // Sessions signed in to (or out of) on another client arrive here
         // without a restart.
         Task { [weak self] in
@@ -801,7 +811,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         let error = p.str("error").ifBlank("Cloud audio is unavailable")
         switch job.purpose {
         case .play(let tag):
-            if tag != playTag { return }
+            if tag != playTag || startedTag == tag { return }
             if ready {
                 playRoute = "engine"
                 playStreamAtTier(videoId, tag: tag, duration: job.track.duration)
@@ -869,6 +879,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         playTag += 1
         let tag = playTag
         tapAt = uptime()
+        watchStart(tag, track)
         saveTask?.cancel()
         progress = Progress(position: 0, duration: track.duration, playing: false, anchor: tapAt)
         sounding = nil
@@ -1026,6 +1037,54 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         if let next = q[safe: i + 1], next.source == "spotify", !next.id.isEmpty {
             phone.stageSpotify("spotify:track:" + next.id)
         }
+    }
+
+    /**
+     * No song may load forever. A route that has not started the song in
+     * time is given up on: Spotify gets a new connection and one more try,
+     * then the song goes the way a song Spotify will not play goes (your
+     * server finds it on YouTube); a stream that hangs goes the failed-stream
+     * way. Whatever took over gets 40 seconds, then the song is skipped.
+     */
+    private func watchStart(_ tag: Int, _ track: Track) {
+        Task { @MainActor [weak self] in
+            await sleep(seconds: 10)
+            guard let self, tag == self.playTag, self.startedTag != tag, self.isPhone else { return }
+            if self.playRoute == "spotify" {
+                log.warning("spotify did not start \(track.title, privacy: .public) in 10 s; new connection")
+                Spotify.shared.reconnect()
+                await sleep(seconds: 12)
+                guard tag == self.playTag, self.startedTag != tag else { return }
+                self.onFailed(tag: tag, notOnServer: true, message: "Spotify did not start the song")
+            } else if self.playRoute != "engine" {
+                // (The server fetching a song it has never had takes a while: that one is only waited for.)
+                await sleep(seconds: 5)
+                guard tag == self.playTag, self.startedTag != tag else { return }
+                self.onFailed(tag: tag, notOnServer: false, message: "The stream did not start")
+            }
+            await sleep(seconds: 40)
+            guard tag == self.playTag, self.startedTag != tag else { return }
+            log.warning("gave up on \(track.title, privacy: .public): nothing started it")
+            self.showStatus("Couldn't start \(track.title) - skipped it", "error")
+            self.skipCurrent()
+        }
+    }
+
+    /**
+     * Wi-Fi to 4G, or back. Connections and addresses from the old network
+     * are dead: YouTube's stream addresses (tied to the old address), songs
+     * half-loaded ahead, and the Spotify player's connection - which gets a
+     * new one, and the song it was on is loaded again where it was. Going
+     * from 4G onto Wi-Fi leaves the 4G connection working, so a Spotify song
+     * playing then is left alone.
+     */
+    private func networkChanged(_ old: String, _ new: String) {
+        log.info("network \(old, privacy: .public) -> \(new, privacy: .public)")
+        Task { await YouTubeDirect.shared.forgetStreams() }
+        AudioCache.clear()
+        let playingSpotify = isPhone && state.localPlaying && phonePlayer?.onSpotify == true
+        if old == "cellular" && new == "wifi" && playingSpotify { return }
+        Spotify.shared.reconnect()
     }
 
     // -- where a song plays from -----------------------------------------
@@ -1207,6 +1266,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
 
     func onStarted(tag: Int) {
         if tag != playTag { return }
+        startedTag = tag
         if pendingSeek > 1 {
             phone.seek(to: pendingSeek)
             pendingSeek = 0
@@ -1291,7 +1351,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 log.info("stream failed (\(message, privacy: .public)), downloading instead")
                 Task {
                     let saved = await saveLocalNow(track, videoId)
-                    guard tag == playTag else { return }
+                    guard tag == playTag, startedTag != tag else { return }
                     if saved, let file = localFiles[videoId] {
                         phone.playFile(file, tag: tag, duration: track.duration)
                     } else {
@@ -2039,6 +2099,152 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         send("playlist.download", ["source": row.source, "id": row.id, "name": row.name])
     }
 
+    // -- Discover -----------------------------------------------------------
+
+    /** What the home pages offered (Discover.swift); "at" is when they were read. */
+    private var discoverRaw: JSON = [:]
+    private var discoverYtm = false
+
+    private func drawDiscover() {
+        state.discover = DiscoverPage.build(discoverRaw, recent: state.recent, spotify: Spotify.shared.hasLogin, ytm: discoverYtm)
+    }
+
+    /** The tab: what is kept, at once; the home pages read again when older than an hour (or `force`). */
+    func loadDiscover(force: Bool = false) {
+        if discoverRaw.isEmpty, let kept = DiscoverStore.shared.page() { discoverRaw = kept }
+        Task {
+            discoverYtm = await YouTubeMusic.shared.signedIn
+            drawDiscover()
+            let spotify = Spotify.shared.hasLogin, ytm = discoverYtm
+            let age = Date().timeIntervalSince1970 - discoverRaw.double("at")
+            guard spotify || ytm, !state.discoverBusy, force || age > 3600 else { return }
+            state.discoverBusy = true
+            if spotify { Spotify.shared.start() }
+            let fromSpotify = spotify ? await SpotifyHome.sections() : nil
+            let yt = ytm ? (try? await YouTubeMusic.shared.home()) : nil
+            var raw = discoverRaw
+            if let fromSpotify { raw["spotify"] = ["sections": fromSpotify] as JSON }
+            if let yt { raw["ytm"] = ["mixes": yt.mixes, "radios": yt.radios] as JSON }
+            if fromSpotify != nil || yt != nil {
+                raw["at"] = Date().timeIntervalSince1970
+                discoverRaw = raw
+                let page = raw
+                Task.detached { DiscoverStore.shared.savePage(page) }
+            } else {
+                showStatus("Couldn't read Discover - check the connection", "error")
+            }
+            state.discoverBusy = false
+            drawDiscover()
+        }
+    }
+
+    /** A mix or radio: its kept songs at once, read again behind them when old (six hours; a radio, a day). */
+    func openDiscover(_ item: DiscoverItem) {
+        var s = state
+        s.discoverOpen = item
+        s.discoverTracks = []
+        s.discoverAt = 0
+        s.discoverLoading = true
+        if let kept = DiscoverStore.shared.list(item.id), !kept.tracks.isEmpty {
+            s.discoverTracks = kept.tracks
+            s.discoverAt = kept.at
+            s.discoverLoading = false
+        }
+        state = s
+        let age = Date().timeIntervalSince1970 - state.discoverAt
+        if state.discoverTracks.isEmpty || age > (item.id.contains(":radio:") ? 86400 : 21600) { refreshDiscoverList() }
+    }
+
+    /** The open mix or radio, read from its service again. */
+    func refreshDiscoverList() {
+        guard let item = state.discoverOpen else { return }
+        if state.discoverTracks.isEmpty { state.discoverLoading = true }
+        Task {
+            let got = await DiscoverPage.fetch(item.id)
+            guard state.discoverOpen?.id == item.id else { return }
+            state.discoverLoading = false
+            if let got, !got.isEmpty {
+                state.discoverTracks = got
+                state.discoverAt = Date().timeIntervalSince1970
+                Task.detached { DiscoverStore.shared.saveList(item.id, got) }
+            } else if state.discoverTracks.isEmpty {
+                showStatus("Couldn't open \(item.name)", "error")
+            }
+        }
+    }
+
+    func closeDiscover() {
+        var s = state
+        s.discoverOpen = nil
+        s.discoverTracks = []
+        s.discoverLoading = false
+        state = s
+    }
+
+    /** Play a mix or radio from the start, opened or not. */
+    func playDiscover(_ item: DiscoverItem) {
+        if state.discoverOpen?.id == item.id && !state.discoverTracks.isEmpty {
+            return playList(state.discoverTracks, 0, name: item.name)
+        }
+        Task {
+            var tracks = DiscoverStore.shared.list(item.id)?.tracks ?? []
+            if tracks.isEmpty { tracks = await DiscoverPage.fetch(item.id) ?? [] }
+            if tracks.isEmpty { return showStatus("Couldn't open \(item.name)", "error") }
+            let list = tracks
+            Task.detached { DiscoverStore.shared.saveList(item.id, list) }
+            playList(tracks, 0, name: item.name)
+        }
+    }
+
+    /**
+     * Radio from a song: Spotify's when it is a Spotify song (and Spotify is
+     * signed in here), YouTube Music's otherwise. From the song playing on
+     * this phone it keeps playing and the radio becomes the queue after it;
+     * any other song plays first.
+     */
+    func startRadio(_ t: Track) {
+        showStatus("Starting radio from \(t.title)…", "info")
+        Task {
+            var id = "", tracks: [Track] = []
+            if t.source == "spotify" && Spotify.shared.hasLogin {
+                Spotify.shared.start()
+                if let r = await Spotify.shared.radio(t.id) {
+                    id = "sp:radio:" + t.id
+                    tracks = r.tracks
+                }
+            }
+            if tracks.isEmpty {
+                var vid = videoIdOf(t).ifEmpty(t.videoId)
+                if vid.isEmpty && t.source == "ytm" { vid = t.id }
+                if vid.isEmpty {
+                    let found = await YouTubeDirect.shared.search("\(t.title) \(t.artist)")
+                    vid = (found.first(where: { Match.sameSong($0, t) }) ?? found.first)?.id ?? ""
+                }
+                if !vid.isEmpty, let r = try? await YouTubeMusic.shared.radio(vid) {
+                    id = "yt:radio:" + vid
+                    tracks = r
+                }
+            }
+            guard !tracks.isEmpty else { return showStatus("No radio for \(t.title)", "error") }
+            let name = t.title + " Radio", list = tracks, key = id
+            Task.detached { DiscoverStore.shared.saveList(key, list) }
+            if isPhone, state.localPlaying, let cur = state.localTrack, cur.sameAs(t) {
+                let q = [cur] + tracks.filter { !$0.sameAs(cur) }
+                var s = state
+                s.localQueue = q
+                s.localQueueIndex = 0
+                s.localQueueName = name
+                state = s
+                localDirty = true
+                warm(Array(q.dropFirst().prefix(3)))
+                showStatus("\(name) is up next", "ok")
+                return
+            }
+            playList([t] + tracks.filter { !$0.sameAs(t) }, 0, name: name)
+            showStatus("Playing \(name)", "ok")
+        }
+    }
+
     // -- downloading a playlist to this phone -----------------------------
 
     private func setDownload(_ key: String, _ job: DownloadJob) { state.downloads[key] = job }
@@ -2480,7 +2686,10 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
 
     // -- view ---------------------------------------------------------------
 
-    func selectTab(_ key: String) { state.view = key }
+    func selectTab(_ key: String) {
+        state.view = key
+        if key == Sync.viewDiscover { loadDiscover() }
+    }
 
     func toggleStats() {
         state.statsOpen.toggle()

@@ -9,6 +9,7 @@ struct ViewArea: View {
         switch state.view {
         case Sync.viewLyrics: LyricsView(state: state, vm: vm)
         case Sync.viewPlaylists: PlaylistsView(state: state, vm: vm)
+        case Sync.viewDiscover: DiscoverView(state: state, vm: vm)
         case Sync.viewSongs: SongsView(state: state, vm: vm)
         case Sync.viewRecent: RecentView(state: state, vm: vm)
         case Sync.viewSearch: SearchView(state: state, vm: vm)
@@ -56,7 +57,7 @@ final class VisibleRows: ObservableObject {
 }
 
 @MainActor
-private func trackMenu(_ track: Track, liked: Bool, vm: MaroViewModel) -> OmpDialog {
+func trackMenu(_ track: Track, liked: Bool, vm: MaroViewModel) -> OmpDialog {
     // "Add to queue" only for a song that is not queued yet; "Play next" moves one that is.
     .menu(title: track.title.ifBlank(track.id), items: [
         // Clicking the row already plays it; this is for when you care
@@ -65,6 +66,8 @@ private func trackMenu(_ track: Track, liked: Bool, vm: MaroViewModel) -> OmpDia
         .init(icon: Omp.Icons.ytm, label: "Play on YouTube Music", tint: Omp.ytm) { vm.playOn(track, "ytm") },
         .init(icon: Omp.Icons.sc, label: "Play on SoundCloud", tint: Omp.sc) { vm.playOn(track, "sc") },
         .init(icon: Omp.Icons.add, label: "Play next") { vm.queueNext(track) },
+        // Songs like this one: Spotify's radio for a Spotify song, YouTube Music's otherwise.
+        .init(icon: Omp.Icons.radio, label: "Start radio") { vm.startRadio(track) },
     ] + (vm.isQueued(track) ? [] : [
         .init(icon: Omp.Icons.list, label: "Add to queue") { vm.addToQueue(track) },
     ]) + [
@@ -472,7 +475,7 @@ private struct TrackList: View {
     }
 }
 
-private struct TrackRow: View {
+struct TrackRow: View {
     @Environment(\.omp) private var m
     let track: Track
     let isCurrent: Bool

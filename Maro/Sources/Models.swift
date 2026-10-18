@@ -282,6 +282,14 @@ struct UiState: Equatable {
     var playlistTotal = 0
     var playlistError = ""
 
+    // Discover: Discover Weekly, radio and mixes; an opened one's songs.
+    var discover: [DiscoverSection] = []
+    var discoverBusy = false
+    var discoverOpen: DiscoverItem?
+    var discoverTracks: [Track] = []
+    var discoverLoading = false
+    var discoverAt: Double = 0
+
     // Phone storage
     var phoneAvailableBytes: Int64 = 0
     var phoneTotalBytes: Int64 = 0
@@ -425,6 +433,7 @@ enum Sync {
     static let viewQueue = "queue"
     static let viewLyrics = "lyrics"
     static let viewPlaylists = "playlists"
+    static let viewDiscover = "discover"
     static let viewSongs = "songs"
     static let viewRecent = "recent"
     static let viewSearch = "search"

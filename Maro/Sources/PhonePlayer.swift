@@ -276,6 +276,20 @@ final class PhonePlayer {
         }
     }
 
+    /**
+     * The Spotify player has a new connection (the phone changed networks):
+     * its players are new too, so the song is loaded again where it was, and
+     * plays on if it was playing or had not started yet.
+     */
+    func reloadSpotify() {
+        guard let uri = spotifyUri else { return }
+        let ms = Int(currentPosition * 1000)
+        Spotify.shared.load(uri, play: spotifyPlaying || !started, ms: ms)
+    }
+
+    /** Whether a Spotify song is loaded on this player. */
+    var onSpotify: Bool { spotifyUri != nil }
+
     /** Queue the next Spotify song on a standby player: it starts at once. */
     func stageSpotify(_ uri: String) { Spotify.shared.stage(uri) }
 
