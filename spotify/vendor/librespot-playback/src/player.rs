@@ -1210,7 +1210,12 @@ impl PlayerTrackLoader {
             // the cursor may have been moved by parsing normalisation data. This may not
             // matter for playback (but won't hurt either), but may be useful for the
             // passthrough decoder.
-            let stream_position_ms = match decoder.seek(position_ms) {
+            // Jukebox: a new decoder already stands at the start of the music.
+            // Asked to seek there anyway, it read other parts of the file
+            // first, a round trip each: songs started in 1.0-1.9 s, and in
+            // 0.4-0.9 s without it.
+            let stream_position_ms = if position_ms == 0 { Ok(0) } else { decoder.seek(position_ms) };
+            let stream_position_ms = match stream_position_ms {
                 Ok(new_position_ms) => new_position_ms,
                 Err(e) => {
                     error!(
