@@ -108,6 +108,42 @@ final class ArtLoader: ObservableObject, @unchecked Sendable {
 
     func songKey(_ t: Track, px: Int) -> String { t.artKey.isEmpty ? "" : "s:\(t.artKey)@\(px)" }
 
+    /** A song row's cover in pixels, as the rows last drew it (prefetch asks the same size). */
+    var rowPx = 84
+
+    /** Whether this song's chosen cover is on the phone already. */
+    func hasSong(_ t: Track) -> Bool {
+        guard !t.artKey.isEmpty, let have = withIndex({ index[t.artKey] }) else { return false }
+        return Self.size(of: masterFile(have.master)) > 0
+    }
+
+    /**
+     * A list's covers ahead of being shown: each song's own picture at row
+     * size onto the disk, a few at a time, so scrolling to it finds it here.
+     */
+    func prefetch(_ tracks: [Track]) {
+        let px = rowPx
+        let urls = tracks.compactMap { t -> String? in
+            guard !t.artUrl.isEmpty, !hasSong(t) else { return nil }
+            let u = Self.sized(t.artUrl, px)
+            return u.isEmpty || Self.size(of: diskFile(u)) > 0 ? nil : t.artUrl
+        }
+        guard !urls.isEmpty else { return }
+        Task.detached(priority: .utility) { [weak self] in
+            await withTaskGroup(of: Void.self) { group in
+                var next = 0
+                for _ in 0..<min(8, urls.count) {
+                    let u = urls[next]; next += 1
+                    group.addTask { _ = await self?.bytesFor(artKey: "", artUrl: u, px: px) }
+                }
+                while await group.next() != nil, next < urls.count {
+                    let u = urls[next]; next += 1
+                    group.addTask { _ = await self?.bytesFor(artKey: "", artUrl: u, px: px) }
+                }
+            }
+        }
+    }
+
     func loadSong(_ t: Track, px: Int) async -> UIImage? {
         let key = songKey(t, px: px)
         if key.isEmpty || px <= 0 { return nil }

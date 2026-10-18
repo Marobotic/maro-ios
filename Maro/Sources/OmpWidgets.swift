@@ -254,23 +254,37 @@ struct CoverArt: View {
         }
         .frame(width: side, height: side)
         .clipShape(RoundedRectangle(cornerRadius: m.pt(radius)))
-        .task(id: "\(key)#\(loader.epoch)") {
+        .task(id: "\(key)#\(loader.epoch)#\(track?.artUrl ?? "")") {
             image = loader.cached(key)
-            guard image == nil, !key.isEmpty else { return }
-            // A song's cover may still be being chosen on the droplet.
-            let tries = track == nil ? 3 : 4
-            for attempt in 0..<tries {
-                let got: UIImage?
-                if let track { got = await loader.loadSong(track, px: px) }
-                else { got = await loader.load(artKey: artKey, artUrl: artUrl, px: px) }
-                if let got {
+            guard image == nil else { return }
+            if let track {
+                if size == Omp.rowArt { loader.rowPx = px }
+                // Until the droplet's chosen cover is here, the picture the
+                // song came with: its service's own, at this box's size, from
+                // the disk or straight from Spotify's or Google's image
+                // servers (tens of milliseconds). A row is never left empty.
+                if !loader.hasSong(track), !track.artUrl.isEmpty {
+                    if let quick = await loader.load(artKey: "", artUrl: track.artUrl, px: px), image == nil { image = quick }
+                }
+                guard !key.isEmpty else { return }
+                for attempt in 0..<3 {
+                    if let got = await loader.loadSong(track, px: px) {
+                        image = got
+                        return
+                    }
+                    if Task.isCancelled { return }
+                    await sleep(seconds: 2 * Double(attempt + 1))
+                }
+                return
+            }
+            guard !key.isEmpty else { return }
+            for attempt in 0..<3 {
+                if let got = await loader.load(artKey: artKey, artUrl: artUrl, px: px) {
                     image = got
                     return
                 }
                 if Task.isCancelled { return }
-                if attempt < tries - 1 {
-                    await sleep(seconds: track == nil ? 0.7 * Double(attempt + 1) : 5 * Double(attempt + 1))
-                }
+                if attempt < 2 { await sleep(seconds: 0.7 * Double(attempt + 1)) }
             }
         }
     }

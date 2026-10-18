@@ -137,9 +137,18 @@ actor YouTubeDirect {
         var data = try await ask(videoId, await visitor(refresh: false))
         var status = data.obj("playabilityStatus")?.str("status") ?? ""
         if status == "LOGIN_REQUIRED" {
-            // A visitor YouTube has grown suspicious of: one fresh one, once.
-            data = try await ask(videoId, await visitor(refresh: true))
+            // "Sign in to confirm you're not a bot": the refusal carries a
+            // fresh visitor id, and asking again with that one is answered
+            // (another from sw.js_data was refused the same way, and the song
+            // then went the slow way through the droplet). Kept for the next songs.
+            let issued = data.obj("responseContext")?.str("visitorData") ?? ""
+            let vis = issued.isEmpty ? await visitor(refresh: true) : issued
+            data = try await ask(videoId, vis)
             status = data.obj("playabilityStatus")?.str("status") ?? ""
+            if status == "OK" && !issued.isEmpty {
+                visitorId = issued
+                visitorAt = Date().timeIntervalSince1970
+            }
         }
         guard status == "OK" else {
             throw Refused(reason: data.obj("playabilityStatus")?.str("reason").ifEmpty(status) ?? status)

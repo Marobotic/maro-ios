@@ -209,6 +209,25 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         if isPhone && (old.localTrack != state.localTrack || old.localPlaying != state.localPlaying) {
             updateNowPlaying()
         }
+        // A list that arrived or changed: its covers onto the phone before
+        // they are scrolled to.
+        for (was, list) in [(old.playlistTracks, state.playlistTracks), (old.discoverTracks, state.discoverTracks),
+                            (old.searchResults, state.searchResults), (old.localQueue, state.localQueue), (old.recent, state.recent)]
+        where was.count != list.count || was.first?.id != list.first?.id {
+            ArtLoader.shared.prefetch(list)
+        }
+        // The library: every playlist kept on the phone, read once.
+        if old.library.count != state.library.count { prefetchLibraryArt(state.library) }
+    }
+
+    private func prefetchLibraryArt(_ rows: [LibraryRow]) {
+        let keys = rows.filter { !$0.isHeader && !$0.id.isEmpty }.map { playlistKey($0) }
+        let cache = deviceCache
+        Task.detached(priority: .utility) {
+            for key in keys {
+                if let kept = cache.playlist(key) { ArtLoader.shared.prefetch(kept.tracks) }
+            }
+        }
     }
 
     private func updateNowPlaying() {
