@@ -1103,6 +1103,17 @@ impl PlayerTrackLoader {
             // song is reported unavailable at once, so the engine can play it
             // from YouTube; "continuing without decryption" left the player
             // waiting on a file it could never decode.
+            // Jukebox: most refusals ("error audio key 0 2") are passing ones
+            // that the same request gets past a moment later; asked twice
+            // more before the song is given up.
+            let mut key_result = key_result;
+            for pause_ms in [400u64, 1200] {
+                if key_result.is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(pause_ms)).await;
+                key_result = self.session.audio_key().request(track_id, file_id).await;
+            }
             let key = match key_result {
                 Ok(key) => Some(key),
                 Err(e) => {

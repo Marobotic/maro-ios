@@ -255,35 +255,48 @@ struct CoverArt: View {
         .frame(width: side, height: side)
         .clipShape(RoundedRectangle(cornerRadius: m.pt(radius)))
         .task(id: "\(key)#\(loader.epoch)#\(track?.artUrl ?? "")") {
-            image = loader.cached(key)
-            guard image == nil else { return }
+            let quickKey = track.map { loader.key(artKey: "", artUrl: $0.artUrl, px: px) } ?? ""
+            image = loader.cached(key) ?? (quickKey.isEmpty ? nil : loader.cached(quickKey))
             if let track {
                 if size == Omp.rowArt { loader.rowPx = px }
-                // Until the droplet's chosen cover is here, the picture the
-                // song came with: its service's own, at this box's size, from
-                // the disk or straight from Spotify's or Google's image
-                // servers (tens of milliseconds). A row is never left empty.
-                if !loader.hasSong(track), !track.artUrl.isEmpty {
-                    if let quick = await loader.load(artKey: "", artUrl: track.artUrl, px: px), image == nil { image = quick }
+                let big = size > 80
+                let have = loader.hasSong(track)
+                // The picture the song came with: its service's own, at this
+                // box's size, from the disk or straight from Spotify's or
+                // Google's image servers (tens of milliseconds).
+                if image == nil && !have && !track.artUrl.isEmpty {
+                    let quick = await loader.load(artKey: "", artUrl: track.artUrl, px: px)
+                    // A row scrolled away meanwhile shows another song now:
+                    // this picture is not its.
+                    if Task.isCancelled { return }
+                    if let quick { image = quick }
                 }
-                guard !key.isEmpty else { return }
+                // A row is done once it shows that. The droplet's chosen
+                // cover is a 1200 px picture: fetched for every row on 4G it
+                // crowded out the rows and the music, so only a big box (now
+                // playing, a card) asks for it, or a row whose copy is on the
+                // phone already.
+                if image != nil && !big && !have { return }
+                guard !key.isEmpty, loader.cached(key) == nil else { return }
                 for attempt in 0..<3 {
-                    if let got = await loader.loadSong(track, px: px) {
+                    let got = await loader.loadSong(track, px: px)
+                    if Task.isCancelled { return }
+                    if let got {
                         image = got
                         return
                     }
-                    if Task.isCancelled { return }
                     await sleep(seconds: 2 * Double(attempt + 1))
                 }
                 return
             }
-            guard !key.isEmpty else { return }
+            guard image == nil, !key.isEmpty else { return }
             for attempt in 0..<3 {
-                if let got = await loader.load(artKey: artKey, artUrl: artUrl, px: px) {
+                let got = await loader.load(artKey: artKey, artUrl: artUrl, px: px)
+                if Task.isCancelled { return }
+                if let got {
                     image = got
                     return
                 }
-                if Task.isCancelled { return }
                 if attempt < 2 { await sleep(seconds: 0.7 * Double(attempt + 1)) }
             }
         }

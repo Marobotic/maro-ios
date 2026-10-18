@@ -132,7 +132,9 @@ final class ArtLoader: ObservableObject, @unchecked Sendable {
         Task.detached(priority: .utility) { [weak self] in
             await withTaskGroup(of: Void.self) { group in
                 var next = 0
-                for _ in 0..<min(8, urls.count) {
+                // On 4G a few at a time, so the rows on screen and the music
+                // are not crowded out.
+                for _ in 0..<min(NetworkWatch.expensive ? 2 : 8, urls.count) {
                     let u = urls[next]; next += 1
                     group.addTask { _ = await self?.bytesFor(artKey: "", artUrl: u, px: px) }
                 }

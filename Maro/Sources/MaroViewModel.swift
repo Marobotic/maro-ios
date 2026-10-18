@@ -78,6 +78,14 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
      * stopped at its first 50.
      */
     private var likedTracks: [Track] = []
+    /**
+     * Until when (uptime) songs skip Spotify: it just failed to start one
+     * (a connection dying on the way from Wi-Fi to 4G, or Spotify refusing
+     * keys). Meanwhile they play from YouTube at once instead of each one
+     * waiting for Spotify to fail again.
+     */
+    private var spotifyRestUntil: Double = 0
+    private static let spotifyRest: Double = 180
 
     // Which YouTube video plays each track, and what the droplet and phone hold.
     private var trackMap: [String: String] = [:]
@@ -224,7 +232,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             ArtLoader.shared.prefetch(list)
         }
         // The library: every playlist kept on the phone, read once.
-        if old.library.count != state.library.count { prefetchLibraryArt(state.library) }
+        if old.library.count != state.library.count && !NetworkWatch.expensive { prefetchLibraryArt(state.library) }
     }
 
     private func prefetchLibraryArt(_ rows: [LibraryRow]) {
@@ -921,6 +929,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         let oneOff = oneOffPrefer.removeValue(forKey: track.id)
         let prefer = oneOff ?? state.playbackSource
         if prefer == "spotify" && track.source == "spotify" && Spotify.shared.hasLogin {
+            if uptime() < spotifyRestUntil { return playYouTubeInstead(track, tag: tag) }
             return playSpotifyHere(track, tag: tag)
         }
         if oneOff == "spotify" && track.source != "spotify" && Spotify.shared.hasLogin {
@@ -976,7 +985,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 state.audioTimeline = line
             }
         } else if track.source == "spotify" && Spotify.shared.hasLogin {
-            playSpotifyHere(track, tag: tag)
+            if uptime() < spotifyRestUntil { playYouTubeInstead(track, tag: tag) } else { playSpotifyHere(track, tag: tag) }
         } else if track.source == "sc" {
             playRoute = "soundcloud"
             playSoundCloud(track, tag: tag, fallback: nil)
@@ -1045,6 +1054,29 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     }
 
     /**
+     * A song Spotify did not start (or is resting from): its YouTube copy,
+     * straight from YouTube on this phone - the droplet's map first, else a
+     * YouTube Music search here. The engine only when neither finds it.
+     */
+    private func playYouTubeInstead(_ track: Track, tag: Int) {
+        playRoute = "youtube"
+        Task { @MainActor in
+            var vid = videoIdOf(track)
+            if vid.isEmpty {
+                let found = await YouTubeDirect.shared.search("\(track.title) \(track.artist.split(separator: ",").first.map(String.init) ?? "")")
+                vid = found.first(where: { Match.sameSong($0, track) })?.id ?? ""
+            }
+            guard tag == playTag else { return }
+            if vid.isEmpty {
+                playRoute = "engine"
+                requestCloud(track, .play(tag: tag))
+                return
+            }
+            playYouTubeDirect(vid, track: track, tag: tag)
+        }
+    }
+
+    /**
      * A Spotify song on this phone's own Spotify player (Spotify.swift), at
      * 320 kbps. `display` is the row on screen when it is a stand-in for a
      * song from another service.
@@ -1079,15 +1111,17 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
      */
     private func watchStart(_ tag: Int, _ track: Track) {
         Task { @MainActor [weak self] in
-            await sleep(seconds: 10)
+            // Spotify starts a song in about a second: past 4 s it is not
+            // going to (it waited 22 s here, then went the slow way).
+            await sleep(seconds: 4)
             guard let self, tag == self.playTag, self.startedTag != tag, self.isPhone else { return }
             if self.playRoute == "spotify" {
-                log.warning("spotify did not start \(track.title, privacy: .public) in 10 s; new connection")
-                Spotify.shared.reconnect()
-                await sleep(seconds: 12)
-                guard tag == self.playTag, self.startedTag != tag else { return }
+                log.warning("spotify did not start \(track.title, privacy: .public) in 4 s; YouTube instead, new connection behind it")
                 self.onFailed(tag: tag, notOnServer: true, message: "Spotify did not start the song")
-            } else if self.playRoute != "engine" {
+            }
+            await sleep(seconds: 6)
+            guard tag == self.playTag, self.startedTag != tag else { return }
+            if self.playRoute != "engine" && self.playRoute != "spotify" {
                 // (The server fetching a song it has never had takes a while: that one is only waited for.)
                 await sleep(seconds: 5)
                 guard tag == self.playTag, self.startedTag != tag else { return }
@@ -1372,6 +1406,15 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     func onFailed(tag: Int, notOnServer: Bool, message: String) {
         if tag != playTag { return }
         let track = state.localTrack
+        if let track, playRoute == "spotify", retriedTag != tag {
+            // Spotify would not start it: YouTube from this phone now, and
+            // Spotify left alone a while (a new connection made behind it).
+            retriedTag = tag
+            log.info("spotify failed (\(message, privacy: .public)); YouTube on the phone")
+            spotifyRestUntil = uptime() + Self.spotifyRest
+            Spotify.shared.reconnect()
+            return playYouTubeInstead(track, tag: tag)
+        }
         if let track, retriedTag != tag {
             retriedTag = tag
             let videoId = videoIdOf(track)

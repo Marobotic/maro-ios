@@ -9,6 +9,9 @@ import Network
  */
 @MainActor
 final class NetworkWatch {
+    /** On a metered network (4G, a hotspot): only what is on screen is fetched ahead. */
+    nonisolated(unsafe) static var expensive = false
+
     private let monitor = NWPathMonitor()
     private var kind = ""
     /** Called with the new kind ("wifi", "cellular", "wired", "other") when it changes. */
@@ -16,6 +19,7 @@ final class NetworkWatch {
 
     func start() {
         monitor.pathUpdateHandler = { [weak self] path in
+            NetworkWatch.expensive = path.isExpensive
             let kind: String
             if path.status != .satisfied {
                 kind = "none"
