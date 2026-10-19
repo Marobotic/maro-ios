@@ -272,6 +272,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         if pump != nil { return }
         pumpStop = false
         startStateReports()
+        ensureLikedSync()
         pump = client.phonePump(
             deviceId: deviceId(),
             deviceName: { await MainActor.run { Omp.phoneName } },
@@ -282,6 +283,46 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     }
 
     private func pumpShouldStop() -> Bool { pumpStop || !state.signedIn }
+
+    // -- liked songs ----------------------------------------------------------
+    //
+    // The droplet holds the account's Liked list. A heart here goes there at
+    // once (and shows here at once); a heart on any other device arrives
+    // through this long-poll the moment it is made. Newest on top.
+
+    private var likedSync: Task<Void, Never>?
+
+    private func ensureLikedSync() {
+        if likedSync != nil { return }
+        likedSync = Task { [weak self] in
+            var rev = -1
+            while !Task.isCancelled {
+                guard let self, self.state.signedIn, !self.pumpStop else { break }
+                switch await self.client.likedPoll(after: rev, wait: rev < 0 ? 0 : 25) {
+                case .list(let r, let items):
+                    rev = r
+                    self.applyLiked(items.compactMap { ($0 as? JSON)?.obj("track") })
+                case .same: break
+                case .failed: await sleep(seconds: 5)
+                }
+            }
+            self?.likedSync = nil
+        }
+    }
+
+    private func applyLiked(_ arr: [Any]) {
+        let tracks = Sync.tracks(arr).map(giveVideoId)
+        if tracks.map(\.id) == likedTracks.map(\.id) { return }
+        var s = state
+        s.likedKeys = Sync.likedKeys(arr)
+        likedTracks = tracks
+        s.likedIds = Set(tracks.flatMap(\.trackIds))
+        if s.selectedPlaylist?.source == "liked" {
+            s.playlistTracks = likedTracks
+            s.playlistTotal = likedTracks.count
+        }
+        state = s
+    }
 
     private func musicDirectory() -> URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("Maro", isDirectory: true)
@@ -1690,6 +1731,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         pumpStop = true
         pump?.cancel()
         pump = nil
+        likedSync?.cancel()
+        likedSync = nil
         var fresh = UiState()
         fresh.myDeviceId = state.myDeviceId
         fresh.deviceName = state.deviceName
@@ -2144,14 +2187,23 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         } else {
             if !t.source.isEmpty { s.likedKeys.insert(t.source + ":" + t.id) }
             s.likedIds.formUnion(t.trackIds)
-            likedTracks.append(t)
+            likedTracks.insert(t, at: 0)       // newest on top
         }
         if s.selectedPlaylist?.source == "liked" {
             s.playlistTracks = likedTracks
             s.playlistTotal = likedTracks.count
         }
         state = s
-        send("song.like", ["track": t.toJSON()])
+        // Saved on the droplet (every other device has it at once); a few
+        // tries if the connection drops.
+        let json = t.toJSON(), client = client
+        Task {
+            for _ in 0..<5 {
+                if await client.like(json, liked: !liked) { return }
+                await sleep(seconds: 3)
+            }
+            log.warning("a like did not reach the account")
+        }
         showStatus(liked ? "Unliked" : "Liked", "ok")
     }
 

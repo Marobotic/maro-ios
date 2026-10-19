@@ -325,6 +325,25 @@ final class MaroClient: @unchecked Sendable {
 
     func account() async -> JSON? { try? await call("GET", "/account") }
 
+    /** A heart, saved on the droplet, which tells every other device at once. */
+    func like(_ track: JSON, liked: Bool) async -> Bool {
+        guard let resp = try? await call("POST", "/liked", body: ["track": track, "liked": liked], timeout: 15) else { return false }
+        return resp.bool("ok")
+    }
+
+    /**
+     * The account's Liked list (newest first, [{track, at}]) once it is newer
+     * than `after`: a long-poll the droplet answers the moment any device
+     * hearts or un-hearts a song. .same when nothing changed; nil offline.
+     */
+    enum LikedPoll { case list(rev: Int, items: [Any]), same, failed }
+    func likedPoll(after: Int, wait: Int) async -> LikedPoll {
+        guard let resp = try? await call("GET", "/liked?after=\(after)&wait=\(wait)", timeout: TimeInterval(wait + 30)),
+              resp.bool("ok") else { return .failed }
+        if resp.bool("same") { return .same }
+        return .list(rev: resp.int("rev", 0), items: resp.arr("items") ?? [])
+    }
+
     /**
      * One music service's sealed session on the account, and when it was
      * stored. An empty blob when the account holds none; nil when the droplet
