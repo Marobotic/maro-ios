@@ -13,6 +13,15 @@ actor YouTubeDirect {
 
     struct Refused: Error { let reason: String }
 
+    /** Taken down for good: no other way of asking would play it (desktop youtube.rs GONE). */
+    struct Gone: Error { let reason: String }
+
+    /** "ERROR" is YouTube's answer for removed and closed-account videos; a private one is LOGIN_REQUIRED. */
+    private static func isGone(_ status: String, _ reason: String) -> Bool {
+        let r = reason.lowercased()
+        return status == "ERROR" || ["removed by the uploader", "video is private", "account associated with this video has been terminated"].contains { r.contains($0) }
+    }
+
     struct Stream {
         let url: URL
         let kbps: Int
@@ -151,7 +160,9 @@ actor YouTubeDirect {
             }
         }
         guard status == "OK" else {
-            throw Refused(reason: data.obj("playabilityStatus")?.str("reason").ifEmpty(status) ?? status)
+            let reason = data.obj("playabilityStatus")?.str("reason") ?? ""
+            if Self.isGone(status, reason) { throw Gone(reason: reason.ifEmpty("This video is no longer on YouTube")) }
+            throw Refused(reason: reason.ifEmpty(status))
         }
         let formats = ((data.obj("streamingData")?["adaptiveFormats"] as? [JSON]) ?? []).filter {
             !$0.str("url").isEmpty && $0.str("mimeType").hasPrefix("audio/mp4")   // AVPlayer: AAC, not WebM

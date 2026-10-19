@@ -149,6 +149,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     private var isPhone: Bool { state.playbackMode == .standalonePhone }
 
     init() {
+        state.gone = UserDefaults.standard.dictionary(forKey: "goneSongs") as? [String: String] ?? [:]
         AudioCache.session = { [client] in client.session }
         client.onSessionRejected = { [weak self] in Task { @MainActor in self?.sessionRejected() } }
         AudioCache.client = client
@@ -1011,6 +1012,11 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
 
     private func startUsual(_ track: Track, tag: Int) {
         let videoId = videoIdOf(track)
+        let saved = localFiles[videoId].map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+        if !saved, track.source == "ytm", let why = state.gone[videoId] {
+            state.localError = "Skipped \(track.title): \(why)"
+            return skipCurrent()
+        }
         if let file = localFiles[videoId], FileManager.default.fileExists(atPath: file.path) {
             playRoute = "file"
             // A saved song's rate is its size over its length: the file is the
@@ -1089,6 +1095,12 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 setSounding(videoId, copy: copy, kbps: stream.kbps, inTier: AudioCache.inTier(stream.kbps), route: "youtube")
                 phone.playYouTube(stream.url, videoId: videoId, tag: tag, duration: track.duration)
                 if state.statsOpen { measureSounding() }
+            } catch let gone as YouTubeDirect.Gone {
+                markGone(videoId, gone.reason)
+                guard tag == playTag else { return }
+                phone.stop()
+                state.localError = "Skipped \(track.title): \(gone.reason)"
+                skipCurrent()
             } catch {
                 guard tag == playTag else { return }
                 log.info("youtube \(videoId) direct refused: \(String(describing: error))")
@@ -1412,9 +1424,13 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             }
             learn(t.id, vid)
         }
-        if serverCached.contains(vid) || localFiles[vid] != nil { return }
-        guard let stream = try? await YouTubeDirect.shared.audio(vid) else { return }
-        AudioCache.prefetchYouTubeHead(stream.url)
+        if serverCached.contains(vid) || localFiles[vid] != nil || state.gone[vid] != nil { return }
+        do {
+            let stream = try await YouTubeDirect.shared.audio(vid)
+            AudioCache.prefetchYouTubeHead(stream.url)
+        } catch let gone as YouTubeDirect.Gone {
+            markGone(vid, gone.reason)
+        } catch {}
     }
 
     /**
@@ -1510,6 +1526,14 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
      * engine-assisted retry the player moves on to the next track. Consecutive
      * misses are capped so a queue of broken songs ends quietly.
      */
+    /** YouTube took this song down: greyed out in the lists with the reason, never asked again. */
+    private func markGone(_ videoId: String, _ reason: String) {
+        guard !videoId.isEmpty, state.gone[videoId] != reason else { return }
+        log.info("gone \(videoId, privacy: .public): \(reason, privacy: .public)")
+        state.gone[videoId] = reason
+        UserDefaults.standard.set(state.gone, forKey: "goneSongs")
+    }
+
     func skipCurrent() {
         failStreak += 1
         state.localPreparing = false

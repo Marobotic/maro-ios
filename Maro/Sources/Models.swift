@@ -324,6 +324,8 @@ struct UiState: Equatable {
     var localShuffle = false
     var localPreparing = false
     var localError = ""
+    /** YouTube songs taken down for good (removed, private), by video id: the reason YouTube gave. */
+    var gone: [String: String] = [:]
 
     // Search
     var searchText = ""
@@ -353,6 +355,9 @@ struct UiState: Equatable {
         if !t.source.isEmpty && likedKeys.contains(t.source + ":" + t.id) { return true }
         return t.trackIds.contains { likedIds.contains($0) }
     }
+
+    /** Why a YouTube Music song can't be played any more, or "" (desktop goneReason). */
+    func goneReason(_ t: Track) -> String { t.source == "ytm" ? gone[t.id] ?? "" : "" }
 
     /** Online everything is playable; offline only the songs actually on this phone are. */
     func canPlay(_ t: Track?) -> Bool {

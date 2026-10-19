@@ -503,7 +503,11 @@ struct TrackRow: View {
             : sounding == "spotify" ? Omp.spotify
             : Omp.sourceColor(isCurrent && track.viaYoutube ? "ytm" : track.source)
         let shape = RoundedRectangle(cornerRadius: m.pt(Omp.labelGap))
+        // Taken down by YouTube: greyed, the reason under the title, a tap only says why.
+        let gone = vm.state.goneReason(track)
+        let available = self.available && gone.isEmpty
         let line: String = {
+            if !gone.isEmpty { return gone }
             if !available { return "not on this phone" }
             if !meta.isEmpty && !track.artist.isEmpty { return "\(track.artist)  ·  \(meta)" }
             return meta.isEmpty ? track.artist : meta
@@ -526,7 +530,9 @@ struct TrackRow: View {
         .overlay { if isCurrent { shape.stroke(tint, lineWidth: 1) } }
         .contentShape(shape)
         .opacity(available ? 1 : 0.4)
-        .onTapGesture(perform: onPlay)
+        .onTapGesture {
+            if gone.isEmpty { onPlay() } else { vm.showStatus("\(track.title) can't be played: \(gone)", "error") }
+        }
         .onLongPressGesture(perform: onMenu)
     }
 }
