@@ -39,7 +39,8 @@ final class ArtLoader: ObservableObject, @unchecked Sendable {
             for f in old where f.pathExtension == "img" { try? FileManager.default.removeItem(at: f) }
             FileManager.default.createFile(atPath: moved.path, contents: Data())
         }
-        memory.totalCostLimit = 24 * 1024 * 1024
+        // Room for a long playlist's row covers (~20 KB each) besides the big ones.
+        memory.totalCostLimit = 64 * 1024 * 1024
     }
 
     // ---- songs ---------------------------------------------------------------
@@ -117,11 +118,51 @@ final class ArtLoader: ObservableObject, @unchecked Sendable {
         return Self.size(of: masterFile(have.master)) > 0
     }
 
+    private var jobs: [String: Task<Void, Never>] = [:]
+    private let jobsLock = NSLock()
+
     /**
-     * A list's covers ahead of being shown: each song's own picture at row
-     * size onto the disk, a few at a time, so scrolling to it finds it here.
+     * A list's covers ahead of being shown, decoded at row size into memory,
+     * so a row scrolled - or flung - to draws its picture in its first frame
+     * (rows used to wait for a fetch and a decode once drawn, and a fling
+     * showed blank boxes). Rows nearest `around` first: the droplet's chosen
+     * cover when it is on the phone, else the song's own picture. A new call
+     * for the same `list` replaces the old one. `onDisk` only: the pictures
+     * onto the disk, nothing decoded - for lists not on screen.
      */
-    func prefetch(_ tracks: [Track]) {
+    func prefetch(_ tracks: [Track], list: String, around: Int = 0, onDisk: Bool = false) {
+        if onDisk { return prefetchToDisk(tracks) }
+        let px = rowPx
+        let order = tracks.indices.sorted { abs($0 - around) < abs($1 - around) }.map { tracks[$0] }
+        let width = NetworkWatch.expensive ? 3 : 8
+        let job = Task.detached(priority: .userInitiated) { [weak self] in
+            var at = 0
+            while at < order.count, !Task.isCancelled {
+                let chunk = order[at..<min(at + width, order.count)]
+                at += width
+                await withTaskGroup(of: Void.self) { group in
+                    for t in chunk { group.addTask { await self?.warmRow(t, px: px) } }
+                }
+            }
+        }
+        jobsLock.lock()
+        jobs[list]?.cancel()
+        jobs[list] = job
+        jobsLock.unlock()
+    }
+
+    /** The best picture of `t` at `px` reachable without the droplet, into memory. */
+    private func warmRow(_ t: Track, px: Int) async {
+        let key = songKey(t, px: px)
+        if !key.isEmpty, memory.object(forKey: key as NSString) != nil { return }
+        if hasSong(t) {
+            _ = await loadSong(t, px: px)
+            return
+        }
+        if !t.artUrl.isEmpty { _ = await load(artKey: "", artUrl: t.artUrl, px: px) }
+    }
+
+    private func prefetchToDisk(_ tracks: [Track]) {
         let px = rowPx
         let urls = tracks.compactMap { t -> String? in
             guard !t.artUrl.isEmpty, !hasSong(t) else { return nil }

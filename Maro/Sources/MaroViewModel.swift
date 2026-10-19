@@ -226,10 +226,11 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         }
         // A list that arrived or changed: its covers onto the phone before
         // they are scrolled to.
-        for (was, list) in [(old.playlistTracks, state.playlistTracks), (old.discoverTracks, state.discoverTracks),
-                            (old.searchResults, state.searchResults), (old.localQueue, state.localQueue), (old.recent, state.recent)]
+        for (name, was, list) in [("playlist", old.playlistTracks, state.playlistTracks), ("discover", old.discoverTracks, state.discoverTracks),
+                                  ("search", old.searchResults, state.searchResults), ("queue", old.localQueue, state.localQueue),
+                                  ("recent", old.recent, state.recent)]
         where was.count != list.count || was.first?.id != list.first?.id {
-            ArtLoader.shared.prefetch(list)
+            ArtLoader.shared.prefetch(list, list: name)
         }
         // The library: every playlist kept on the phone, read once.
         if old.library.count != state.library.count && !NetworkWatch.expensive { prefetchLibraryArt(state.library) }
@@ -240,7 +241,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         let cache = deviceCache
         Task.detached(priority: .utility) {
             for key in keys {
-                if let kept = cache.playlist(key) { ArtLoader.shared.prefetch(kept.tracks) }
+                if let kept = cache.playlist(key) { ArtLoader.shared.prefetch(kept.tracks, list: "kept:" + key, onDisk: true) }
             }
         }
     }
@@ -929,7 +930,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         let oneOff = oneOffPrefer.removeValue(forKey: track.id)
         let prefer = oneOff ?? state.playbackSource
         if prefer == "spotify" && track.source == "spotify" && Spotify.shared.hasLogin {
-            if uptime() < spotifyRestUntil { return playYouTubeInstead(track, tag: tag) }
+            if !spotifyCanStart() { return playYouTubeInstead(track, tag: tag) }
             return playSpotifyHere(track, tag: tag)
         }
         if oneOff == "spotify" && track.source != "spotify" && Spotify.shared.hasLogin {
@@ -985,7 +986,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 state.audioTimeline = line
             }
         } else if track.source == "spotify" && Spotify.shared.hasLogin {
-            if uptime() < spotifyRestUntil { playYouTubeInstead(track, tag: tag) } else { playSpotifyHere(track, tag: tag) }
+            if spotifyCanStart() { playSpotifyHere(track, tag: tag) } else { playYouTubeInstead(track, tag: tag) }
         } else if track.source == "sc" {
             playRoute = "soundcloud"
             playSoundCloud(track, tag: tag, fallback: nil)
@@ -1041,7 +1042,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 let copy = "yt:" + videoId
                 sounding = (copy, stream.url, false)
                 setSounding(videoId, copy: copy, kbps: stream.kbps, inTier: AudioCache.inTier(stream.kbps), route: "youtube")
-                phone.playYouTube(stream.url, tag: tag, duration: track.duration)
+                phone.playYouTube(stream.url, videoId: videoId, tag: tag, duration: track.duration)
                 if state.statsOpen { measureSounding() }
             } catch {
                 guard tag == playTag else { return }
@@ -1051,6 +1052,19 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 requestCloud(track.with(videoId: videoId), .play(tag: tag))
             }
         }
+    }
+
+    /**
+     * Whether a tap should go to Spotify: only when its player is connected
+     * and not resting after a failure. A Spotify that is still connecting (or
+     * cannot) used to cost every tap 4 s of silence before YouTube took over;
+     * now the YouTube copy plays at once and Spotify is woken behind it.
+     */
+    private func spotifyCanStart() -> Bool {
+        if uptime() < spotifyRestUntil { return false }
+        if Spotify.shared.ready { return true }
+        Spotify.shared.start()
+        return false
     }
 
     /**
@@ -1070,6 +1084,13 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             if vid.isEmpty {
                 playRoute = "engine"
                 requestCloud(track, .play(tag: tag))
+                return
+            }
+            learn(track.id, vid)
+            if serverCached.contains(vid) {
+                // The droplet's copy: Premium, and usually loaded ahead.
+                playRoute = AudioCache.isWarm(vid) ? "warm asset" : "stream"
+                playStreamAtTier(vid, tag: tag, duration: track.duration)
                 return
             }
             playYouTubeDirect(vid, track: track, tag: tag)
@@ -1297,6 +1318,58 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         }
         if !ask.isEmpty { send("cloud.prepare", ["priority": "warm", "tracks": ask]) }
         if !onDroplet.isEmpty { warmAtTier(onDroplet) }
+        warmDirect(Array(tracks.filter { t in
+            let v = videoIdOf(t)
+            return !t.id.isEmpty && t.source != "sc" && !(!v.isEmpty && (localFiles[v] != nil || serverCached.contains(v)))
+        }.prefix(Self.directAhead)))
+    }
+
+    private static let directAhead = 12
+    private var directAsked: [String: Double] = [:]
+    private var noYouTubeMatch: Set<String> = []
+    private var directRunning = 0
+    private var directWaiting: [Track] = []
+
+    /**
+     * Songs on screen (or next in the queue) the droplet has no copy of: what
+     * a tap would do - find it on YouTube Music, ask YouTube for its address,
+     * start loading it - done before the tap, two at a time, so the tap
+     * plays at once. On mobile data only the finding and the address.
+     */
+    private func warmDirect(_ tracks: [Track]) {
+        let now = uptime()
+        for t in tracks {
+            // Again after half an hour: YouTube's addresses last a few hours.
+            if let last = directAsked[t.id], now - last < 1800 { continue }
+            directAsked[t.id] = now
+            directWaiting.append(t)
+        }
+        while directRunning < 2, !directWaiting.isEmpty {
+            let t = directWaiting.removeFirst()
+            directRunning += 1
+            Task { @MainActor in
+                await readyFromYouTube(t)
+                directRunning -= 1
+                warmDirect([])
+            }
+        }
+    }
+
+    private func readyFromYouTube(_ t: Track) async {
+        var vid = videoIdOf(t)
+        if vid.isEmpty {
+            if noYouTubeMatch.contains(t.id) { return }
+            let found = await YouTubeDirect.shared.search("\(t.title) \(t.artist.split(separator: ",").first.map(String.init) ?? "")")
+            vid = found.first(where: { Match.sameSong($0, t) })?.id ?? ""
+            if vid.isEmpty {
+                noYouTubeMatch.insert(t.id)
+                return
+            }
+            learn(t.id, vid)
+        }
+        if serverCached.contains(vid) || localFiles[vid] != nil { return }
+        guard let stream = try? await YouTubeDirect.shared.audio(vid) else { return }
+        if !NetworkWatch.expensive { AudioCache.precacheYouTube(vid, url: stream.url) }
     }
 
     /**

@@ -25,6 +25,9 @@ enum Match {
     /** Comparable word set: lowercase, bracketed asides and "feat. ..." removed. */
     static func words(_ text: String) -> Set<String> {
         var t = text.lowercased()
+        // Spotify's " - 2004 Remaster", " - Remastered 2011", " - Mono": the
+        // same recording, which YouTube Music titles without it.
+        t = t.replacingOccurrences(of: #"\s+-\s+[^-]*\b(remaster|remastered|mono|stereo)\b[^-]*$"#, with: " ", options: .regularExpression)
         t = t.replacingOccurrences(of: #"[\(\[].*?[\)\]]"#, with: " ", options: .regularExpression)
         t = t.replacingOccurrences(of: #"\b(feat|ft|featuring)\b.*"#, with: " ", options: .regularExpression)
         let all = alnum(t)

@@ -242,9 +242,14 @@ struct CoverArt: View {
         let side = m.pt(size)
         let px = Int((side * displayScale).rounded())
         let key = track.map { loader.songKey($0, px: px) } ?? loader.key(artKey: artKey, artUrl: artUrl, px: px)
+        // What memory holds is drawn in this very frame: the lists' covers are
+        // decoded ahead (ArtLoader.prefetch), and waiting for .task left every
+        // row blank for a frame - a whole screen of blanks while flinging.
+        let quickKey = track.map { loader.key(artKey: "", artUrl: $0.artUrl, px: px) } ?? ""
+        let shown = loader.cached(key) ?? (quickKey.isEmpty ? nil : loader.cached(quickKey)) ?? image
         ZStack {
             Omp.normalFill
-            if let image {
+            if let image = shown {
                 Image(uiImage: image).resizable().scaledToFill()
             } else if busy {
                 OmpSpinner(size: Omp.TypeSize.bodySmall, color: Omp.muted)

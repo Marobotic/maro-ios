@@ -37,9 +37,16 @@ private struct Empty: View {
 final class VisibleRows: ObservableObject {
     private var shown = Set<Int>()
     private var settle: Task<Void, Never>?
+    private var coversFrom = -1
 
     func appear(_ i: Int, _ tracks: [Track], _ vm: MaroViewModel) {
         shown.insert(i)
+        // Covers from wherever the list is now, outwards - also while it
+        // moves, every ten rows (not for each row, the order is re-sorted).
+        if coversFrom < 0 || abs(i - coversFrom) >= 10 {
+            coversFrom = i
+            ArtLoader.shared.prefetch(tracks, list: "visible", around: i)
+        }
         schedule(tracks, vm)
     }
 
@@ -319,10 +326,11 @@ private struct PlaylistDetail: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 0) {
+                        let current = state.currentRow(tracks)
                         ForEach(Array(tracks.enumerated()), id: \.offset) { index, track in
                             TrackRow(
                                 track: track,
-                                isCurrent: track.sameAs(state.track),
+                                isCurrent: index == current,
                                 liked: state.isLiked(track),
                                 vm: vm,
                                 available: state.canPlay(track),
@@ -455,10 +463,11 @@ private struct TrackList: View {
     var body: some View {
         ScrollView {
             LazyVStack(spacing: 0) {
+                let current = state.currentRow(tracks)
                 ForEach(Array(tracks.enumerated()), id: \.offset) { index, track in
                     TrackRow(
                         track: track,
-                        isCurrent: track.sameAs(state.track),
+                        isCurrent: index == current,
                         liked: state.isLiked(track),
                         vm: vm,
                         meta: meta(track),

@@ -168,10 +168,11 @@ private struct DiscoverDetail: View {
             } else {
                 ScrollView {
                     LazyVStack(spacing: 0) {
+                        let current = state.displayState().currentRow(tracks)
                         ForEach(Array(tracks.enumerated()), id: \.offset) { index, track in
                             TrackRow(
                                 track: track,
-                                isCurrent: track.sameAs(state.displayState().track),
+                                isCurrent: index == current,
                                 liked: state.isLiked(track),
                                 vm: vm,
                                 available: state.canPlay(track),

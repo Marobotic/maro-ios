@@ -109,6 +109,34 @@ enum AudioCache {
         }
     }
 
+    /**
+     * YouTube's own stream (YouTubeDirect) for a song the droplet has no copy
+     * of, loaded ahead the same way: found, asked for and started before the
+     * tap, so the tap plays at once (1.4-2.5 s before, measured on Android).
+     */
+    private static var youtube: [String: AVURLAsset] = [:]
+    private static var youtubeOrder: [String] = []
+
+    static func youtubeAsset(_ videoId: String, url: URL) -> AVURLAsset {
+        if let asset = youtube[videoId], asset.url == url { return asset }
+        return AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": ["User-Agent": YouTubeDirect.ua]])
+    }
+
+    static func precacheYouTube(_ videoId: String, url: URL) {
+        if youtube[videoId]?.url == url { return }
+        let asset = youtubeAsset(videoId, url: url)
+        youtube[videoId] = asset
+        youtubeOrder.removeAll { $0 == videoId }
+        youtubeOrder.append(videoId)
+        if youtubeOrder.count > warmLimit { youtube.removeValue(forKey: youtubeOrder.removeFirst()) }
+        Task {
+            if (try? await asset.load(.isPlayable)) != true {
+                youtube.removeValue(forKey: videoId)
+                youtubeOrder.removeAll { $0 == videoId }
+            }
+        }
+    }
+
     static func forget(_ videoId: String) {
         for k in [videoId, key(videoId)] {
             warmed.removeValue(forKey: k)
@@ -119,6 +147,8 @@ enum AudioCache {
     static func clear() {
         warmed.removeAll()
         warmOrder.removeAll()
+        youtube.removeAll()
+        youtubeOrder.removeAll()
     }
 
     /**
@@ -344,9 +374,8 @@ final class PhonePlayer {
     func playURL(_ url: URL, tag: Int, duration: Double) { start(AVURLAsset(url: url), tag: tag, duration: duration) }
 
     /** YouTube's own CDN wants the same browser the URL was asked for as. */
-    func playYouTube(_ url: URL, tag: Int, duration: Double) {
-        let headers = ["User-Agent": YouTubeDirect.ua]
-        start(AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers]), tag: tag, duration: duration)
+    func playYouTube(_ url: URL, videoId: String, tag: Int, duration: Double) {
+        start(AudioCache.youtubeAsset(videoId, url: url), tag: tag, duration: duration)
     }
 
     func playStream(_ videoId: String, tag: Int, duration: Double) {

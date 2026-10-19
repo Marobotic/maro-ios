@@ -387,6 +387,15 @@ struct UiState: Equatable {
         return ""
     }
 
+    /// The one row of `list` that is the song playing. A song can be in a list
+    /// twice (a Google playlist often has it so); only the copy at the queue's
+    /// place is the one playing, and when the list is not what plays, the first.
+    func currentRow(_ list: [Track]) -> Int {
+        guard let t = track else { return -1 }
+        if list.indices.contains(queueIndex), list[queueIndex].sameAs(t) { return queueIndex }
+        return list.firstIndex { $0.sameAs(t) } ?? -1
+    }
+
     var playingDeviceName: String {
         let id = playingDeviceId
         if id == myDeviceId { return deviceName }
