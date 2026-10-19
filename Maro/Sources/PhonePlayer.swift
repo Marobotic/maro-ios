@@ -82,17 +82,28 @@ enum AudioCache {
     // song tapped for 9-30 s (seen in the phone's log). The next song only.
     private static let warmLimit = 2
 
-    static func asset(_ videoId: String) -> AVURLAsset {
-        if let asset = warmed[key(videoId)] { return asset }
+    /** The droplet's address of the copy that plays now, and the session to ask with. */
+    static func source(_ videoId: String) -> (URL, [String: String]) {
         var headers: [String: String] = [:]
         if let token = session(), !token.isEmpty { headers["Authorization"] = "Bearer \(token)" }
-        let url: URL
         if let v = variant(videoId), v.name.contains(".") {
-            url = MaroClient.audioURL(videoId, copy: v.name)
-        } else {
-            url = MaroClient.audioURL(videoId)
+            return (MaroClient.audioURL(videoId, copy: v.name), headers)
         }
-        return AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
+        return (MaroClient.audioURL(videoId), headers)
+    }
+
+    static func asset(_ videoId: String) -> AVURLAsset {
+        if let asset = warmed[key(videoId)] { return asset }
+        let (url, headers) = source(videoId)
+        return StreamLoader.shared.asset(url, headers: headers)
+    }
+
+    /** The start of these songs onto the phone (StreamLoader), so a tap plays at once. */
+    static func prefetchHeads(_ videoIds: [String]) {
+        for v in videoIds where !v.isEmpty {
+            let (url, headers) = source(v)
+            StreamLoader.shared.prefetch(url, headers: headers)
+        }
     }
 
     static func isWarm(_ videoId: String) -> Bool { warmed[key(videoId)] != nil }
@@ -120,8 +131,12 @@ enum AudioCache {
     private static var youtubeOrder: [String] = []
 
     static func youtubeAsset(_ videoId: String, url: URL) -> AVURLAsset {
-        if let asset = youtube[videoId], asset.url == url { return asset }
-        return AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": ["User-Agent": YouTubeDirect.ua]])
+        if let asset = youtube[videoId] { return asset }
+        return StreamLoader.shared.asset(url, headers: ["User-Agent": YouTubeDirect.ua])
+    }
+
+    static func prefetchYouTubeHead(_ url: URL) {
+        StreamLoader.shared.prefetch(url, headers: ["User-Agent": YouTubeDirect.ua])
     }
 
     static func precacheYouTube(_ videoId: String, url: URL) {
@@ -151,6 +166,7 @@ enum AudioCache {
      * plays has the whole connection.
      */
     static func onlyFor(_ videoId: String) {
+        StreamLoader.shared.dropWaiting()
         for (k, asset) in warmed where !k.hasPrefix(videoId) {
             asset.cancelLoading()
             warmed.removeValue(forKey: k)

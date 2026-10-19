@@ -1370,7 +1370,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         }
         if serverCached.contains(vid) || localFiles[vid] != nil { return }
         guard let stream = try? await YouTubeDirect.shared.audio(vid) else { return }
-        if !NetworkWatch.expensive { AudioCache.precacheYouTube(vid, url: stream.url) }
+        AudioCache.prefetchYouTubeHead(stream.url)
     }
 
     /**
@@ -1393,6 +1393,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             }
             if !below.isEmpty { send("cloud.prepare", ["priority": "warm", "quality": rung, "tracks": below]) }
             if ahead, let next = tracks.first { AudioCache.precache(next.videoId) }
+            // The start of each song on screen (and next): a tap then plays from memory.
+            AudioCache.prefetchHeads(tracks.prefix(12).map { $0.videoId })
         }
     }
 
