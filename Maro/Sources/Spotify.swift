@@ -1,4 +1,7 @@
 import Foundation
+import os
+
+private let splog = Logger(subsystem: "dev.marobotic.maro", category: "Spotify")
 
 /**
  * Spotify on this phone: the desktop's own Spotify helper (librespot, in
@@ -75,11 +78,13 @@ final class Spotify {
      */
     func start() {
         guard let creds = ServiceSessions.shared.session(ServiceSessions.librespot)?.obj("credentials") else {
+            splog.warning("start: the account has no Spotify login")
             stopForSignOut()
             return
         }
         let data = JSONText.data(creds)
         if started && data == startedWith { return }
+        splog.info("start: player starting (\(data.count) bytes of credentials)")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let file = dir.appendingPathComponent("credentials.json")
         try? data.write(to: file, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
@@ -185,6 +190,9 @@ final class Spotify {
 
     fileprivate func handle(_ line: String) {
         guard let ev = JSONText.object(line) else { return }
+        if ev.str("ev") != "bitrate" && ev.str("ev") != "reply" {
+            splog.info("event \(line, privacy: .public)")
+        }
         let uri = ev.str("uri")
         let ms = (ev["pos"] as? Int) ?? 0
         switch ev.str("ev") {

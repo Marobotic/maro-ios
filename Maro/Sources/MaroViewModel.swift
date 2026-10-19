@@ -929,6 +929,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         // only takes the artist's own upload.
         let oneOff = oneOffPrefer.removeValue(forKey: track.id)
         let prefer = oneOff ?? state.playbackSource
+        log.info("tap \(track.title, privacy: .public) (\(track.source, privacy: .public)) prefer=\(prefer, privacy: .public) spotifyLogin=\(Spotify.shared.hasLogin) spotifyReady=\(Spotify.shared.ready)")
         if prefer == "spotify" && track.source == "spotify" && Spotify.shared.hasLogin {
             if !spotifyCanStart() { return playYouTubeInstead(track, tag: tag) }
             return playSpotifyHere(track, tag: tag)
