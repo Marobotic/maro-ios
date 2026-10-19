@@ -211,6 +211,7 @@ fn uri(u: &SpotifyUri) -> String {
 /// Play, taking commands one JSON line at a time from `lines`, until it
 /// closes or a "quit" arrives. The desktop feeds it stdin; iOS, jb_send().
 pub async fn serve(dir: PathBuf, mut lines: tokio::sync::mpsc::UnboundedReceiver<String>) {
+    emit(json!({"ev": "log", "message": format!("serving from {}", dir.display())}));
     let c = cache(&dir);
     // No login yet: wait for one. {"cmd":"login","token":"<access token>"}
     // is a sign-in the app did on Spotify's own page (the phone's web view);
@@ -238,6 +239,7 @@ pub async fn serve(dir: PathBuf, mut lines: tokio::sync::mpsc::UnboundedReceiver
             }
         }
     };
+    emit(json!({"ev": "log", "message": format!("connecting as {}", creds.username.clone().unwrap_or_default())}));
     let mut session = Session::new(SessionConfig::default(), Some(c));
     match tokio::time::timeout(Duration::from_secs(30), session.connect(creds, true)).await {
         Ok(Ok(())) => {}

@@ -1297,7 +1297,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
      * Songs the droplet has are loaded straight away; the rest are handed to
      * the engine to upload, and loaded when it says they are ready.
      */
-    private func warm(_ tracks: [Track]) {
+    private func warm(_ tracks: [Track], ahead: Bool = true) {
         let now = uptime()
         var ask: [JSON] = []
         var onDroplet: [Track] = []
@@ -1318,7 +1318,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             ask.append(["requestId": requestId, "track": track.toJSON()])
         }
         if !ask.isEmpty { send("cloud.prepare", ["priority": "warm", "tracks": ask]) }
-        if !onDroplet.isEmpty { warmAtTier(onDroplet) }
+        if !onDroplet.isEmpty { warmAtTier(onDroplet, ahead: ahead) }
         warmDirect(Array(tracks.filter { t in
             let v = videoIdOf(t)
             return !t.id.isEmpty && t.source != "sc" && !(!v.isEmpty && (localFiles[v] != nil || serverCached.contains(v)))
@@ -1379,7 +1379,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
      * whichever copy plays now. Seen songs only - the rows on screen and the
      * next few in the queue.
      */
-    private func warmAtTier(_ tracks: [Track]) {
+    /** `ahead`: the next songs in the queue, whose audio starts loading too (rows on screen: only the tier). */
+    private func warmAtTier(_ tracks: [Track], ahead: Bool) {
         Task { @MainActor in
             await AudioCache.lookup(tracks.map { $0.videoId })
             let rung = AudioCache.rung()
@@ -1391,7 +1392,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 below.append(["requestId": UUID().uuidString.lowercased(), "track": t.toJSON()])
             }
             if !below.isEmpty { send("cloud.prepare", ["priority": "warm", "quality": rung, "tracks": below]) }
-            for t in tracks { AudioCache.precache(t.videoId) }
+            if ahead, let next = tracks.first { AudioCache.precache(next.videoId) }
         }
     }
 
@@ -1400,7 +1401,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         // Whatever is on screen gets ready on the droplet, whichever device
         // plays: a tap from here, or on the one playing, should start at once.
         guard state.signedIn else { return }
-        warm(Array(tracks.prefix(40)))
+        warm(Array(tracks.prefix(40)), ahead: false)
     }
 
     func onStarted(tag: Int) {

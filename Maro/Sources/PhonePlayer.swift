@@ -78,7 +78,9 @@ enum AudioCache {
 
     private static var warmed: [String: AVURLAsset] = [:]
     private static var warmOrder: [String] = []
-    private static let warmLimit = 16
+    // A loading asset streams its song: on 4G, 16 of them at once starved the
+    // song tapped for 9-30 s (seen in the phone's log). The next song only.
+    private static let warmLimit = 2
 
     static func asset(_ videoId: String) -> AVURLAsset {
         if let asset = warmed[key(videoId)] { return asset }
@@ -141,6 +143,23 @@ enum AudioCache {
         for k in [videoId, key(videoId)] {
             warmed.removeValue(forKey: k)
             warmOrder.removeAll { $0 == k }
+        }
+    }
+
+    /**
+     * A tap: every song loading ahead except this one stops, so the one that
+     * plays has the whole connection.
+     */
+    static func onlyFor(_ videoId: String) {
+        for (k, asset) in warmed where !k.hasPrefix(videoId) {
+            asset.cancelLoading()
+            warmed.removeValue(forKey: k)
+            warmOrder.removeAll { $0 == k }
+        }
+        for (k, asset) in youtube where k != videoId {
+            asset.cancelLoading()
+            youtube.removeValue(forKey: k)
+            youtubeOrder.removeAll { $0 == k }
         }
     }
 
@@ -214,6 +233,9 @@ final class PhonePlayer {
     private var tag = 0
     private var started = false
     private var statusObservation: NSKeyValueObservation?
+    private var keepUpObservation: NSKeyValueObservation?
+    /** Playing, as far as the listener is concerned (a stall is not a pause). */
+    private var wantsToPlay = false
     private var controlObservation: NSKeyValueObservation?
     private var timeObserver: Any?
     private var endObserver: NSObjectProtocol?
@@ -224,7 +246,10 @@ final class PhonePlayer {
 
     init(events: PhonePlayerEvents) {
         self.events = events
-        player.automaticallyWaitsToMinimizeStalling = true
+        // Play from the first audio that arrives. Waiting "to minimise
+        // stalling" held songs silent for 9-30 s on 4G while AVPlayer guessed
+        // at the connection; a stall now resumes as soon as audio is back.
+        player.automaticallyWaitsToMinimizeStalling = false
         let session = AVAudioSession.sharedInstance()
         try? session.setCategory(.playback, mode: .default, policy: .longFormAudio)
         controlObservation = player.observe(\.timeControlStatus) { [weak self] _, _ in
@@ -375,11 +400,14 @@ final class PhonePlayer {
 
     /** YouTube's own CDN wants the same browser the URL was asked for as. */
     func playYouTube(_ url: URL, videoId: String, tag: Int, duration: Double) {
-        start(AudioCache.youtubeAsset(videoId, url: url), tag: tag, duration: duration)
+        let asset = AudioCache.youtubeAsset(videoId, url: url)
+        AudioCache.onlyFor(videoId)
+        start(asset, tag: tag, duration: duration)
     }
 
     func playStream(_ videoId: String, tag: Int, duration: Double) {
         let asset = AudioCache.asset(videoId)
+        AudioCache.onlyFor(videoId)
         AudioCache.forget(videoId)
         start(asset, tag: tag, duration: duration)
     }
@@ -406,9 +434,20 @@ final class PhonePlayer {
             }
         }
         let item = AVPlayerItem(asset: asset)
+        item.preferredForwardBufferDuration = 10
         statusObservation = item.observe(\.status) { [weak self] item, _ in
             Task { @MainActor in self?.itemStatusChanged(item, tag: tag) }
         }
+        // Without waiting to minimise stalls, a stall pauses the player: it
+        // plays on once audio is coming again, unless paused meanwhile.
+        keepUpObservation = item.observe(\.isPlaybackLikelyToKeepUp) { [weak self] item, _ in
+            Task { @MainActor in
+                guard let self, self.tag == tag, self.wantsToPlay, item.isPlaybackLikelyToKeepUp,
+                      self.player.timeControlStatus != .playing else { return }
+                self.player.play()
+            }
+        }
+        wantsToPlay = true
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
         if let failObserver { NotificationCenter.default.removeObserver(failObserver) }
         endObserver = NotificationCenter.default.addObserver(forName: AVPlayerItem.didPlayToEndTimeNotification, object: item, queue: .main) { [weak self] _ in
@@ -465,10 +504,12 @@ final class PhonePlayer {
     func play() {
         try? AVAudioSession.sharedInstance().setActive(true)
         if spotifyUri != nil { return Spotify.shared.play() }
+        wantsToPlay = true
         player.play()
     }
 
     func pause() {
+        wantsToPlay = false
         if spotifyUri != nil { return Spotify.shared.pause() }
         player.pause()
     }
@@ -488,6 +529,7 @@ final class PhonePlayer {
     func stop() {
         leaveSpotify()
         tag = 0
+        wantsToPlay = false
         if let boundaryObserver { player.removeTimeObserver(boundaryObserver) }
         boundaryObserver = nil
         player.pause()

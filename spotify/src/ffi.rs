@@ -33,6 +33,11 @@ pub unsafe extern "C" fn jb_spotify_start(dir: *const c_char, on_event: Callback
                 cb(c.as_ptr());
             }
         }));
+        // A panic in the player's task used to end it without a word: the
+        // app waited for a "ready" that never came. Now it is an event.
+        std::panic::set_hook(Box::new(|info| {
+            crate::emit(serde_json::json!({"ev": "error", "code": "panic", "message": format!("Spotify player crashed: {info}")}));
+        }));
     }
     let rt = RUNTIME.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
