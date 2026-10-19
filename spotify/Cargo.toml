@@ -25,6 +25,9 @@ env_logger = "0.11"
 # "Jukebox:" in src/player.rs): the audio key is fetched alongside the file.
 [patch.crates-io]
 librespot-playback = { path = "vendor/librespot-playback" }
+# librespot-core with one change (vendor/librespot-core, "Jukebox:" in
+# src/config.rs): on iOS the player tells Spotify it is a Mac.
+librespot-core = { path = "vendor/librespot-core" }
 # iOS only (this copy of the helper): see vendor/sysinfo-ios.
 sysinfo = { path = "vendor/sysinfo-ios" }
 
