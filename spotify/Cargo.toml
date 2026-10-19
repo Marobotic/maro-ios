@@ -9,9 +9,9 @@ publish = false
 # stdout, one JSON object per line. Audio goes straight to the speakers.
 
 [dependencies]
-librespot-core = { version = "0.8.0", default-features = false, features = ["rustls-tls-native-roots"] }
-librespot-oauth = { version = "0.8.0", default-features = false, features = ["rustls-tls-native-roots"] }
-librespot-playback = { version = "0.8.0", default-features = false, features = ["rodio-backend", "rustls-tls-native-roots"] }
+librespot-core = { version = "0.8.0", default-features = false, features = ["rustls-tls-webpki-roots"] }
+librespot-oauth = { version = "0.8.0", default-features = false, features = ["rustls-tls-webpki-roots"] }
+librespot-playback = { version = "0.8.0", default-features = false, features = ["rodio-backend", "rustls-tls-webpki-roots"] }
 librespot-protocol = "0.8.0"
 protobuf = "3"
 http = "1"
