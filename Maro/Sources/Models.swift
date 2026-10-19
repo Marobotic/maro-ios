@@ -56,7 +56,10 @@ enum JSONText {
     static func object(_ text: String) -> JSON? { parse(Data(text.utf8)) as? JSON }
 
     static func data(_ value: Any) -> Data {
-        (try? JSONSerialization.data(withJSONObject: value)) ?? Data("{}".utf8)
+        // Sorted keys: the same object always gives the same bytes. Unsorted,
+        // the Spotify login read back from the account looked changed and
+        // the player restarted on a tap, missing the 4 s it gets.
+        (try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])) ?? Data("{}".utf8)
     }
 
     static func string(_ value: Any) -> String { String(decoding: data(value), as: UTF8.self) }

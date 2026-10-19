@@ -194,6 +194,9 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         Spotify.shared.onReconnected = { [weak self] ok in
             guard let self else { return }
             log.info("spotify reconnected: \(ok)")
+            // A fresh connection is worth trying on the next song, rather
+            // than three minutes of YouTube.
+            if ok { self.spotifyRestUntil = 0 }
             if ok && self.isPhone && self.phonePlayer?.onSpotify == true { self.phonePlayer?.reloadSpotify() }
         }
         // Sessions signed in to (or out of) on another client arrive here

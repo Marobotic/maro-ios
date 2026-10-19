@@ -1,5 +1,8 @@
 import AVFoundation
 import Foundation
+import os
+
+private let slog = Logger(subsystem: "dev.marobotic.maro", category: "Stream")
 
 /**
  * The start of a song, on the phone before the tap - the iPhone's version of
@@ -151,7 +154,12 @@ final class StreamLoader: NSObject, AVAssetResourceLoaderDelegate, URLSessionDat
         guard let url = loadingRequest.request.url,
               let key = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "u" })?.value
         else { return false }
+        lock.lock(); let had = heads[key] != nil; lock.unlock()
+        let asked = Date()
         fetchHead(key) { head in
+            if loadingRequest.contentInformationRequest != nil {
+                slog.info("head \(had ? "on the phone" : "fetched", privacy: .public) in \(Int(Date().timeIntervalSince(asked) * 1000)) ms (\(head?.data.count ?? -1) bytes)")
+            }
             guard let head else {
                 // CoreMedia's code for an HTTP 404, which PhonePlayer reads as "not on the droplet".
                 self.lock.lock(); let gone = self.missing.remove(key) != nil; self.lock.unlock()
