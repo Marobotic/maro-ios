@@ -151,11 +151,29 @@ actor YouTubeMusic {
     /** A song's radio: about 50 songs that follow it. Works signed out too. */
     func radio(_ videoId: String) async throws -> [Track] {
         let v = try await call("next", ["videoId": videoId, "playlistId": "RDAMVM" + videoId, "isAudioOnly": true], signed: true)
+        return Self.queueSongs(Self.queue(v)?["contents"] as? [JSON] ?? [])
+    }
+
+    /**
+     * A YouTube Mix (an "RD..." list, as in a pasted watch?v=...&list=RD...
+     * link) the way YouTube Music plays it: (its title, its songs).
+     */
+    func mix(_ list: String, videoId: String) async throws -> (title: String, tracks: [Track]) {
+        var body: JSON = ["playlistId": list, "isAudioOnly": true]
+        if !videoId.isEmpty { body["videoId"] = videoId }
+        let panel = Self.queue(try await call("next", body, signed: true))
+        let title = (panel?["title"] as? String) ?? Self.text(panel?.obj("title"))
+        return (title, Self.queueSongs(panel?["contents"] as? [JSON] ?? []))
+    }
+
+    private static func queue(_ v: JSON) -> JSON? {
         let tabs = v.obj("contents")?.obj("singleColumnMusicWatchNextResultsRenderer")?.obj("tabbedRenderer")?
             .obj("watchNextTabbedResultsRenderer")?["tabs"] as? [JSON]
-        let panel = tabs?.first?.obj("tabRenderer")?.obj("content")?.obj("musicQueueRenderer")?.obj("content")?
-            .obj("playlistPanelRenderer")?["contents"] as? [JSON] ?? []
-        return panel.compactMap { item in
+        return tabs?.first?.obj("tabRenderer")?.obj("content")?.obj("musicQueueRenderer")?.obj("content")?.obj("playlistPanelRenderer")
+    }
+
+    private static func queueSongs(_ panel: [JSON]) -> [Track] {
+        panel.compactMap { item in
             guard let r = item.obj("playlistPanelVideoRenderer")
                     ?? item.obj("playlistPanelVideoWrapperRenderer")?.obj("primaryRenderer")?.obj("playlistPanelVideoRenderer"),
                   !r.str("videoId").isEmpty else { return nil }
@@ -209,8 +227,8 @@ enum SpotifyHome {
     private static let known = "5fb7da7a03ee2776c0670856609cb85a189a3cecc36cc160b91cde79063b9cf1"
     private static let saved = "spotifyHomeHash"
 
-    /** The current query id, read from the web player's own script. */
-    private static func fresh() async -> String? {
+    /** The current id of query `op` ("home", "fetchPlaylist"...), read from the web player's own script. */
+    static func fresh(_ op: String = "home") async -> String? {
         var req = URLRequest(url: URL(string: "https://open.spotify.com/")!, timeoutInterval: 15)
         req.setValue(YouTubeDirect.ua, forHTTPHeaderField: "User-Agent")
         guard let (data, _) = try? await URLSession.shared.data(for: req) else { return nil }
@@ -221,7 +239,7 @@ enum SpotifyHome {
         guard let url = URL(string: String(page[page.index(after: start)..<end.upperBound])),
               let (js, _) = try? await URLSession.shared.data(from: url) else { return nil }
         let script = String(decoding: js, as: UTF8.self)
-        guard let key = script.range(of: "\"home\",\"query\",\"") else { return nil }
+        guard let key = script.range(of: "\"\(op)\",\"query\",\"") else { return nil }
         let hash = String(script[key.upperBound...].prefix(64))
         return hash.count == 64 && hash.allSatisfy(\.isHexDigit) ? hash : nil
     }
@@ -234,6 +252,67 @@ enum SpotifyHome {
         guard let new = await fresh(), new != hash else { return nil }
         UserDefaults.standard.set(new, forKey: saved)
         return await Spotify.shared.home(hash: new)
+    }
+}
+
+// -- pasted Spotify playlists and albums ---------------------------------------
+
+/**
+ * Anyone's playlist or album by link, through the web player's own queries
+ * (fetchPlaylist, getAlbum): the playlist service only answers for the
+ * account's own playlists. A private playlist's link carries a share token
+ * (`pt=`), claimed first the way the web player does. As Windows does.
+ */
+enum SpotifyLinks {
+    // The web player's query ids as of October 2026.
+    private static let known = [
+        "fetchPlaylist": "21ea11a6ac75a5f3e01fd365d29c18e0a4a8b7dc09f89bbb5d73910190c6acaf",
+        "getAlbum": "0b6ce3511e1b02e4a40fa95440f992acbe85080eb308af9194322d708fc1914f",
+    ]
+
+    /** One query, with a fresh id once if the kept one is refused. */
+    @MainActor
+    private static func query(_ op: String, _ vars: JSON) async -> JSON? {
+        let key = "spotifyQuery_" + op
+        let hash = UserDefaults.standard.string(forKey: key) ?? known[op] ?? ""
+        if let got = await Spotify.shared.ask("query", ["op": op, "vars": vars, "hash": hash], wait: 60) as? JSON { return got }
+        guard let new = await SpotifyHome.fresh(op), new != hash else { return nil }
+        UserDefaults.standard.set(new, forKey: key)
+        return await Spotify.shared.ask("query", ["op": op, "vars": vars, "hash": new], wait: 60) as? JSON
+    }
+
+    /** (its name, up to `limit` songs), or nil when Spotify would not say. */
+    @MainActor
+    static func open(kind: String, id: String, share: String, limit: Int = 500) async -> (name: String, tracks: [Track])? {
+        if kind == "playlist" && !share.isEmpty {
+            _ = await Spotify.shared.ask("claim", ["id": id, "token": share], wait: 20)
+        }
+        let uri = "spotify:\(kind):\(id)"
+        var name = ""
+        var uris: [String] = []
+        while true {
+            let offset = uris.count
+            let items: [String], total: Int
+            if kind == "album" {
+                guard let a = await query("getAlbum", ["uri": uri, "locale": "", "offset": offset, "limit": 50])?.obj("albumUnion") else { return nil }
+                name = a.str("name")
+                let t = a.obj("tracksV2")
+                items = ((t?["items"] as? [JSON]) ?? []).map { $0.obj("track")?.str("uri") ?? "" }
+                total = (t?["totalCount"] as? Int) ?? 0
+            } else {
+                guard let p = await query("fetchPlaylist", ["uri": uri, "offset": offset, "limit": 100, "enableWatchFeedEntrypoint": false])?.obj("playlistV2"),
+                      p.str("__typename") != "NotFound" else { return nil }
+                name = p.str("name")
+                let c = p.obj("content")
+                items = ((c?["items"] as? [JSON]) ?? []).map { $0.obj("itemV2")?.obj("data")?.str("uri") ?? "" }
+                total = (c?["totalCount"] as? Int) ?? 0
+            }
+            uris += items.filter { $0.hasPrefix("spotify:track:") }
+            if items.isEmpty || offset + items.count >= total || uris.count >= limit { break }
+        }
+        if uris.isEmpty { return (name, []) }
+        guard let data = await Spotify.shared.ask("tracks", ["uris": Array(uris.prefix(limit))], wait: 60) as? [JSON] else { return nil }
+        return (name, data.map(Spotify.track))
     }
 }
 

@@ -554,8 +554,16 @@ private struct SearchView: View {
             )
             .padding(.horizontal, m.pt(4))
             HStack(spacing: m.pt(4)) {
-                ForEach(searchSources, id: \.0) { source in
-                    OmpButton(text: source.1, selected: state.searchSource == source.0) { vm.pickSearchSource(source.0) }
+                if !state.searchLink.isEmpty && !state.searchResults.isEmpty {
+                    // A pasted list: its name and Play all instead of the service filters.
+                    OmpButton(icon: Omp.Icons.play, text: "Play all", selected: true) {
+                        if let first = state.searchResults.first { vm.playTrack(first, context: state.searchResults, name: state.searchLink, index: 0) }
+                    }
+                    OmpText("\(state.searchLink)  ·  \(state.searchResults.count) songs", size: Omp.TypeSize.bodySmall, color: Omp.muted)
+                } else {
+                    ForEach(searchSources, id: \.0) { source in
+                        OmpButton(text: source.1, selected: state.searchSource == source.0) { vm.pickSearchSource(source.0) }
+                    }
                 }
                 Spacer(minLength: 0)
             }
@@ -566,8 +574,8 @@ private struct SearchView: View {
             } else if state.searchResults.isEmpty {
                 Empty(message: "Type a query, then hit enter")
             } else {
-                TrackList(tracks: state.searchResults, state: state, vm: vm) { _, t in
-                    vm.playSingle(t)
+                TrackList(tracks: state.searchResults, state: state, vm: vm) { i, t in
+                    if state.searchLink.isEmpty { vm.playSingle(t) } else { vm.playTrack(t, context: state.searchResults, name: state.searchLink, index: i) }
                 }
             }
         }

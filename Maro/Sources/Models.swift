@@ -331,6 +331,8 @@ struct UiState: Equatable {
     var searchText = ""
     var searchSource = ""
     var searchResults: [Track] = []
+    /** A pasted playlist, album or Mix: its name, and the results play as one list. Empty for a search. */
+    var searchLink = ""
     var searching = false
 
     // View

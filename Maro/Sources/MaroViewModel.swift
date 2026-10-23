@@ -2885,14 +2885,61 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         let token = searchToken
         state.searching = true
         state.searchResults = []
-        // A pasted SoundCloud link opens the song (or set, or profile) itself.
+        state.searchLink = ""
+        // `list`: a pasted playlist, album or Mix - its songs play as one list, under this name.
+        func done(_ found: [Track], _ empty: String, list: String = "") {
+            guard token == searchToken else { return }
+            state.searching = false
+            state.searchResults = found
+            state.searchLink = found.count > 1 ? list : ""
+            if found.isEmpty { showStatus(empty, "error") }
+        }
+        func first(_ pattern: String) -> String? {
+            guard let re = try? NSRegularExpression(pattern: pattern),
+                  let m = re.firstMatch(in: q, range: NSRange(q.startIndex..., in: q)), m.numberOfRanges > 1,
+                  let r = Range(m.range(at: 1), in: q) else { return nil }
+            return String(q[r])
+        }
+        // A pasted link opens the song (or set, playlist, album, Mix, profile) itself.
         if q.contains("soundcloud.com/") || q.contains("snd.sc/") {
             Task { @MainActor in
                 let found = (try? await SoundCloud.shared.open(link: q)) ?? []
-                guard token == searchToken else { return }
-                state.searching = false
-                state.searchResults = found
-                if found.isEmpty { showStatus("SoundCloud didn't recognise that link", "error") }
+                done(found, "SoundCloud didn't recognise that link", list: q.contains("/sets/") ? "SoundCloud playlist" : "SoundCloud")
+            }
+            return
+        }
+        if q.contains("spotify.com/"), let kind = first(#"open\.spotify\.com/(?:intl-[a-z]+/)?(track|playlist|album)/"#),
+           let id = first(#"open\.spotify\.com/(?:intl-[a-z]+/)?(?:track|playlist|album)/([A-Za-z0-9]+)"#) {
+            Spotify.shared.start()
+            let empty = Spotify.shared.hasLogin ? "Spotify didn't open that link" : "Sign in to Spotify in Settings to open Spotify links"
+            Task { @MainActor in
+                if kind == "track" {
+                    let found = ((await Spotify.shared.ask("tracks", ["uris": ["spotify:track:" + id]])) as? [JSON] ?? []).map(Spotify.track)
+                    return done(found, empty)
+                }
+                var got = await SpotifyLinks.open(kind: kind, id: id, share: first(#"[?&]pt=([A-Za-z0-9]+)"#) ?? "")
+                if got == nil, kind == "playlist", let own = await Spotify.shared.playlist(id) { got = ("", own) }
+                let name = (got?.name ?? "").ifEmpty(kind == "album" ? "Spotify album" : "Spotify playlist")
+                done(got?.tracks ?? [], empty, list: name)
+            }
+            return
+        }
+        if q.contains("youtu"), let list = first(#"[?&]list=([A-Za-z0-9_-]{10,})"#) {
+            Task { @MainActor in
+                if list.hasPrefix("RD") {
+                    let got = try? await YouTubeMusic.shared.mix(list, videoId: first(#"[?&]v=([A-Za-z0-9_-]{11})"#) ?? "")
+                    return done(got?.tracks ?? [], "YouTube didn't open that Mix", list: (got?.title ?? "").ifEmpty("YouTube Mix"))
+                }
+                let found = (try? await YouTubeMusic.shared.playlist(list)) ?? []
+                done(found, "YouTube didn't open that playlist", list: "YouTube Music playlist")
+            }
+            return
+        }
+        if q.contains("youtu"), let video = first(#"(?:youtu\.be/|[?&]v=|/shorts/)([A-Za-z0-9_-]{11})"#) {
+            Task { @MainActor in
+                // The song itself is the first of its radio, with its title and artist.
+                let found = ((try? await YouTubeMusic.shared.radio(video)) ?? []).prefix(1)
+                done(Array(found), "YouTube didn't open that link")
             }
             return
         }

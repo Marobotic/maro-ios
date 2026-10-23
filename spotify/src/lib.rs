@@ -163,6 +163,8 @@ async fn library_call(session: &Session, cmd: &Value) -> Result<Value, String> {
         "search" => library::search(session, cmd["q"].as_str().unwrap_or("")).await.map(Value::from),
         "radio" => library::radio(session, cmd["uri"].as_str().unwrap_or("")).await,
         "home" => library::home(session, cmd["hash"].as_str().unwrap_or(""), cmd["tz"].as_str().unwrap_or("UTC")).await,
+        "claim" => library::claim(session, cmd["id"].as_str().unwrap_or(""), cmd["token"].as_str().unwrap_or("")).await,
+        "query" => library::query(session, cmd["op"].as_str().unwrap_or(""), &cmd["vars"], cmd["hash"].as_str().unwrap_or("")).await,
         _ => {
             let uris: Vec<String> = cmd["uris"].as_array().map(|a| a.iter().filter_map(|u| u.as_str().map(String::from)).collect()).unwrap_or_default();
             library::tracks(session, &uris).await.map(Value::from)
@@ -385,7 +387,7 @@ pub async fn serve(dir: PathBuf, mut lines: tokio::sync::mpsc::UnboundedReceiver
                         }
                         emit(json!({"ev": "reconnected", "ok": ok}));
                     }
-                    "playlists" | "playlist" | "liked" | "search" | "tracks" | "radio" | "home" => {
+                    "playlists" | "playlist" | "liked" | "search" | "tracks" | "radio" | "home" | "query" | "claim" => {
                         // In the background: a big library must not hold up play/pause.
                         tokio::spawn(answer(cmd, lib.clone(), dir.clone()));
                     }

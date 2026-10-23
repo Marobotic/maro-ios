@@ -221,6 +221,44 @@ pub async fn home(session: &Session, hash: &str, tz: &str) -> Result<Value, Erro
     Ok(json!({"sections": sections}))
 }
 
+/// A shared link's token (the `pt=` of a private playlist's link) claimed for
+/// this account, the way the web player does on opening the link, so the
+/// playlist can be read.
+pub async fn claim(session: &Session, id: &str, token: &str) -> Result<Value, Error> {
+    if !id.chars().all(|c| c.is_ascii_alphanumeric()) || !token.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(Error::invalid_argument("bad playlist link"));
+    }
+    let mut headers = http::HeaderMap::new();
+    headers.insert("Content-Type", "application/json".parse().unwrap());
+    let path = format!("/playlist-permission/v1/playlist/{id}/permission-grant/token/{token}/claim");
+    let res = session.spclient().request(&http::Method::POST, &path, Some(headers), Some(b"{}")).await?;
+    Ok(serde_json::from_slice(&res).unwrap_or(Value::Null))
+}
+
+/// Any other web player query (fetchPlaylist, getAlbum...): its `data`, as
+/// Spotify sends it. Reads playlists and albums the account does not own,
+/// which the playlist service refuses with 403.
+pub async fn query(session: &Session, op: &str, vars: &Value, hash: &str) -> Result<Value, Error> {
+    let token = session.login5().auth_token().await?;
+    let client_token = session.spclient().client_token().await.unwrap_or_default();
+    let body = json!({"variables": vars, "operationName": op, "extensions": {"persistedQuery": {"version": 1, "sha256Hash": hash}}});
+    let req = http::Request::builder()
+        .method(http::Method::POST)
+        .uri(PATHFINDER)
+        .header("authorization", format!("Bearer {}", token.access_token))
+        .header("client-token", client_token)
+        .header("content-type", "application/json;charset=UTF-8")
+        .header("app-platform", "WebPlayer")
+        .body(bytes::Bytes::from(body.to_string()))?;
+    let res = session.http_client().request_body(req).await?;
+    let v: Value = serde_json::from_slice(&res)?;
+    if v["data"].is_null() || v["errors"].is_array() {
+        let why = v["errors"][0]["message"].as_str().unwrap_or("no answer").to_string();
+        return Err(Error::unavailable(why));
+    }
+    Ok(v["data"].clone())
+}
+
 /// "<a href=…>Fall Out Boy</a>, P!nk &amp; more" -> "Fall Out Boy, P!nk & more".
 fn strip_tags(s: &str) -> String {
     let mut out = String::new();
