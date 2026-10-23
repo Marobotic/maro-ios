@@ -27,7 +27,9 @@ actor SoundCloud {
     }
 
     private static let api = "https://api-v2.soundcloud.com"
-    private static let ua = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+    // A desktop browser's name: a phone's is sent to m.soundcloud.com, whose
+    // page carries no client id at all.
+    private static let ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
     private static let idKey = "soundcloudClientId"
 
     private var clientId = UserDefaults.standard.string(forKey: idKey) ?? ""
