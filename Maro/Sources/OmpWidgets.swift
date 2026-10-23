@@ -52,12 +52,20 @@ struct OmpIcon: View {
         // A Nerd Font icon draws about two cells wide on a one-cell advance,
         // and iOS clips text to its advance: the logos came out cut in half.
         // A trailing space in the same font widens the text to the glyph.
-        Text(isGlyph ? icon + " " : icon)
-            .font(Omp.font(m.pt(size)))
-            .foregroundColor(color)
-            .lineLimit(1)
-            .fixedSize()
-            .frame(minWidth: m.pt(size) * 1.3)
+        if icon == Omp.Icons.gear {
+            // The same SF Symbol and size used by Hourglass on iPhone.
+            Image(systemName: "gearshape")
+                .font(.system(size: 19))
+                .foregroundColor(color)
+                .accessibilityLabel("Settings")
+        } else {
+            Text(isGlyph ? icon + " " : icon)
+                .font(Omp.font(m.pt(size)))
+                .foregroundColor(color)
+                .lineLimit(1)
+                .fixedSize()
+                .frame(minWidth: m.pt(size) * 1.3)
+        }
     }
 }
 
