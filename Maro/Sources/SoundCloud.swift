@@ -69,11 +69,18 @@ actor SoundCloud {
 
     private func freshClientId() async throws -> String {
         let (page, _) = try await get(URL(string: "https://soundcloud.com/")!, json: false)
-        let html = String(decoding: page, as: UTF8.self)
-        let scripts = html.matches(#"<script[^>]+src="(https://a-v2\.sndcdn\.com/assets/[^"]+\.js)""#)
+        var html = String(decoding: page, as: UTF8.self)
+        var scripts = html.matches(#"<script[^>]+src="(https://a-v2\.sndcdn\.com/assets/[^"]+\.js)""#)
+        if scripts.isEmpty {
+            let (discover, _) = try await get(URL(string: "https://soundcloud.com/discover")!, json: false)
+            html = String(decoding: discover, as: UTF8.self)
+            scripts = html.matches(#"<script[^>]+src="(https://a-v2\.sndcdn\.com/assets/[^"]+\.js)""#)
+        }
         for src in scripts.reversed() {                 // it lives in one of the last ones
             guard let url = URL(string: src), let (js, _) = try? await get(url, json: false) else { continue }
-            if let id = String(decoding: js, as: UTF8.self).matches(#"client_id\s*:\s*"([0-9a-zA-Z]{32})""#).first {
+            let script = String(decoding: js, as: UTF8.self)
+            if let id = script.matches(#"client_id\s*:\s*"([0-9a-zA-Z]{32})""#).first
+                ?? script.matches(#"client_id:"([0-9a-zA-Z]{32})""#).first {
                 return id
             }
         }
