@@ -200,6 +200,7 @@ final class Spotify {
             ready = true
             user = ev.str("user")
             if (ev["login"] as? Bool) == true {
+                ConsoleLog.shared.log("Spotify", "service sign-in succeeded")
                 signingIn = false
                 let file = dir.appendingPathComponent("credentials.json")
                 if let data = try? Data(contentsOf: file), let creds = JSONText.parse(data) as? JSON {
@@ -220,16 +221,20 @@ final class Spotify {
         case "bitrate":
             onEvent?(.bitrate(uri: uri, ms: ms, kbps: (ev["kbps"] as? Int) ?? 0, nominal: (ev["nominal"] as? Int) ?? 0))
         case "error":
-            if ev.str("code") == "signed_out" && signingIn && !ev.str("message").contains("would not") {
+            let message = ev.str("message")
+            if ev.str("code") == "signed_out" && signingIn && !message.contains("would not") {
+                ConsoleLog.shared.log("Spotify", "sign-in response: \(message)")
                 break       // the player waiting for the token just sent
             }
             if ev.str("code") == "signed_out" {
+                ConsoleLog.shared.log("Spotify", "service/player sign-in refused: \(message)")
                 signingIn = false
                 ready = false
                 started = false
-                onEvent?(.signedOut(ev.str("message")))
+                onEvent?(.signedOut(message))
             } else {
-                onEvent?(.error(ev.str("message")))
+                ConsoleLog.shared.log("Spotify", "player error: \(message)")
+                onEvent?(.error(message))
             }
         default:
             break

@@ -1,13 +1,17 @@
 import SwiftUI
+import UIKit
 
 struct SettingsPage: View {
     @Environment(\.omp) private var m
     @Environment(\.presentDialog) private var present
     let state: UiState
     @ObservedObject var vm: MaroViewModel
+    @ObservedObject private var console = ConsoleLog.shared
+    @State private var showingConsole = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: m.pt(4)) {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: m.pt(4)) {
             HStack(spacing: m.pt(10)) {
                 OmpButton(icon: Omp.Icons.back, vertical: 4, horizontal: 6) { vm.toggleSettings() }
                 OmpText("Settings", size: Omp.TypeSize.bodySmall, bold: true)
@@ -83,11 +87,23 @@ struct SettingsPage: View {
                     SettingsActionRow(label: "Reset everything", action: "Reset", value: "accounts, playlists, downloads", danger: true) { purge("all") }
                     SettingsHead(label: "About")
                     SettingsRow(icon: Omp.Icons.note, label: "Version", meta: Self.version) {}
+                    SettingsHead(label: "Diagnostics")
+                    SettingsRow(icon: Omp.Icons.note, label: "Console", meta: "\(console.entries.count) lines", accent: true) {
+                        showingConsole = true
+                    }
                 }
                 .padding(.bottom, m.pt(14))
             }
         }
-        .padding(.horizontal, m.pt(4))
+            .padding(.horizontal, m.pt(4))
+            .navigationDestination(isPresented: $showingConsole) { ConsolePage() }
+            .toolbar(.hidden, for: .navigationBar)
+            .focusable()
+            .onKeyPress(.escape) { _ in
+                vm.toggleSettings()
+                return .handled
+            }
+        }
     }
 
     /** "0.1.6 (7)": the version and build this phone is running. */
@@ -111,6 +127,61 @@ struct SettingsPage: View {
     }
 
     private func tapService(_ key: String, _ slot: String) { vm.connectService(key) }
+}
+
+private struct ConsolePage: View {
+    @Environment(\.omp) private var m
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var console = ConsoleLog.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: m.pt(4)) {
+            HStack(spacing: m.pt(8)) {
+                OmpButton(text: "← Back", vertical: 4, horizontal: 6) { dismiss() }
+                OmpText("Console", size: Omp.TypeSize.bodySmall, bold: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                OmpButton(text: "Copy all") {
+                    UIPasteboard.general.string = console.entries.map(\.line).joined(separator: "\n")
+                }
+                OmpButton(text: "Clear", foreground: Omp.urgent) { console.clear() }
+            }
+            if console.entries.isEmpty {
+                OmpText("No console entries", size: Omp.TypeSize.caption, color: Omp.muted)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                    .padding(.horizontal, m.pt(4))
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: m.pt(4)) {
+                            ForEach(console.entries) { entry in
+                                Text(entry.line)
+                                    .font(Omp.font(m.pt(Omp.TypeSize.caption)))
+                                    .foregroundColor(Omp.foreground)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .id(entry.id)
+                            }
+                        }
+                        .padding(.vertical, m.pt(4))
+                        .padding(.horizontal, m.pt(4))
+                    }
+                    .onChange(of: console.entries.last?.id) { _, id in
+                        if let id { proxy.scrollTo(id, anchor: .bottom) }
+                    }
+                    .onAppear {
+                        if let last = console.entries.last { proxy.scrollTo(last.id, anchor: .bottom) }
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, m.pt(4))
+        .background(Omp.background)
+        .focusable()
+        .onKeyPress(.escape) { _ in
+            dismiss()
+            return .handled
+        }
+    }
 }
 
 /** One music service as the account holds it, with Connect / Sign out. */

@@ -42,9 +42,42 @@ final class ServiceSignIn: NSObject, ObservableObject, WKNavigationDelegate, Ide
     static let spotifyScopes = ["streaming", "user-read-private", "user-read-email", "user-library-read",
                                 "user-library-modify", "playlist-read-private", "playlist-read-collaborative",
                                 "user-follow-read"]
-    // Safari's own name: Google turns away sign-ins from anything that says
-    // it is an embedded web view.
-    static let safari = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
+    // Safari's own name, as a fallback only: the real one comes from the web
+    // view itself (see safari(from:)).
+    static let safariFallback = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
+
+    /**
+     * The web view's own name, turned into Safari's.
+     *
+     * Google refuses a sign-in whose user agent disagrees with what WebKit
+     * says it is, so the fixed "iOS 18" string became a lie on any newer phone
+     * and the sign-in came back 403. The default UA already names the real OS
+     * and WebKit build; Safari's own name is that plus a "Version/<ios>"
+     * before the "Mobile/15E148 Safari/604.1" tail.
+     */
+    static func safari(from ua: String) -> String {
+        var out = ua.trimmingCharacters(in: .whitespaces)
+        guard !out.contains("Safari/") else { return out }
+        var version = "18.0"
+        if let r = out.range(of: #"OS \d+(?:_\d+)*"#, options: .regularExpression) {
+            version = String(out[r]).replacingOccurrences(of: "OS ", with: "")
+                .replacingOccurrences(of: "_", with: ".")
+        }
+        let tail = "Version/\(version) Mobile/15E148 Safari/604.1"
+        if out.contains("Mobile/15E148") {
+            out = out.replacingOccurrences(of: "Mobile/15E148", with: tail)
+        } else {
+            out += " " + tail
+        }
+        return out
+    }
+
+    /** Google's wording for a browser it will not sign in from, in its 403 page. */
+    static func refusedSignIn(_ pageText: String) -> Bool {
+        let t = pageText.lowercased()
+        return t.contains("disallowed_useragent") || t.contains("couldn't sign you in")
+            || t.contains("couldn’t sign you in") || t.contains("browser or app may not be secure")
+    }
 
     init(service: String, onDone: @escaping (Outcome) -> Void) {
         self.service = service
@@ -53,12 +86,27 @@ final class ServiceSignIn: NSObject, ObservableObject, WKNavigationDelegate, Ide
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .nonPersistent()      // a fresh sign-in, nobody else's cookies
         webView = WKWebView(frame: .zero, configuration: config)
-        webView.customUserAgent = Self.safari
         super.init()
         webView.navigationDelegate = self
     }
 
     func start() {
+        // The web view's own name first (it answers on the blank page), then
+        // the service's page with that name corrected: a promise to be Safari
+        // has to match what WebKit tells Google it is, or the sign-in is
+        // refused with 403.
+        webView.evaluateJavaScript("navigator.userAgent") { [weak self] value, _ in
+            guard let self else { return }
+            if let real = value as? String, real.contains("AppleWebKit") {
+                self.webView.customUserAgent = Self.safari(from: real)
+            } else {
+                self.webView.customUserAgent = Self.safariFallback
+            }
+            self.load()
+        }
+    }
+
+    private func load() {
         let url: URL
         switch service {
         case "spotify":
@@ -158,6 +206,19 @@ final class ServiceSignIn: NSObject, ObservableObject, WKNavigationDelegate, Ide
                           "\(expires)", c.name, c.value].joined(separator: "\t"))
         }
         return ["headers": headers, "cookies": lines.joined(separator: "\n") + "\n", "oauth": NSNull()]
+    }
+
+    // -- Google's refusals, said in Jukebox's own words ----------------------
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        guard service != "spotify" else { return }
+        webView.evaluateJavaScript("(document.body && document.body.innerText || '').slice(0, 4000)") { [weak self] value, _ in
+            guard let self, let text = value as? String, self.status.isEmpty else { return }
+            if Self.refusedSignIn(text) {
+                self.status = "Google refused the sign-in from inside the app. " +
+                    "Update iOS, then try again, or sign in on another device and it will reach this phone."
+            }
+        }
     }
 
     // -- Spotify: catch the code on its way to the loopback ------------------

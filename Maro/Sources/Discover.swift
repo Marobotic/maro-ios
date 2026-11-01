@@ -141,6 +141,9 @@ actor YouTubeMusic {
 
     /** A playlist's first page (a mix is one page: 50 to 100 songs). */
     func playlist(_ id: String) async throws -> [Track] {
+        // Public home shelves also use YouTube's generated RDCLAK mixes.
+        // Those are queue lists, not browseable VL playlists.
+        if id.hasPrefix("RDCLAK") { return try await mix(id, videoId: "", signed: false).tracks }
         let v = try await call("browse", ["browseId": "VL" + id], signed: true)
         let two = v.obj("contents")?.obj("twoColumnBrowseResultsRenderer")?.obj("secondaryContents")?.obj("sectionListRenderer")?["contents"] as? [JSON]
         let one = (v.obj("contents")?.obj("singleColumnBrowseResultsRenderer")?["tabs"] as? [JSON])?.first?.obj("tabRenderer")?.obj("content")?.obj("sectionListRenderer")?["contents"] as? [JSON]
@@ -158,10 +161,10 @@ actor YouTubeMusic {
      * A YouTube Mix (an "RD..." list, as in a pasted watch?v=...&list=RD...
      * link) the way YouTube Music plays it: (its title, its songs).
      */
-    func mix(_ list: String, videoId: String) async throws -> (title: String, tracks: [Track]) {
+    func mix(_ list: String, videoId: String, signed: Bool = true) async throws -> (title: String, tracks: [Track]) {
         var body: JSON = ["playlistId": list, "isAudioOnly": true]
         if !videoId.isEmpty { body["videoId"] = videoId }
-        let panel = Self.queue(try await call("next", body, signed: true))
+        let panel = Self.queue(try await call("next", body, signed: signed))
         let title = (panel?["title"] as? String) ?? Self.text(panel?.obj("title"))
         return (title, Self.queueSongs(panel?["contents"] as? [JSON] ?? []))
     }
@@ -187,21 +190,33 @@ actor YouTubeMusic {
      * Supermix, New Release Mix...) and the song radios of "Your daily
      * discover". Each {id, name, sub, art}; a radio's id is its video.
      */
-    func home() async throws -> (mixes: [JSON], radios: [JSON]) {
-        var v = try await call("browse", ["browseId": "FEmusic_home"], signed: true)
+    func home(signed: Bool = true) async throws -> (mixes: [JSON], radios: [JSON], guestSections: [JSON]) {
+        var v = try await call("browse", ["browseId": "FEmusic_home"], signed: signed)
         var mixes: [JSON] = [], radios: [JSON] = []
+        var guestSections: [JSON] = []
         for _ in 0..<6 {
             let list: JSON? = v.obj("continuationContents")?.obj("sectionListContinuation")
                 ?? (v.obj("contents")?.obj("singleColumnBrowseResultsRenderer")?["tabs"] as? [JSON])?.first?
                     .obj("tabRenderer")?.obj("content")?.obj("sectionListRenderer")
             for shelf in (list?["contents"] as? [JSON]) ?? [] {
                 guard let c = shelf.obj("musicCarouselShelfRenderer") else { continue }
-                let title = Self.text(c.obj("header")?.obj("musicCarouselShelfBasicHeaderRenderer")?.obj("title")).lowercased()
+                let shelfTitle = Self.text(c.obj("header")?.obj("musicCarouselShelfBasicHeaderRenderer")?.obj("title"))
+                let title = shelfTitle.lowercased()
+                var guestItems: [JSON] = []
+                var guestSeen = Set<String>()
                 for it in (c["contents"] as? [JSON]) ?? [] {
-                    guard let r = it.obj("musicTwoRowItemRenderer") else { continue }
+                    guard let r = it.obj("musicTwoRowItemRenderer")
+                            ?? it.obj("musicResponsiveListItemRenderer") else { continue }
                     let nav = r.obj("navigationEndpoint")
                     let art = Self.lastThumb(r.obj("thumbnailRenderer")?.obj("musicThumbnailRenderer")?.obj("thumbnail")?["thumbnails"])
-                    func item(_ id: String) -> JSON { ["id": id, "name": Self.text(r.obj("title")), "sub": Self.text(r.obj("subtitle")), "art": art] }
+                        .ifEmpty(Self.lastThumb(r.obj("thumbnail")?.obj("musicThumbnailRenderer")?.obj("thumbnail")?["thumbnails"]))
+                    let columns = (r["flexColumns"] as? [JSON]) ?? []
+                    func column(_ index: Int) -> JSON? {
+                        columns[safe: index]?.obj("musicResponsiveListItemFlexColumnRenderer")?.obj("text")
+                    }
+                    let name = Self.text(r.obj("title") ?? column(0))
+                    let sub = Self.text(r.obj("subtitle") ?? column(1))
+                    func item(_ id: String) -> JSON { ["id": id, "name": name, "sub": sub, "art": art] }
                     let browse = nav?.obj("browseEndpoint")?.str("browseId") ?? ""
                     if browse.hasPrefix("VLRDTMAK") {
                         let id = String(browse.dropFirst(2))
@@ -210,13 +225,32 @@ actor YouTubeMusic {
                         let vid = w.str("videoId")
                         if !vid.isEmpty && !radios.contains(where: { $0.str("id") == vid }) { radios.append(item(vid)) }
                     }
+
+                    if !signed {
+                        let itemId: String
+                        if browse.hasPrefix("VL") {
+                            itemId = "yt:pl:" + String(browse.dropFirst(2))
+                        } else {
+                            let watch = nav?.obj("watchEndpoint")
+                                ?? r.obj("overlay")?.obj("musicItemThumbnailOverlayRenderer")?.obj("content")?
+                                    .obj("musicPlayButtonRenderer")?.obj("playNavigationEndpoint")?.obj("watchEndpoint")
+                            let videoId = watch?.str("videoId") ?? ""
+                            itemId = videoId.isEmpty ? "" : "yt:radio:" + videoId
+                        }
+                        if !itemId.isEmpty && guestSeen.insert(itemId).inserted {
+                            guestItems.append(["id": itemId, "name": name, "sub": sub, "art": art])
+                        }
+                    }
+                }
+                if !signed && !guestItems.isEmpty && !shelfTitle.isEmpty {
+                    guestSections.append(["title": shelfTitle, "items": guestItems])
                 }
             }
             let token = ((list?["continuations"] as? [JSON])?.first?.obj("nextContinuationData")?.str("continuation")) ?? ""
             if token.isEmpty { break }
-            v = try await call("browse", ["continuation": token], signed: true)
+            v = try await call("browse", ["continuation": token], signed: signed)
         }
-        return (mixes, radios)
+        return (mixes, radios, guestSections)
     }
 }
 
@@ -417,10 +451,24 @@ enum DiscoverPage {
         for it in mixes { take(&more, yt(it, "pl")) }
         for it in spItems where it.0.contains("mix") && more.count < 40 { take(&more, sp(it.1)) }
 
-        return [
+        var sections = [
             DiscoverSection(key: "weekly", title: "Discover Weekly", items: weekly),
             DiscoverSection(key: "radio", title: "Radio", items: radio),
             DiscoverSection(key: "more", title: "Made for you", items: more),
         ]
+        if !spotify && !ytm {
+            let guest = (raw.obj("ytmGuest")?.arr("sections") as? [JSON]) ?? []
+            for (index, section) in guest.enumerated() {
+                let items = ((section.arr("items") as? [JSON]) ?? []).compactMap { o -> DiscoverItem? in
+                    let id = o.str("id")
+                    guard id.hasPrefix("yt:pl:") || id.hasPrefix("yt:radio:") else { return nil }
+                    return DiscoverItem(id: id, service: "ytm", name: o.str("name"), sub: o.str("sub"), art: o.str("art"))
+                }
+                if !items.isEmpty {
+                    sections.append(DiscoverSection(key: "guest:\(index):\(section.str("title"))", title: section.str("title"), items: items))
+                }
+            }
+        }
+        return sections
     }
 }

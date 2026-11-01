@@ -113,8 +113,13 @@ final class StreamLoader: NSObject, AVAssetResourceLoaderDelegate, URLSessionDat
         var req = URLRequest(url: src.url, timeoutInterval: 15)
         for (k, v) in src.headers { req.setValue(v, forHTTPHeaderField: k) }
         req.setValue("bytes=0-\(Self.headBytes - 1)", forHTTPHeaderField: "Range")
-        let task = URLSession.shared.dataTask(with: req) { data, response, _ in
+        let task = URLSession.shared.dataTask(with: req) { data, response, error in
             var head: Head?
+            if let http = response as? HTTPURLResponse, http.statusCode != 200 && http.statusCode != 206 {
+                ConsoleLog.shared.log("StreamLoader", "GET \(src.url.path) HTTP \(http.statusCode)")
+            } else if let error {
+                ConsoleLog.shared.log("StreamLoader", "GET \(src.url.path) failed: \(error.localizedDescription)")
+            }
             if (response as? HTTPURLResponse)?.statusCode == 404 {
                 self.lock.lock(); self.missing.insert(key); self.lock.unlock()
             }
@@ -214,8 +219,21 @@ final class StreamLoader: NSObject, AVAssetResourceLoaderDelegate, URLSessionDat
         p.request.dataRequest?.respond(with: data)
     }
 
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        if let http = response as? HTTPURLResponse, http.statusCode != 200 && http.statusCode != 206 {
+            ConsoleLog.shared.log("StreamLoader", "GET \(response.url?.path ?? "stream") HTTP \(http.statusCode)")
+        }
+        completionHandler(.allow)
+    }
+
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard let p = pending.removeValue(forKey: task.taskIdentifier), !p.request.isCancelled else { return }
-        if let error { p.request.finishLoading(with: error) } else { p.request.finishLoading() }
+        if let error {
+            ConsoleLog.shared.log("StreamLoader", "stream request failed: \(error.localizedDescription)")
+            p.request.finishLoading(with: error)
+        } else {
+            p.request.finishLoading()
+        }
     }
 }

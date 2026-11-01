@@ -92,6 +92,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     private var serverCached: Set<String> = []
     private var serverMapLoaded = false
     private var localFiles: [String: URL] = [:]
+    /** Every song played here, kept in the caches folder (the system may reclaim it). */
+    private var keptFiles: [String: URL] = [:]
     private var trackMapSave: Task<Void, Never>?
 
     private var pending: [String: Pending] = [:]
@@ -329,6 +331,19 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent("Maro", isDirectory: true)
     }
 
+    private func keptDirectory() -> URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("Kept", isDirectory: true)
+    }
+
+    private func indexKeptFiles() -> [String: URL] {
+        let files = (try? FileManager.default.contentsOfDirectory(at: keptDirectory(), includingPropertiesForKeys: nil)) ?? []
+        var out: [String: URL] = [:]
+        for f in files where audioExtensions.contains(f.pathExtension) && ArtLoader.size(of: f) > 0 {
+            out[f.deletingPathExtension().lastPathComponent] = f
+        }
+        return out
+    }
+
     private func indexLocalFiles() -> [String: URL] {
         let files = (try? FileManager.default.contentsOfDirectory(at: musicDirectory(), includingPropertiesForKeys: nil)) ?? []
         var out: [String: URL] = [:]
@@ -348,6 +363,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         let (map, songs) = await Task.detached { (cache.trackMap(), cache.downloadedSongs()) }.value
         trackMap.merge(map) { _, new in new }
         localFiles = indexLocalFiles()
+        keptFiles = indexKeptFiles()
         state.songs = songs.filter { localFiles[videoIdOf($0)] != nil }
     }
 
@@ -639,10 +655,12 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         if queueChanged { body["queue"] = s.localQueue.map { $0.toJSON() } }
         playerActive = true
         guard let out = await client.putPlayer(body) else {
+            ConsoleLog.shared.log("SharedPlayer", "PUT /player returned no response")
             publishedOnce = false               // try again next pass
             return
         }
         if !out.bool("ok"), let moved = out.obj("player") {
+            ConsoleLog.shared.log("SharedPlayer", "PUT /player rejected: playback moved to another device")
             await applyPlayer(moved)            // the sound moved elsewhere meanwhile
         } else if out.bool("ok") {
             playerQueueRev = out.int("queueRev", playerQueueRev)
@@ -1012,12 +1030,12 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
 
     private func startUsual(_ track: Track, tag: Int) {
         let videoId = videoIdOf(track)
-        let saved = localFiles[videoId].map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+        let saved = (localFiles[videoId] ?? keptFiles[videoId]).map { FileManager.default.fileExists(atPath: $0.path) } ?? false
         if !saved, track.source == "ytm", let why = state.gone[videoId] {
             state.localError = "Skipped \(track.title): \(why)"
             return skipCurrent()
         }
-        if let file = localFiles[videoId], FileManager.default.fileExists(atPath: file.path) {
+        if let file = localFiles[videoId] ?? keptFiles[videoId], FileManager.default.fileExists(atPath: file.path) {
             playRoute = "file"
             // A saved song's rate is its size over its length: the file is the
             // whole song, so that is exactly what is being heard.
@@ -1194,6 +1212,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             await sleep(seconds: 4)
             guard let self, tag == self.playTag, self.startedTag != tag, self.isPhone else { return }
             if self.playRoute == "spotify" {
+                ConsoleLog.shared.log("Playback", "Spotify start timed out; trying YouTube")
                 log.warning("spotify did not start \(track.title, privacy: .public) in 4 s; YouTube instead, new connection behind it")
                 self.onFailed(tag: tag, notOnServer: true, message: "Spotify did not start the song")
             }
@@ -1203,6 +1222,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 // (The server fetching a song it has never had takes a while: that one is only waited for.)
                 await sleep(seconds: 5)
                 guard tag == self.playTag, self.startedTag != tag else { return }
+                ConsoleLog.shared.log("Playback", "\(track.source) stream start timed out")
                 self.onFailed(tag: tag, notOnServer: false, message: "The stream did not start")
             }
             await sleep(seconds: 40)
@@ -1458,11 +1478,43 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         }
     }
 
+    private var wantAt: Double = 0
+    private var wantSent: [String: Double] = [:]
+
+    /**
+     * The rows on screen go to the droplet (POST /cache/audio/want, 30 at most,
+     * not more often than every 1.5 s) so it holds their audio before a tap.
+     * A song asked in the last ten minutes is not asked again.
+     */
+    private func wantVisible(_ tracks: [Track]) {
+        let now = uptime()
+        guard now - wantAt >= 1.5 else { return }
+        // The songs, not just their YouTube ids: the droplet needs the source,
+        // the id and the title to fetch one it has never had.
+        var songs: [JSON] = []
+        var asked: [String] = []
+        for t in tracks where t.source != "sc" {
+            let v = videoIdOf(t)
+            if v.isEmpty || localFiles[v] != nil || keptFiles[v] != nil || serverCached.contains(v) { continue }
+            if let last = wantSent[v], now - last < 600 { continue }
+            songs.append(["source": t.source, "id": t.id, "videoId": v,
+                          "title": t.title, "artist": t.artist, "duration": t.duration])
+            asked.append(v)
+            if songs.count == 30 { break }
+        }
+        guard !songs.isEmpty else { return }
+        wantAt = now
+        for v in asked { wantSent[v] = now }
+        let client = client
+        Task { await client.wantAudio(songs) }
+    }
+
     /** The rows on screen settled: get them ready to play at a tap. */
     func prefetchVisible(_ tracks: [Track]) {
         // Whatever is on screen gets ready on the droplet, whichever device
         // plays: a tap from here, or on the one playing, should start at once.
         guard state.signedIn else { return }
+        wantVisible(tracks)
         warm(Array(tracks.prefix(40)), ahead: false)
     }
 
@@ -1484,11 +1536,14 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         state.localError = ""
         guard let track = state.localTrack else { return }
         let videoId = videoIdOf(track)
-        if state.savingOffline && !videoId.isEmpty && localFiles[videoId] == nil {
-            // Keep a copy once it has played a while.
+        if !videoId.isEmpty && localFiles[videoId] == nil {
+            // Keep a copy once it has played a while: in the music folder when
+            // saving offline, else in the caches folder so a replay is local.
+            let offline = state.savingOffline
             saveTask = Task {
                 await sleep(seconds: 10)
-                if !Task.isCancelled && tag == playTag { saveLocal(track, videoId, announce: false) }
+                guard !Task.isCancelled && tag == playTag else { return }
+                if offline { saveLocal(track, videoId, announce: false) } else { await keepNow(videoId) }
             }
         }
     }
@@ -1551,6 +1606,9 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     func onFailed(tag: Int, notOnServer: Bool, message: String) {
         if tag != playTag { return }
         let track = state.localTrack
+        let failedTrack = track.map { "\($0.source):\($0.id)" } ?? ""
+        let trackContext = failedTrack.isEmpty ? "" : " (\(failedTrack))"
+        ConsoleLog.shared.log("Playback", "\(playRoute) failed\(trackContext): \(message)")
         if let track, playRoute == "spotify", retriedTag != tag {
             // Spotify would not start it: YouTube from this phone now, and
             // Spotify left alone a while (a new connection made behind it).
@@ -1563,6 +1621,14 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         if let track, retriedTag != tag {
             retriedTag = tag
             let videoId = videoIdOf(track)
+            // The droplet does not hold it (or its copy fails): straight from
+            // YouTube at once, before downloading or waiting for the engine.
+            if !videoId.isEmpty && track.source != "sc" && localFiles[videoId] == nil && keptFiles[videoId] == nil
+                && state.gone[videoId] == nil && (notOnServer || playRoute == "stream" || playRoute == "warm asset") {
+                serverCached.remove(videoId)
+                log.info("droplet copy failed (\(message, privacy: .public)), YouTube directly")
+                return playYouTubeDirect(videoId, track: track, tag: tag)
+            }
             if !notOnServer && !videoId.isEmpty && localFiles[videoId] == nil {
                 // The droplet has it but streaming it failed: fetch the whole
                 // file once and play that, before bothering the engine.
@@ -1625,6 +1691,14 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         }
     }
 
+    /** Keep the droplet's copy of a played song in the caches folder. */
+    private func keepNow(_ videoId: String) async {
+        if videoId.isEmpty || keptFiles[videoId] != nil || localFiles[videoId] != nil || !serverCached.contains(videoId) { return }
+        let dir = keptDirectory(), client = client
+        guard let file = try? await Task.detached(operation: { try await AudioSaver.saveTo(videoId, dir: dir, client: client) }).value else { return }
+        keptFiles[videoId] = file
+    }
+
     /** Copy the droplet's copy of [videoId] to the music folder. Returns once done. */
     private func saveLocalNow(_ track: Track, _ videoId: String) async -> Bool {
         if videoId.isEmpty { return false }
@@ -1634,6 +1708,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             return false
         }
         localFiles[videoId] = file
+        if let kept = keptFiles.removeValue(forKey: videoId) { try? FileManager.default.removeItem(at: kept) }
         let songs = state.songs.filter { videoIdOf($0) != videoId } + [track.with(videoId: videoId)]
         state.songs = songs
         let cache = deviceCache
@@ -1798,6 +1873,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         if state.services.contains(slot) {
             Task {
                 await ServiceSessions.shared.signOut(slot, client: client)
+                ConsoleLog.shared.log("ServiceSignIn", "\(label) signed out")
                 if slot == ServiceSessions.librespot { Spotify.shared.start() }   // no login: stops it
                 state.services = ServiceSessions.shared.available
                 showStatus("Signed out of \(label) on every device", "ok")
@@ -1805,6 +1881,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             return
         }
         guard ServiceSessions.shared.hasKey else {
+            ConsoleLog.shared.log("ServiceSignIn", "\(label) connect blocked: Jukebox sign-in required")
             showStatus("Sign in to Jukebox again to connect music services.", "info")
             return
         }
@@ -1813,16 +1890,20 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             self.signIn = nil
             switch outcome {
             case .session(let payload):
+                ConsoleLog.shared.log("ServiceSignIn", "\(label) sign-in completed; publishing session")
                 Task { await self.saveSession(slot, payload, label: label) }
             case .spotifyToken(let token):
+                ConsoleLog.shared.log("ServiceSignIn", "Spotify authorization received; starting player sign-in")
                 showStatus("Signing in to Spotify…", "info")
                 Spotify.shared.onLoggedIn = { [weak self] creds in
                     Task { await self?.saveSession(ServiceSessions.librespot, ["credentials": creds], label: "Spotify") }
                 }
                 Spotify.shared.signIn(token: token)
             case .failed(let why):
+                ConsoleLog.shared.log("ServiceSignIn", "\(label) sign-in failed: \(why)")
                 showStatus(why, "error")
             case .cancelled:
+                ConsoleLog.shared.log("ServiceSignIn", "\(label) sign-in cancelled")
                 break
             }
         }
@@ -1830,9 +1911,11 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
 
     private func saveSession(_ slot: String, _ payload: JSON, label: String) async {
         if let why = await ServiceSessions.shared.publish(slot, payload, client: client) {
+            ConsoleLog.shared.log("ServiceSignIn", "\(label) session publish failed: \(why)")
             showStatus(why, "error")
             return
         }
+        ConsoleLog.shared.log("ServiceSignIn", "\(label) signed in")
         state.services = ServiceSessions.shared.available
         if slot == ServiceSessions.librespot { Spotify.shared.start() }
         showStatus("Signed in to \(label) - on your account, so every device has it", "ok")
@@ -2366,14 +2449,19 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             drawDiscover()
             let spotify = Spotify.shared.hasLogin, ytm = discoverYtm
             let age = Date().timeIntervalSince1970 - discoverRaw.double("at")
-            guard spotify || ytm, !state.discoverBusy, force || age > 3600 else { return }
+            let wantsGuest = !spotify && !ytm
+            let needsGuest = wantsGuest && discoverRaw.obj("ytmGuest") == nil
+            guard !state.discoverBusy, force || age > 3600 || needsGuest else { return }
             state.discoverBusy = true
             if spotify { Spotify.shared.start() }
             let fromSpotify = spotify ? await SpotifyHome.sections() : nil
-            let yt = ytm ? (try? await YouTubeMusic.shared.home()) : nil
+            let yt = (ytm || wantsGuest) ? (try? await YouTubeMusic.shared.home(signed: ytm)) : nil
             var raw = discoverRaw
             if let fromSpotify { raw["spotify"] = ["sections": fromSpotify] as JSON }
-            if let yt { raw["ytm"] = ["mixes": yt.mixes, "radios": yt.radios] as JSON }
+            if let yt {
+                raw["ytm"] = ["mixes": yt.mixes, "radios": yt.radios] as JSON
+                if wantsGuest { raw["ytmGuest"] = ["sections": yt.guestSections] as JSON }
+            }
             if fromSpotify != nil || yt != nil {
                 raw["at"] = Date().timeIntervalSince1970
                 discoverRaw = raw
@@ -2631,7 +2719,11 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         // The phone's own copies of the same things.
         if scope == "artwork" || scope == "all" { ArtLoader.shared.clear() }
         if scope == "playlists" || scope == "all" { deviceCache.clearPlaylists() }
-        if scope == "all" { AudioCache.clear() }
+        if scope == "all" {
+            AudioCache.clear()
+            try? FileManager.default.removeItem(at: keptDirectory())
+            keptFiles = [:]
+        }
         refreshPhoneStorage()
     }
 

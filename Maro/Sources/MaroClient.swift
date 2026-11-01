@@ -72,10 +72,14 @@ final class MaroClient: @unchecked Sendable {
         req.setValue("Bearer \(s)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["song_id": songId, "name": title, "artist": artist])
-        guard let got = try? await http.data(for: req) else { return "No connection" }
+        guard let got = try? await http.data(for: req) else {
+            ConsoleLog.shared.log("MaroClient", "POST /hourglass/api/ringtones/song failed: no connection")
+            return "No connection"
+        }
         let data = got.0
         let code = (got.1 as? HTTPURLResponse)?.statusCode ?? 0
         if (200..<300).contains(code) { return nil }
+        ConsoleLog.shared.log("MaroClient", "POST /hourglass/api/ringtones/song HTTP \(code)")
         return ((try? JSONSerialization.jsonObject(with: data)) as? [String: Any])?["error"] as? String ?? "Hourglass answered \(code)"
     }
 
@@ -112,10 +116,19 @@ final class MaroClient: @unchecked Sendable {
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.httpBody = JSONText.data(body)
         }
-        let (data, resp) = try await http.data(for: req)
-        if !path.hasPrefix("/auth/") { checkRejected(req, resp) }
-        if data.isEmpty { return [:] }
-        return JSONText.parse(data) as? JSON ?? [:]
+        do {
+            let (data, resp) = try await http.data(for: req)
+            let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            if !(200..<300).contains(status) {
+                ConsoleLog.shared.log("MaroClient", "\(method) \(path) HTTP \(status)")
+            }
+            if !path.hasPrefix("/auth/") { checkRejected(req, resp) }
+            if data.isEmpty { return [:] }
+            return JSONText.parse(data) as? JSON ?? [:]
+        } catch {
+            ConsoleLog.shared.log("MaroClient", "\(method) \(path) failed: \(error.localizedDescription)")
+            throw error
+        }
     }
 
     /**
@@ -144,10 +157,20 @@ final class MaroClient: @unchecked Sendable {
 
     /** Body bytes, or nil when the server answers non-2xx. */
     private func raw(_ req: URLRequest) async -> Data? {
-        guard let result = try? await http.data(for: req) else { return nil }
-        checkRejected(req, result.1)
-        guard let code = (result.1 as? HTTPURLResponse)?.statusCode, (200..<300).contains(code) else { return nil }
-        return result.0
+        let path = req.url?.path ?? "request"
+        do {
+            let result = try await http.data(for: req)
+            checkRejected(req, result.1)
+            guard let code = (result.1 as? HTTPURLResponse)?.statusCode, (200..<300).contains(code) else {
+                let code = (result.1 as? HTTPURLResponse)?.statusCode ?? 0
+                ConsoleLog.shared.log("MaroClient", "\(req.httpMethod ?? "GET") \(path) HTTP \(code)")
+                return nil
+            }
+            return result.0
+        } catch {
+            ConsoleLog.shared.log("MaroClient", "\(req.httpMethod ?? "GET") \(path) failed: \(error.localizedDescription)")
+            return nil
+        }
     }
 
     /**
@@ -177,9 +200,20 @@ final class MaroClient: @unchecked Sendable {
     func songCover(_ key: String, query: String) async -> (bytes: Data, master: String, version: Int64)? {
         var req = request(Self.base + "/covers/" + Self.escape(key) + (query.isEmpty ? "" : "?" + query), timeout: 30)
         req.setValue("image/*", forHTTPHeaderField: "Accept")
-        guard let (data, resp) = try? await http.data(for: req) else { return nil }
+        let result: (Data, URLResponse)
+        do {
+            result = try await http.data(for: req)
+        } catch {
+            ConsoleLog.shared.log("MaroClient", "GET \(req.url?.path ?? "covers") failed: \(error.localizedDescription)")
+            return nil
+        }
+        let (data, resp) = result
         checkRejected(req, resp)
-        guard let h = resp as? HTTPURLResponse, (200..<300).contains(h.statusCode), !data.isEmpty else { return nil }
+        guard let h = resp as? HTTPURLResponse, (200..<300).contains(h.statusCode), !data.isEmpty else {
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            ConsoleLog.shared.log("MaroClient", "GET \(req.url?.path ?? "covers") HTTP \(code)")
+            return nil
+        }
         let master = h.value(forHTTPHeaderField: "X-Cover-Master") ?? ""
         let version = Int64(h.value(forHTTPHeaderField: "X-Cover-Version") ?? "") ?? 0
         return (data, master, version)
@@ -188,8 +222,14 @@ final class MaroClient: @unchecked Sendable {
     /** The master a song's cover is filed under now, without its bytes; "" when it has none yet. */
     func songCoverMaster(_ key: String) async -> String {
         let req = request(Self.base + "/covers/" + Self.escape(key), method: "HEAD")
-        guard let (_, resp) = try? await http.data(for: req),
-              let h = resp as? HTTPURLResponse, (200..<300).contains(h.statusCode) else { return "" }
+        guard let (_, resp) = try? await http.data(for: req) else {
+            ConsoleLog.shared.log("MaroClient", "HEAD \(req.url?.path ?? "covers") failed")
+            return ""
+        }
+        guard let h = resp as? HTTPURLResponse, (200..<300).contains(h.statusCode) else {
+            ConsoleLog.shared.log("MaroClient", "HEAD \(req.url?.path ?? "covers") HTTP \((resp as? HTTPURLResponse)?.statusCode ?? 0)")
+            return ""
+        }
         return h.value(forHTTPHeaderField: "X-Cover-Master") ?? ""
     }
 
@@ -390,7 +430,11 @@ final class MaroClient: @unchecked Sendable {
      * when the sound has moved to another device in the meantime.
      */
     func putPlayer(_ body: JSON) async -> JSON? {
-        try? await call("PUT", "/player", body: body, timeout: 15)
+        let result = try? await call("PUT", "/player", body: body, timeout: 15)
+        if result == nil || result?.bool("ok") == false {
+            ConsoleLog.shared.log("SharedPlayer", "PUT /player failed")
+        }
+        return result
     }
 
     /** Move the sound to `device`; the new shared player, or nil. */
@@ -400,8 +444,23 @@ final class MaroClient: @unchecked Sendable {
 
     /** A press for whichever device plays; `from` takes over if that one is gone. */
     func playerCommand(_ action: String, _ payload: JSON, from: String) async -> Bool {
-        guard let resp = try? await call("POST", "/player/command", body: ["action": action, "payload": payload, "from": from]) else { return false }
-        return resp.bool("ok")
+        guard let resp = try? await call("POST", "/player/command", body: ["action": action, "payload": payload, "from": from]) else {
+            ConsoleLog.shared.log("SharedPlayer", "command \(action) failed")
+            return false
+        }
+        let ok = resp.bool("ok")
+        if !ok { ConsoleLog.shared.log("SharedPlayer", "command \(action) was refused") }
+        return ok
+    }
+
+    /**
+     * The songs on screen: the droplet fetches the ones it does not hold yet.
+     * The body is {songs: [{source, id, videoId, title, artist, duration}]},
+     * the shape the desktop, the phones and the web app all send.
+     */
+    func wantAudio(_ songs: [JSON]) async {
+        guard !songs.isEmpty else { return }
+        _ = try? await call("POST", "/audio/want", body: ["songs": Array(songs.prefix(30))], timeout: 8)
     }
 
     /** A song started playing here: the droplet keeps a played song for good. */

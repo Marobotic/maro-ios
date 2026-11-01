@@ -385,6 +385,7 @@ final class PhonePlayer {
             spotifyPlaying = false
             events?.onEnded()
         case .unavailable(let uri) where uri == mine:
+            ConsoleLog.shared.log("Spotify", "refused track: unavailable")
             events?.onFailed(tag: tag, notOnServer: true, message: "Spotify won't play this song here")
         case .bitrate(let uri, let ms, let kbps, let nominal) where uri == mine:
             let second = ms / 1000
@@ -394,7 +395,10 @@ final class PhonePlayer {
             }
             onSpotifyRate?(spotifyLine, kbps, nominal)
         case .signedOut(let message), .error(let message):
-            if !started { events?.onFailed(tag: tag, notOnServer: true, message: message) }
+            if !started {
+                ConsoleLog.shared.log("Spotify", "playback refused: \(message)")
+                events?.onFailed(tag: tag, notOnServer: true, message: message)
+            }
         default:
             break
         }
@@ -503,7 +507,9 @@ final class PhonePlayer {
         // CoreMedia reports an HTTP 404 as -12938.
         let codes = [ns?.code, (ns?.userInfo[NSUnderlyingErrorKey] as? NSError)?.code]
         let notOnServer = codes.contains(-12938) || (ns?.localizedDescription.contains("404") ?? false)
-        events?.onFailed(tag: tag, notOnServer: notOnServer, message: ns?.localizedDescription ?? "Phone playback failed")
+        let message = ns?.localizedDescription ?? "Phone playback failed"
+        ConsoleLog.shared.log("PhonePlayer", "playback failed: \(message)")
+        events?.onFailed(tag: tag, notOnServer: notOnServer, message: message)
     }
 
     private func report() {

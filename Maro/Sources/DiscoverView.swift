@@ -39,9 +39,7 @@ struct DiscoverView: View {
                     OmpSpinner(size: Omp.TypeSize.body, color: Omp.muted).frame(maxWidth: .infinity).frame(height: m.pt(54))
                     Spacer(minLength: 0)
                 } else {
-                    OmpText(state.services.isEmpty
-                            ? "Sign in to Spotify or YouTube Music in Settings to see Discover Weekly, your mixes and radio."
-                            : "Nothing here yet. Tap refresh to read Discover again.",
+                    OmpText("Nothing here yet. Tap refresh to read Discover again.",
                             size: Omp.TypeSize.bodySmall, color: Omp.muted, maxLines: 3)
                         .padding(m.pt(4))
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
