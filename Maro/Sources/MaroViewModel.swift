@@ -1094,9 +1094,10 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 log.info("soundcloud \(track.id) not playable here: \(String(describing: error))")
                 // A stand-in that will not play: the row's own song, the usual way.
                 if let fallback { return startUsual(fallback, tag: tag) }
-                playRoute = "engine"
+                // The engine has no SoundCloud of its own, so the same song is
+                // played from YouTube as the desktop does.
                 phone.stop()
-                requestCloud(track, .play(tag: tag))
+                playYouTubeInstead(track, tag: tag)
             }
         }
     }
