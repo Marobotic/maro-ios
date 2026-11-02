@@ -24,6 +24,8 @@ actor SoundCloud {
         let kbps: Int
         let codec: String
         let hls: Bool
+        /** The track's own length in seconds; 0 when SoundCloud states none. */
+        let duration: Double
     }
 
     private static let api = "https://api-v2.soundcloud.com"
@@ -59,12 +61,24 @@ actor SoundCloud {
         var req = URLRequest(url: url, timeoutInterval: 15)
         req.setValue(Self.ua, forHTTPHeaderField: "User-Agent")
         if json { req.setValue("application/json", forHTTPHeaderField: "Accept") }
+        var signedInHere = false
         if !token.isEmpty, url.host?.hasSuffix("soundcloud.com") == true {
             // The site's own login, sent the way its web player sends it.
             req.setValue("OAuth " + token, forHTTPHeaderField: "Authorization")
+            signedInHere = true
         }
-        let (data, resp) = try await http.data(for: req)
-        return (data, (resp as? HTTPURLResponse)?.statusCode ?? 0)
+        var (data, resp) = try await http.data(for: req)
+        var code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        if code == 401 && signedInHere {
+            // The account's SoundCloud sign-in has lapsed. Everything a
+            // listener without a login can play is still there, so ask again
+            // as a guest instead of failing the song.
+            req.setValue(nil, forHTTPHeaderField: "Authorization")
+            (data, resp) = try await http.data(for: req)
+            code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            if code != 401 { ConsoleLog.shared.log("SoundCloud", "the SoundCloud sign-in was refused; playing as a guest") }
+        }
+        return (data, code)
     }
 
     private func freshClientId() async throws -> String {
@@ -124,7 +138,6 @@ actor SoundCloud {
         let id = "\(t["id"] ?? "")"
         tracks[id] = t
         let art = t.str("artwork_url").ifEmpty(t.obj("user")?.str("avatar_url") ?? "")
-        let ms = (t["full_duration"] as? Double) ?? (t["duration"] as? Double) ?? 0
         var track = Track()
         track.source = "sc"
         track.id = id
@@ -132,7 +145,7 @@ actor SoundCloud {
         track.artist = (t.obj("publisher_metadata")?.str("artist")).flatMap { $0.isEmpty ? nil : $0 }
             ?? t.obj("user")?.str("username") ?? ""
         track.album = t.obj("publisher_metadata")?.str("album_title") ?? ""
-        track.duration = ms / 1000
+        track.duration = Self.seconds(t)
         track.artUrl = art.replacingOccurrences(of: "-large.", with: "-t500x500.")
         return track
     }
@@ -242,14 +255,27 @@ actor SoundCloud {
 
     /**
      * A URL AVPlayer can open for this track: HLS AAC, then the MP3 file, then
-     * anything else plain. Throws Unplayable for DRM-only and preview-only.
+     * anything else plain. The track is read from SoundCloud again every time:
+     * a transcoding's own address stops answering once it has been retired,
+     * so a remembered one is a 404 waiting to happen. Throws Unplayable for
+     * DRM-only and preview-only.
      */
     func resolve(_ trackId: String) async throws -> Stream {
-        let t: JSON
-        if let known = tracks[trackId] { t = known } else { t = try await call("/tracks/" + trackId); tracks[trackId] = t }
+        let t = try await call("/tracks/" + trackId)
+        tracks[trackId] = t
         if ["SNIP", "BLOCK"].contains(t.str("policy")) {
             throw Unplayable(reason: "SoundCloud only plays a preview of this track")
         }
+        if let stream = await stream(of: t, trackId: trackId) { return stream }
+        // A rotated client id refuses the media calls too, though not always
+        // with a 401: ask the site for a fresh one and try once more.
+        clientId = try await freshClientId()
+        UserDefaults.standard.set(clientId, forKey: Self.idKey)
+        if let stream = await stream(of: t, trackId: trackId) { return stream }
+        throw Unplayable(reason: "SoundCloud only streams this track with DRM")
+    }
+
+    private func stream(of t: JSON, trackId: String) async -> Stream? {
         func rank(_ tc: JSON) -> Int {
             let f = tc.obj("format") ?? [:]
             let hls = f.str("protocol") == "hls", aac = f.str("mime_type").contains("mp4") || f.str("mime_type").contains("aac")
@@ -257,24 +283,49 @@ actor SoundCloud {
             if !hls && f.str("mime_type").contains("mpeg") { return 1 }
             return 2
         }
-        var params = ["client_id": try await id(refresh: false)]
+        var params = ["client_id": clientId]
         let auth = t.str("track_authorization")
         if !auth.isEmpty { params["track_authorization"] = auth }
+        // As the desktop does: signed in, a Go+ subscriber gets the whole
+        // track here rather than a snip.
+        if !token.isEmpty { params["oauth_token"] = token }
         // A label release lists plain streams next to its encrypted ones, but
         // the plain ones answer 403/404: only when all of them refuse is the
         // track DRM-only.
         for tc in Self.streams(t).sorted(by: { rank($0) < rank($1) }) {
             guard var c = URLComponents(string: tc.str("url")) else { continue }
             c.queryItems = (c.queryItems ?? []) + params.map { URLQueryItem(name: $0.key, value: $0.value) }
-            guard let (data, code) = try? await get(c.url!), (200..<300).contains(code),
-                  let body = JSONText.parse(data) as? JSON, let url = URL(string: body.str("url")) else { continue }
+            guard let (data, code) = try? await get(c.url!) else { continue }
+            guard (200..<300).contains(code), let body = JSONText.parse(data) as? JSON,
+                  let url = URL(string: body.str("url")), !body.str("url").isEmpty else {
+                ConsoleLog.shared.log("SoundCloud", "\(trackId): \(tc.obj("format")?.str("protocol") ?? "?") stream answered \(code)")
+                continue
+            }
             let mime = tc.obj("format")?.str("mime_type") ?? ""
             let aac = mime.contains("mp4") || mime.contains("aac")
-            return Stream(url: url, kbps: aac ? 160 : mime.contains("ogg") ? 64 : 128,
+            return Stream(url: url, kbps: Self.bitrate(body.str("url"), aac: aac),
                           codec: aac ? "aac" : mime.contains("mpeg") ? "mp3" : "opus",
-                          hls: tc.obj("format")?.str("protocol") == "hls")
+                          hls: tc.obj("format")?.str("protocol") == "hls",
+                          duration: Self.seconds(t))
         }
-        throw Unplayable(reason: "SoundCloud only streams this track with DRM")
+        return nil
+    }
+
+    /**
+     * The copy the CDN handed out names its own rate in its path
+     * (`aac_160k`, `aac_96k`, `mp3_128k`, `opus_64k`): read that, not a
+     * typical guess.
+     */
+    private static func bitrate(_ url: String, aac: Bool) -> Int {
+        let copies = ["aac_160k": 160, "aac_96k": 96, "mp3_128k": 128, "mp3_64k": 64, "opus_64k": 64]
+        for (name, kbps) in copies where url.contains(name) { return kbps }
+        return aac ? 160 : 128
+    }
+
+    /** The track's real length in seconds, as SoundCloud states it. */
+    private static func seconds(_ t: JSON) -> Double {
+        let ms = (t["full_duration"] as? Double) ?? (t["duration"] as? Double) ?? 0
+        return ms > 0 ? ms / 1000 : 0
     }
 }
 

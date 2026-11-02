@@ -1084,7 +1084,10 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 sounding = (copy, stream.url, stream.hls)
                 setSounding("", copy: copy, kbps: stream.kbps, inTier: nil, route: "soundcloud")
                 state.audioRoute = "soundcloud"
-                phone.playURL(stream.url, tag: tag, duration: track.duration > 0 ? track.duration : (fallback?.duration ?? 0))
+                // SoundCloud's own statement of the length beats whatever the
+                // queue row carried; the player never invents one.
+                let length = stream.duration > 0 ? stream.duration : track.duration
+                phone.playURL(stream.url, tag: tag, duration: length)
                 if state.statsOpen { measureSounding() }
             } catch {
                 guard tag == playTag else { return }
