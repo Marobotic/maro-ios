@@ -99,7 +99,7 @@ struct SettingsPage: View {
             .navigationDestination(isPresented: $showingConsole) { ConsolePage() }
             .toolbar(.hidden, for: .navigationBar)
             .focusable()
-            .onKeyPress(.escape) { _ in
+            .onKeyPress(.escape) {
                 vm.toggleSettings()
                 return .handled
             }
@@ -177,7 +177,7 @@ private struct ConsolePage: View {
         .padding(.horizontal, m.pt(4))
         .background(Omp.background)
         .focusable()
-        .onKeyPress(.escape) { _ in
+        .onKeyPress(.escape) {
             dismiss()
             return .handled
         }
