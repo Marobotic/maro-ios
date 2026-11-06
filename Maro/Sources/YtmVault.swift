@@ -97,7 +97,7 @@ final class YtmVault: @unchecked Sendable {
         guard let client, client.session != nil else { return false }
         let before = cookie
         guard let got = await client.ytmSession() else {
-            lock.lock(); reached = false; lock.unlock()
+            unreached()
             return false
         }
         take(got)
@@ -108,7 +108,7 @@ final class YtmVault: @unchecked Sendable {
     func refreshStatus() async {
         guard let client, client.session != nil else { return }
         guard let got = await client.ytmSession(withCookies: false) else {
-            lock.lock(); reached = false; lock.unlock()
+            unreached()
             return
         }
         take(got, cookies: false)
@@ -120,12 +120,21 @@ final class YtmVault: @unchecked Sendable {
      * is a new cookie to try the call with.
      */
     func refreshAfterRefusal() async -> Bool {
-        lock.lock()
-        let now = uptime()
-        if now - refusedAt < 60 { lock.unlock(); return false }
-        refusedAt = now
-        lock.unlock()
+        guard claimRefusal() else { return false }
         return await refresh()
+    }
+
+    // The lock is only ever taken in these synchronous helpers, never across an await.
+    private func unreached() {
+        lock.lock(); reached = false; lock.unlock()
+    }
+
+    private func claimRefusal() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        let now = uptime()
+        if now - refusedAt < 60 { return false }
+        refusedAt = now
+        return true
     }
 
     /**
