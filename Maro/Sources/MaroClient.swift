@@ -507,7 +507,7 @@ final class MaroClient: @unchecked Sendable {
     /** GET /cache/find/<kind>?... ("artist" or "album"); nil when the server can't say. */
     func find(_ kind: String, _ query: [String: String]) async -> JSON? {
         let q = query.sorted { $0.key < $1.key }.map { "\($0.key)=\(Self.escape($0.value))" }.joined(separator: "&")
-        guard let got = await answer("GET", "/find/\(kind)?\(q)", timeout: 20), (200..<300).contains(got.code),
+        guard let got = await answer("GET", "/find/\(kind)?\(q)", timeout: 35), (200..<300).contains(got.code),
               got.body["ok"] as? Bool != false else { return nil }
         return got.body
     }

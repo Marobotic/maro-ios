@@ -17,7 +17,7 @@ import Foundation
  * opens the shared interop vector (design/round2-hpke-vector.json).
  */
 enum DeviceCrypto {
-    static let suite = HPKE.Ciphersuite.Curve25519_SHA256_AES_GCM_256
+    static let suite = HPKE.Ciphersuite(kem: .Curve25519_HKDF_SHA256, kdf: .HKDF_SHA256, aead: .AES_GCM_256)
 
     struct Invalid: Error { let why: String }
 
