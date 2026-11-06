@@ -106,14 +106,47 @@ final class YtmDevice: NSObject, WKNavigationDelegate {
 
     func setAccount(_ name: String) { account = name }
 
-    /** The Google and YouTube cookies as rows, for a hand-over (round 2 I.5); sealed by the caller. */
-    func exportCookies() async -> [JSON] {
+    /** The name the session was made under (the keeper visits with it). */
+    var userAgent: String { UserDefaults.standard.string(forKey: "ytmUserAgent") ?? ServiceSignIn.safariFallback }
+
+    /**
+     * The Google and YouTube cookies as a Netscape cookies.txt, for a
+     * hand-over (round 2 I.5/I.6; the caller seals it to the target).
+     */
+    func exportNetscape() async -> String {
         let all = await store.httpCookieStore.allCookies()
-        return Self.rows(all.filter { $0.domain.hasSuffix("youtube.com") || $0.domain.hasSuffix("google.com") })
+            .filter { $0.domain.hasSuffix("youtube.com") || $0.domain.hasSuffix("google.com") }
+        guard all.contains(where: Self.isSignIn) else { return "" }
+        var lines = ["# Netscape HTTP Cookie File"]
+        for c in all {
+            let domain = c.domain
+            let flag = domain.hasPrefix(".") ? "TRUE" : "FALSE"
+            let expires = Int(c.expiresDate?.timeIntervalSince1970 ?? 0)
+            lines.append([(c.isHTTPOnly ? "#HttpOnly_" : "") + domain, flag, c.path.isEmpty ? "/" : c.path,
+                          c.isSecure ? "TRUE" : "FALSE", "\(expires)", c.name, c.value].joined(separator: "\t"))
+        }
+        return lines.joined(separator: "\n") + "\n"
     }
 
-    /** Cookies handed over by the previous holder: into this phone's store, then read. */
-    func importCookies(_ rows: [JSON]) async {
+    /** Cookies handed over by the previous holder (Netscape): into this phone's store, then read. */
+    func importNetscape(_ text: String, userAgent: String) async {
+        if !userAgent.isEmpty { UserDefaults.standard.set(userAgent, forKey: "ytmUserAgent") }
+        var rows: [JSON] = []
+        for raw in text.split(whereSeparator: \.isNewline) {
+            var line = String(raw)
+            var httpOnly = false
+            if line.hasPrefix("#HttpOnly_") {
+                line.removeFirst("#HttpOnly_".count)
+                httpOnly = true
+            } else if line.hasPrefix("#") || line.trimmingCharacters(in: .whitespaces).isEmpty {
+                continue
+            }
+            let f = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
+            guard f.count >= 7, !f[5].isEmpty else { continue }
+            var o: JSON = ["domain": f[0], "path": f[2], "secure": f[3] == "TRUE", "name": f[5], "value": f[6], "httpOnly": httpOnly]
+            if let e = Double(f[4]), e > 0 { o["expires"] = e }
+            rows.append(o)
+        }
         await setRows(rows)
         await readCookies()
     }

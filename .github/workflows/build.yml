@@ -37,6 +37,18 @@ jobs:
           brew install xcodegen
           xcodegen generate
 
+      # Round 2 I.6: this app must open the other apps' sealed messages.
+      - name: Interop test (device crypto)
+        run: |
+          xcodebuild test \
+            -project Maro.xcodeproj \
+            -scheme MaroCryptoTests \
+            -destination 'platform=macOS' \
+            -derivedDataPath build-tests \
+            CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO \
+            > test.log 2>&1 || { grep -E "error|failed|XCTAssert" test.log | sort -u | head -40; exit 1; }
+          grep -E "Test Suite|Executed" test.log | tail -4
+
       # Unsigned: the phone-side signing happens on Linux with a free Apple ID.
       - name: Build
         run: |

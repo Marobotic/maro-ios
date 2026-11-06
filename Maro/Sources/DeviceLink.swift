@@ -3,14 +3,16 @@ import Foundation
 import Network
 
 /**
- * Sign in once, every device works (round 2 I and I.5).
+ * Sign in once, every device works (round 2 I, I.5, I.6).
  *
- * Every device of a Jukebox account has its own key pair and is registered on
- * the account (`PUT /cache/devices/self`). Devices talk with typed messages:
- * on the local network first (a signed HTTP POST, 300 ms), else through the
- * server's relay (`POST /cache/relay/to/<id>`). Anything that carries a
- * credential is sealed to the recipient's public key, so the server only ever
- * relays ciphertext.
+ * Every device of a Jukebox account has two key pairs (X25519 to encrypt,
+ * Ed25519 to sign; private keys in the Keychain) and is registered on the
+ * account (`PUT /cache/devices/self`). Devices talk with typed messages in the
+ * I.6 envelope (DeviceCrypto): on the local network first (the envelope POSTed
+ * to the device's LAN port, 300 ms; this phone serves one while open), else
+ * through the server's relay (`POST /cache/relay/to/<id>`). Anything carrying
+ * a credential is HPKE-sealed to the recipient; everything is signed, and
+ * checked against the sender's registered key.
  *
  * - Spotify and SoundCloud: the session itself is shared (`session.request` /
  *   `session.offer`); the account's sealed /service copy stays the fallback.
@@ -20,68 +22,27 @@ import Network
  *   is away. The role moves to the device in use (`ytm.handover`: sealed to
  *   the target, the old holder deletes its cookies first, the target imports,
  *   refreshes, takes prefs.ytmHolder and acks).
- *
- * Wire formats (for every app):
- * - Sealed: base64( epk[32] | nonce[12] | ciphertext | tag[16] ), AES-256-GCM
- *   with key = HKDF-SHA256(ikm: X25519(ephemeral, recipient), salt: epk |
- *   recipient public key, info: "jukebox sealed v1", 32 bytes).
- * - Local route: POST http://<lan.addr>:<lan.port>/jukebox/v1/msg with JSON
- *   {from, ts, msg, mac}: msg = the JSON text of {type, payload}, ts = epoch
- *   seconds, mac = base64 HMAC-SHA256(key, "<ts>\n<from>\n<msg>") with key =
- *   HKDF-SHA256(ikm: X25519(sender, receiver), salt: empty, info: "jukebox lan
- *   v1", 32 bytes). Accepted within 120 s of `ts`, only from registered devices.
  */
 enum DeviceKeys {
-    private static let item = "device.x25519"
+    private static let encItem = "device.x25519"
+    private static let signItem = "device.ed25519"
 
-    static let privateKey: Curve25519.KeyAgreement.PrivateKey = {
-        if let raw = Keychain.get(item), let key = try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: raw) { return key }
+    static let encryption: Curve25519.KeyAgreement.PrivateKey = {
+        if let raw = Keychain.get(encItem), let key = try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: raw) { return key }
         let key = Curve25519.KeyAgreement.PrivateKey()
-        Keychain.set(key.rawRepresentation, item)
+        Keychain.set(key.rawRepresentation, encItem)
         return key
     }()
 
-    static var publicKey: String { privateKey.publicKey.rawRepresentation.base64EncodedString() }
+    static let signing: Curve25519.Signing.PrivateKey = {
+        if let raw = Keychain.get(signItem), let key = try? Curve25519.Signing.PrivateKey(rawRepresentation: raw) { return key }
+        let key = Curve25519.Signing.PrivateKey()
+        Keychain.set(key.rawRepresentation, signItem)
+        return key
+    }()
 
-    private static func peerKey(_ b64: String) -> Curve25519.KeyAgreement.PublicKey? {
-        let clean = b64.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
-        let padded = clean + String(repeating: "=", count: (4 - clean.count % 4) % 4)
-        guard let raw = Data(base64Encoded: padded) else { return nil }
-        return try? Curve25519.KeyAgreement.PublicKey(rawRepresentation: raw)
-    }
-
-    /** Seal bytes to a device's public key; nil when the key is unusable. */
-    static func seal(_ plain: Data, to recipient: String) -> String? {
-        guard let rpk = peerKey(recipient) else { return nil }
-        let eph = Curve25519.KeyAgreement.PrivateKey()
-        guard let shared = try? eph.sharedSecretFromKeyAgreement(with: rpk) else { return nil }
-        let epk = eph.publicKey.rawRepresentation
-        let key = shared.hkdfDerivedSymmetricKey(using: SHA256.self, salt: epk + rpk.rawRepresentation,
-                                                 sharedInfo: Data("jukebox sealed v1".utf8), outputByteCount: 32)
-        guard let box = try? AES.GCM.seal(plain, using: key), let combined = box.combined else { return nil }
-        return (epk + combined).base64EncodedString()
-    }
-
-    /** Open something sealed to this device; nil when it isn't ours or was altered. */
-    static func open(_ sealed: String) -> Data? {
-        guard let raw = Data(base64Encoded: sealed), raw.count > 32 + 12 + 16,
-              let epk = try? Curve25519.KeyAgreement.PublicKey(rawRepresentation: raw.prefix(32)),
-              let shared = try? privateKey.sharedSecretFromKeyAgreement(with: epk) else { return nil }
-        let key = shared.hkdfDerivedSymmetricKey(using: SHA256.self, salt: raw.prefix(32) + privateKey.publicKey.rawRepresentation,
-                                                 sharedInfo: Data("jukebox sealed v1".utf8), outputByteCount: 32)
-        guard let box = try? AES.GCM.SealedBox(combined: raw.dropFirst(32)) else { return nil }
-        return try? AES.GCM.open(box, using: key)
-    }
-
-    /** The local route's MAC key with one other device. */
-    static func lanKey(_ peer: String) -> SymmetricKey? {
-        guard let pk = peerKey(peer), let shared = try? privateKey.sharedSecretFromKeyAgreement(with: pk) else { return nil }
-        return shared.hkdfDerivedSymmetricKey(using: SHA256.self, salt: Data(), sharedInfo: Data("jukebox lan v1".utf8), outputByteCount: 32)
-    }
-
-    static func mac(_ key: SymmetricKey, ts: Int, from: String, msg: String) -> String {
-        Data(HMAC<SHA256>.authenticationCode(for: Data("\(ts)\n\(from)\n\(msg)".utf8), using: key)).base64EncodedString()
-    }
+    static var publicKey: String { DeviceCrypto.b64url(encryption.publicKey.rawRepresentation) }
+    static var signKey: String { DeviceCrypto.b64url(signing.publicKey.rawRepresentation) }
 }
 
 /** Another device of the account, as the registry lists it. */
@@ -90,6 +51,7 @@ struct PeerDevice: Equatable {
     var name = ""
     var kind = ""
     var publicKey = ""
+    var signKey = ""
     var spotify = false
     var soundcloud = false
     var ytmHolder = false
@@ -97,15 +59,29 @@ struct PeerDevice: Equatable {
     var lanPort = 0
     var online = false
     var lastSeen: Date?
+    var activeAt: Date?
+    var network = ""
 
     static func from(_ o: JSON) -> PeerDevice {
         let s = o.obj("services") ?? [:]
         let lan = o.obj("lan")
         return PeerDevice(id: o.str("deviceId"), name: o.str("name"), kind: o.str("kind"), publicKey: o.str("publicKey"),
-                          spotify: s.bool("spotify"), soundcloud: s.bool("soundcloud"), ytmHolder: s.str("ytm") == "holder",
-                          lanAddr: lan?.str("addr") ?? "", lanPort: lan?.int("port") ?? 0, online: o.bool("online"),
-                          lastSeen: ISO8601DateFormatter.flexible(o.str("lastSeen")))
+                          signKey: o.str("signKey"), spotify: s.bool("spotify"), soundcloud: s.bool("soundcloud"),
+                          ytmHolder: s.str("ytm") == "holder", lanAddr: lan?.str("addr") ?? "", lanPort: lan?.int("port") ?? 0,
+                          online: o.bool("online"), lastSeen: ISO8601DateFormatter.flexible(o.str("lastSeen")),
+                          activeAt: ISO8601DateFormatter.flexible(o.str("activeAt")), network: o.str("network"))
     }
+
+    var encKey: Curve25519.KeyAgreement.PublicKey? {
+        DeviceCrypto.unb64(publicKey).flatMap { try? Curve25519.KeyAgreement.PublicKey(rawRepresentation: $0) }
+    }
+
+    var verifyKey: Curve25519.Signing.PublicKey? {
+        DeviceCrypto.unb64(signKey).flatMap { try? Curve25519.Signing.PublicKey(rawRepresentation: $0) }
+    }
+
+    /** Can be written to: both keys registered. */
+    var reachable: Bool { encKey != nil && verifyKey != nil }
 }
 
 /** What the view model gives the link. */
@@ -131,14 +107,21 @@ final class DeviceLink {
     /** This phone's relay id and the name it shows. */
     var deviceId = ""
     var deviceName = ""
+    /** A person is using this phone now (I.5: `active` in the registry). */
+    var active = true
 
     private(set) var peers: [PeerDevice] = []
+    /** The device playing on the shared player, as the registry says. */
+    private(set) var playerDevice = ""
+    /** This phone's network tag (same tag = same network). */
+    private(set) var network = ""
     /** prefs.ytmHolder as last read: the one device holding YouTube Music. */
     private(set) var holder = ""
-    /** Where each service comes from: "spotify", "soundcloud" -> "here" | "peer:<name>" | "account". */
+    /** Where each service comes from: "spotify", "soundcloud" -> "here" | "peer:<name>" | "account" | "". */
     private(set) var sources: [String: String] = [:]
 
     private var waiting: [String: CheckedContinuation<JSON?, Never>] = [:]
+    private var seenIds: [String] = []
     private var lan: LanServer?
 
     var amHolder: Bool { !holder.isEmpty && holder == deviceId && YtmDevice.shared.signedIn }
@@ -146,25 +129,32 @@ final class DeviceLink {
 
     // -- the registry ---------------------------------------------------------
 
-    /** This device on the account: its key, what it holds, its local route. */
+    /** This device on the account: its keys, what it holds, its local route. */
     func register() async {
         guard let client, !deviceId.isEmpty else { return }
         var body: JSON = [
             "deviceId": deviceId, "name": deviceName, "kind": "phone",
-            "appVersion": SettingsPage.version, "publicKey": DeviceKeys.publicKey,
+            "appVersion": SettingsPage.version, "publicKey": DeviceKeys.publicKey, "signKey": DeviceKeys.signKey,
             "services": [
                 "spotify": ServiceSessions.shared.session(ServiceSessions.librespot) != nil,
                 "soundcloud": ServiceSessions.shared.session(ServiceSessions.soundcloud) != nil,
                 "ytm": amHolder ? "holder" : "none",
             ] as JSON,
+            "active": active,
         ]
-        if let lan, let addr = LanServer.wifiAddress(), lan.port > 0 { body["lan"] = ["addr": addr, "port": lan.port] as JSON }
+        if let lan, let addr = LanServer.wifiAddress(), lan.port > 0 {
+            body["lan"] = ["addr": addr, "port": lan.port] as JSON
+        } else {
+            body["lan"] = NSNull()
+        }
         _ = await client.registerDevice(body)
     }
 
     func refreshPeers() async {
-        guard let list = await client?.devices() else { return }
-        peers = list.map(PeerDevice.from).filter { $0.id != deviceId }
+        guard let doc = await client?.devicesDoc() else { return }
+        peers = ((doc.arr("devices") ?? []).compactMap { $0 as? JSON }).map(PeerDevice.from).filter { $0.id != deviceId }
+        playerDevice = doc.obj("player")?.str("device") ?? ""
+        network = doc.str("network")
     }
 
     /** prefs.ytmHolder changed (or was read): only one device may hold Google cookies. */
@@ -187,9 +177,7 @@ final class DeviceLink {
     /** Serve the local route while the app is open. */
     func startLan() {
         guard lan == nil else { return }
-        let server = LanServer { [weak self] from, ts, msg, mac in
-            self?.acceptLan(from: from, ts: ts, msg: msg, mac: mac) ?? false
-        }
+        let server = LanServer { [weak self] env in self?.acceptLan(env) ?? false }
         lan = server
         server.onReady = { [weak self] in Task { await self?.register() } }
         server.start()
@@ -201,41 +189,53 @@ final class DeviceLink {
         Task { await register() }
     }
 
-    private func acceptLan(from: String, ts: Int, msg: String, mac: String) -> Bool {
-        guard abs(Int(Date().timeIntervalSince1970) - ts) < 120,
-              let peer = peers.first(where: { $0.id == from }), let key = DeviceKeys.lanKey(peer.publicKey),
-              DeviceKeys.mac(key, ts: ts, from: from, msg: msg) == mac,
-              let m = JSONText.object(msg) else { return false }
-        var full = m
-        full["from"] = from
-        handle(full)
+    /** An envelope from the local route: only for this phone, signed by a registered device. */
+    private func acceptLan(_ env: JSON) -> Bool {
+        let from = env.str("from")
+        guard env.str("to") == deviceId, peers.contains(where: { $0.id == from }) else { return false }
+        handle(["type": env.str("type"), "from": from, "payload": env])
         return true
     }
 
     // -- sending -------------------------------------------------------------------
 
-    /** A message to one device: the local network first, the relay else. */
+    /**
+     * A message to one device in the I.6 envelope: sealed when it carries a
+     * credential, signed always. The local network first, the relay else.
+     */
     @discardableResult
-    func send(_ type: String, _ payload: JSON, to peer: PeerDevice) async -> Bool {
-        if !peer.lanAddr.isEmpty && peer.lanPort > 0, let key = DeviceKeys.lanKey(peer.publicKey),
-           let url = URL(string: "http://\(peer.lanAddr):\(peer.lanPort)/jukebox/v1/msg") {
-            let msg = JSONText.string(["type": type, "payload": payload] as JSON)
-            let ts = Int(Date().timeIntervalSince1970)
+    func send(_ type: String, _ body: JSON, to peer: PeerDevice, sealed: Bool = false) async -> Bool {
+        let msgId = UUID().uuidString.lowercased()
+        let env: [String: Any]
+        do {
+            if sealed {
+                guard let key = peer.encKey else { return false }
+                env = try DeviceCrypto.seal(JSONText.data(body), type: type, msgId: msgId, from: deviceId, to: peer.id,
+                                            recipient: key, signer: DeviceKeys.signing)
+            } else {
+                env = try DeviceCrypto.signed(JSONText.string(body), type: type, msgId: msgId, from: deviceId, to: peer.id,
+                                              signer: DeviceKeys.signing)
+            }
+        } catch {
+            ConsoleLog.shared.log("DeviceLink", "couldn't seal \(type) for \(peer.name)")
+            return false
+        }
+        if !peer.lanAddr.isEmpty && peer.lanPort > 0, let url = URL(string: "http://\(peer.lanAddr):\(peer.lanPort)/jukebox/v1/msg") {
             var req = URLRequest(url: url, timeoutInterval: 0.3)
             req.httpMethod = "POST"
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            req.httpBody = JSONText.data(["from": deviceId, "ts": ts, "msg": msg, "mac": DeviceKeys.mac(key, ts: ts, from: deviceId, msg: msg)] as JSON)
+            req.httpBody = JSONText.data(env)
             if let (_, resp) = try? await URLSession.shared.data(for: req), (resp as? HTTPURLResponse)?.statusCode == 200 { return true }
         }
-        return await client?.relayTo(peer.id, type: type, payload: payload, from: deviceId) ?? false
+        return await client?.relayTo(peer.id, envelope: env) ?? false
     }
 
     /** Send and wait for the answer that names the same reqId (up to `wait` seconds). */
-    private func ask(_ type: String, _ payload: JSON, to peer: PeerDevice, wait: Double) async -> JSON? {
+    private func ask(_ type: String, _ body: JSON, to peer: PeerDevice, wait: Double) async -> JSON? {
         let reqId = UUID().uuidString.lowercased()
-        var body = payload
-        body["reqId"] = reqId
-        guard await send(type, body, to: peer) else { return nil }
+        var b = body
+        b["reqId"] = reqId
+        guard await send(type, b, to: peer) else { return nil }
         return await withCheckedContinuation { (k: CheckedContinuation<JSON?, Never>) in
             waiting[reqId] = k
             Task { @MainActor [weak self] in
@@ -257,7 +257,7 @@ final class DeviceLink {
         var got = false
         for service in ["spotify", "soundcloud"] {
             guard let slot = Self.slot(service), ServiceSessions.shared.session(slot) == nil else { continue }
-            let holders = peers.filter { $0.online && !$0.publicKey.isEmpty && (service == "spotify" ? $0.spotify : $0.soundcloud) }
+            let holders = peers.filter { $0.online && $0.reachable && (service == "spotify" ? $0.spotify : $0.soundcloud) }
             for peer in holders {
                 if let offer = await ask("session.request", ["service": service], to: peer, wait: 4), acceptOffer(offer, from: peer) {
                     got = true
@@ -270,9 +270,9 @@ final class DeviceLink {
         return got
     }
 
+    /** A session.offer's plaintext {service, payload}: kept here as that device's. */
     private func acceptOffer(_ p: JSON, from peer: PeerDevice) -> Bool {
-        guard let slot = Self.slot(p.str("service")), let plain = DeviceKeys.open(p.str("sealed")),
-              let payload = JSONText.parse(plain) as? JSON else { return false }
+        guard let slot = Self.slot(p.str("service")), let payload = p.obj("payload") else { return false }
         ServiceSessions.shared.adopt(slot, payload, from: peer.name)
         ConsoleLog.shared.log("DeviceLink", "\(p.str("service")) session received from \(peer.name)")
         return true
@@ -288,47 +288,58 @@ final class DeviceLink {
 
     // -- incoming messages -----------------------------------------------------------
 
-    /** Every direct message, from the relay or the local route ({type, payload, from}). */
+    /**
+     * Every direct message, from the relay ({type, payload: envelope, from,
+     * sentAt}) or the local route. Envelopes are verified against the
+     * sender's registered signing key and opened; only the server's own
+     * notices (devices.changed, ytm.holder, ytm.pending) come plain.
+     */
     func handle(_ msg: JSON) {
         let type = msg.str("type").ifEmpty(msg.str("action"))
-        let p = msg.obj("payload") ?? [:]
         let from = msg.str("from")
-        // An answer someone is waiting for.
-        let reqId = p.str("reqId")
-        if (type == "session.offer" || type == "ytm.result"), !reqId.isEmpty, let k = waiting.removeValue(forKey: reqId) {
-            k.resume(returning: p)
-            return
-        }
+        let sentAt = ISO8601DateFormatter.flexible(msg.str("sentAt"))
         Task {
-            if peers.first(where: { $0.id == from }) == nil { await refreshPeers() }
-            let peer = peers.first { $0.id == from }
-            switch type {
-            case "session.request":
-                if let peer { await answerSessionRequest(p, to: peer) }
-            case "session.offer":
-                if let peer, acceptOffer(p, from: peer) { updateSources(); host?.linkChanged() }
-            case "ytm.request":
-                if let peer { await answerYtmRequest(p, to: peer) }
-            case "ytm.pending":
-                if amHolder { await applyPending() }
-            case "ytm.handover":
-                if let peer { await takeHandover(p, from: peer) }
-            case "ytm.handover.ack":
-                ConsoleLog.shared.log("DeviceLink", "YouTube Music moved to \(peer?.name ?? from)")
-            case "devices.changed", "ytm.holder":
+            if ["devices.changed", "ytm.holder", "ytm.pending"].contains(type) {
                 await refreshPeers()
+                if type == "ytm.pending" && amHolder { await applyPending() }
                 host?.linkChanged()
-            default:
-                break
+                return
+            }
+            guard let env = msg.obj("payload"), env["v"] != nil else { return }
+            // Older than 5 minutes, or seen before: dropped.
+            if let sentAt, Date().timeIntervalSince(sentAt) > 300 { return }
+            let msgId = env.str("msgId")
+            guard !msgId.isEmpty, !seenIds.contains(msgId) else { return }
+            seenIds.append(msgId)
+            if seenIds.count > 500 { seenIds.removeFirst(100) }
+            if peers.first(where: { $0.id == from }) == nil { await refreshPeers() }
+            guard let peer = peers.first(where: { $0.id == from }), let verify = peer.verifyKey,
+                  let plain = try? DeviceCrypto.open(env, me: deviceId, recipient: DeviceKeys.encryption, senderSignKey: verify),
+                  let body = JSONText.parse(plain) as? JSON else {
+                ConsoleLog.shared.log("DeviceLink", "dropped a \(type) from \(from): not verified")
+                return
+            }
+            // An answer someone is waiting for.
+            let reqId = body.str("reqId")
+            if (type == "session.offer" || type == "ytm.result"), !reqId.isEmpty, let k = waiting.removeValue(forKey: reqId) {
+                k.resume(returning: body)
+                return
+            }
+            switch type {
+            case "session.request": await answerSessionRequest(body, to: peer)
+            case "session.offer": if acceptOffer(body, from: peer) { updateSources(); host?.linkChanged() }
+            case "ytm.request": await answerYtmRequest(body, to: peer)
+            case "ytm.handover": await takeHandover(body, from: peer)
+            case "ytm.handover.ack": ConsoleLog.shared.log("DeviceLink", "YouTube Music moved to \(peer.name)")
+            default: break
             }
         }
     }
 
     private func answerSessionRequest(_ p: JSON, to peer: PeerDevice) async {
         let service = p.str("service")
-        guard let slot = Self.slot(service), let session = ServiceSessions.shared.session(slot),
-              let sealed = DeviceKeys.seal(JSONText.data(session), to: peer.publicKey) else { return }
-        await send("session.offer", ["service": service, "sealed": sealed, "reqId": p.str("reqId")], to: peer)
+        guard let slot = Self.slot(service), let session = ServiceSessions.shared.session(slot) else { return }
+        await send("session.offer", ["service": service, "payload": session, "reqId": p.str("reqId")], to: peer, sealed: true)
         ConsoleLog.shared.log("DeviceLink", "\(service) session offered to \(peer.name)")
     }
 
@@ -340,7 +351,7 @@ final class DeviceLink {
      * or said no: the caller goes on anonymously.
      */
     func borrow(_ endpoint: String, _ body: JSON) async -> JSON? {
-        guard !amHolder, let peer = holderPeer, peer.online, !peer.publicKey.isEmpty else { return nil }
+        guard !amHolder, let peer = holderPeer, peer.online, peer.reachable else { return nil }
         guard let answer = await ask("ytm.request", ["op": "call", "args": ["endpoint": endpoint, "body": body] as JSON], to: peer, wait: 8),
               answer.bool("ok") else { return nil }
         return answer.obj("data")
@@ -352,7 +363,7 @@ final class DeviceLink {
      */
     func ytmWrite(_ op: String, _ args: JSON) async -> Bool {
         if amHolder { return (try? await Self.perform(op, args)) != nil }
-        if let peer = holderPeer, peer.online,
+        if let peer = holderPeer, peer.online, peer.reachable,
            let answer = await ask("ytm.request", ["op": op, "args": args], to: peer, wait: 8), answer.bool("ok") { return true }
         return await client?.addPending(op, args, from: deviceId) ?? false
     }
@@ -386,7 +397,8 @@ final class DeviceLink {
         case "call":
             return try await yt.call(a.str("endpoint"), a.obj("body") ?? [:], signed: true)
         case "like":
-            return try await yt.call("like/like", ["target": ["videoId": a.str("videoId")]], signed: true)
+            let liked = a["liked"] as? Bool ?? true
+            return try await yt.call(liked ? "like/like" : "like/removelike", ["target": ["videoId": a.str("videoId")]], signed: true)
         case "unlike":
             return try await yt.call("like/removelike", ["target": ["videoId": a.str("videoId")]], signed: true)
         case "playlist.add":
@@ -422,11 +434,17 @@ final class DeviceLink {
 
     // -- the holder moves with you (I.5) -------------------------------------------------
 
-    /** Where the role goes: the device playing on the shared player, else the most recently active one. */
+    /**
+     * Where the role goes: the device playing on the shared player, else the
+     * most recently used one; the same network first.
+     */
     private func handoverTarget() -> PeerDevice? {
-        let usable = peers.filter { !$0.publicKey.isEmpty && $0.online }
-        if let playing = host?.linkPlayingDevice, let p = usable.first(where: { $0.id == playing }) { return p }
-        return usable.max { ($0.lastSeen ?? .distantPast) < ($1.lastSeen ?? .distantPast) }
+        let usable = peers.filter { $0.reachable && $0.online }
+        let playing = playerDevice.ifEmpty(host?.linkPlayingDevice ?? "")
+        if let p = usable.first(where: { $0.id == playing }) { return p }
+        let sameNet = usable.filter { !network.isEmpty && $0.network == network }
+        let pool = sameNet.isEmpty ? usable : sameNet
+        return pool.max { ($0.activeAt ?? $0.lastSeen ?? .distantPast) < ($1.activeAt ?? $1.lastSeen ?? .distantPast) }
     }
 
     /**
@@ -438,22 +456,25 @@ final class DeviceLink {
         guard amHolder else { return }
         await refreshPeers()
         guard let target = handoverTarget() else { return }
-        let rows = await YtmDevice.shared.exportCookies()
-        guard !rows.isEmpty, let sealed = DeviceKeys.seal(JSONText.data(rows), to: target.publicKey) else { return }
+        let cookies = await YtmDevice.shared.exportNetscape()
+        guard !cookies.isEmpty else { return }
+        if target.network != network { ConsoleLog.shared.log("DeviceLink", "moving YouTube Music to \(target.name) on another network") }
+        let body: JSON = ["cookies": cookies, "userAgent": YtmDevice.shared.userAgent, "at": ISO8601DateFormatter().string(from: Date())]
         await YtmDevice.shared.signOut()
-        if await send("ytm.handover", ["sealed": sealed, "reason": reason], to: target) {
+        if await send("ytm.handover", body, to: target, sealed: true) {
             ConsoleLog.shared.log("DeviceLink", "YouTube Music handed to \(target.name) (\(reason))")
             host?.linkChanged()
         } else {
-            await YtmDevice.shared.importCookies(rows)
+            await YtmDevice.shared.importNetscape(cookies, userAgent: YtmDevice.shared.userAgent)
             ConsoleLog.shared.log("DeviceLink", "YouTube Music hand-over to \(target.name) failed; kept here")
         }
     }
 
-    /** The role arrives here: import, refresh once, take prefs.ytmHolder, ack. */
+    /** The role arrives here ({cookies, userAgent, at}): import, refresh once, take prefs.ytmHolder, ack. */
     private func takeHandover(_ p: JSON, from peer: PeerDevice) async {
-        guard let plain = DeviceKeys.open(p.str("sealed")), let rows = JSONText.parse(plain) as? [JSON] else { return }
-        await YtmDevice.shared.importCookies(rows)
+        let cookies = p.str("cookies")
+        guard !cookies.isEmpty else { return }
+        await YtmDevice.shared.importNetscape(cookies, userAgent: p.str("userAgent"))
         await YtmDevice.shared.signedInNow()
         holder = deviceId
         await host?.linkSetHolder(deviceId)
@@ -470,10 +491,10 @@ final class DeviceLink {
 
 /**
  * The local route's listener: a tiny HTTP server on the Wi-Fi interface while
- * the app is open, taking one signed POST per connection.
+ * the app is open, taking one envelope (POST /jukebox/v1/msg) per connection.
  */
 final class LanServer: @unchecked Sendable {
-    typealias Accept = @MainActor (_ from: String, _ ts: Int, _ msg: String, _ mac: String) -> Bool
+    typealias Accept = @MainActor (_ envelope: JSON) -> Bool
 
     private var listener: NWListener?
     private let accept: Accept
@@ -539,7 +560,7 @@ final class LanServer: @unchecked Sendable {
         let o = JSONText.parse(body) as? JSON ?? [:]
         let accept = self.accept
         Task { @MainActor in
-            let ok = accept(o.str("from"), o.int("ts"), o.str("msg"), o.str("mac"))
+            let ok = accept(o)
             let text = ok ? "{\"ok\":true}" : "{\"ok\":false}"
             let reply = "HTTP/1.1 \(ok ? "200 OK" : "403 Forbidden")\r\nContent-Type: application/json\r\nContent-Length: \(text.utf8.count)\r\nConnection: close\r\n\r\n\(text)"
             c.send(content: Data(reply.utf8), completion: .contentProcessed { _ in c.cancel() })

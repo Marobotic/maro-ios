@@ -56,7 +56,13 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     }
 
     /** Lyrics for the song on screen (this phone's, or the desktop's when it is the remote). */
-    @Published private(set) var lyrics = SongLyrics()
+    @Published private(set) var lyrics = SongLyrics() {
+        // Round 2 L: no lyrics once the lookup is done (or nothing playing) hides the Lyrics tab.
+        didSet {
+            let none = !lyrics.loading && lyrics.lines.isEmpty
+            if state.noLyrics != none { state.noLyrics = none }
+        }
+    }
 
     /** The playhead, apart from [state]: only the seek row and lyrics read it. */
     @Published private(set) var progress = Progress()
@@ -265,6 +271,10 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         if old.library != state.library { loadKeptCounts(state.library) }
         // A service signed in from "How do you want to listen?": into the app.
         if (state.listenGate == "pick" || (state.listenGate == "checking" && !state.unreachableServices.isEmpty)) && !state.services.isEmpty { setGate("in") }
+        // Round 2 L: never left on a hidden tab - an empty queue or no lyrics lands on Library.
+        if (state.view == Sync.viewQueue && state.displayState().queue.isEmpty) || (state.view == Sync.viewLyrics && state.noLyrics) {
+            state.view = Sync.viewPlaylists
+        }
     }
 
     private func prefetchLibraryArt(_ rows: [LibraryRow]) {
@@ -4152,6 +4162,7 @@ extension MaroViewModel: DeviceLinkHost {
     /** The app came to the front or went away (scene phase). */
     func appActive(_ active: Bool) {
         let link = DeviceLink.shared
+        link.active = active
         if active {
             backgroundedAt = nil
             if state.signedIn { link.startLan() }

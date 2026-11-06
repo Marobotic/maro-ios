@@ -280,6 +280,8 @@ struct UiState: Equatable {
     var accountSources: [String: String] = [:]
     /** Services only an unreachable device has (no account copy): "spotify", "sc". */
     var unreachableServices: [String] = []
+    /** No lyrics for the song (lookup done) or nothing playing: the Lyrics tab hides (round 2 L). */
+    var noLyrics = true
     var email = ""
     var selectedAccount = "maro"
     var busy = false

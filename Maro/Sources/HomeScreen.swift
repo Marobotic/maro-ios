@@ -305,7 +305,13 @@ private struct TabsRow: View {
     @Namespace private var pill
 
     var body: some View {
-        let shownTabs = wide ? tabs.filter { $0.key != Sync.viewQueue } : tabs
+        // Round 2 L: an empty queue hides Queue, no lyrics hides Lyrics; both come back by themselves.
+        let emptyQueue = state.displayState().queue.isEmpty
+        let shownTabs = tabs.filter { tab in
+            if tab.key == Sync.viewQueue { return !wide && !emptyQueue }
+            if tab.key == Sync.viewLyrics { return !state.noLyrics }
+            return true
+        }
         let selected = wide && state.view == Sync.viewQueue ? Sync.viewLyrics : state.view
         ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
@@ -331,6 +337,7 @@ private struct TabsRow: View {
                         .id(tab.key)
                     }
                 }
+                .animation(.easeOut(duration: 0.2), value: shownTabs.map { $0.key })
             }
             .onAppear { proxy.scrollTo(selected) }
             .onChange(of: selected) { withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo(selected) } }

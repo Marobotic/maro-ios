@@ -474,15 +474,15 @@ final class MaroClient: @unchecked Sendable {
         return (200..<300).contains(got.code)
     }
 
-    /** Every device of the account, or nil when the server can't say. */
-    func devices() async -> [JSON]? {
+    /** GET /devices: {devices:[...], player:{device, playing}, network}, or nil when the server can't say. */
+    func devicesDoc() async -> JSON? {
         guard let got = await answer("GET", "/devices", timeout: 15), (200..<300).contains(got.code) else { return nil }
-        return (got.body.arr("devices") ?? []).compactMap { $0 as? JSON }
+        return got.body
     }
 
-    /** A typed message straight to one device's relay queue. */
-    func relayTo(_ deviceId: String, type: String, payload: JSON, from: String) async -> Bool {
-        guard let got = await answer("POST", "/relay/to/" + Self.escape(deviceId), body: ["type": type, "payload": payload, "from": from], timeout: 15) else { return false }
+    /** An I.6 envelope straight to one device's relay queue (the server reads only type and from). */
+    func relayTo(_ deviceId: String, envelope: JSON) async -> Bool {
+        guard let got = await answer("POST", "/relay/to/" + Self.escape(deviceId), body: envelope, timeout: 15) else { return false }
         return (200..<300).contains(got.code) && (got.body["ok"] as? Bool) != false
     }
 

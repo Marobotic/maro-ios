@@ -500,14 +500,20 @@ final class PageStore: ObservableObject {
         Task {
             var query = ["name": name]
             if !id.isEmpty { query["id"] = id }
-            if let got = await Self.client?.find("artist", query) {
+            if var got = await Self.client?.find("artist", query) {
+                // restart: only the top songs so far; the real list starts at next=0.
+                if got.bool("restart") {
+                    var again = query
+                    again["next"] = "0"
+                    if let real = await Self.client?.find("artist", again), !(real.arr("songs") ?? []).isEmpty { got = real }
+                }
                 let songs = Sync.tracks(got.arr("songs"))
                 if !songs.isEmpty {
                     songsLoading.remove(key)
                     allSongs[key] = songs
                     songTotal[key] = max(got.int("total", songs.count), songs.count)
                     let next = got.str("next")
-                    if !got.bool("complete", next.isEmpty) && !next.isEmpty { songsNext[key] = next }
+                    if !next.isEmpty { songsNext[key] = next }     // more pages, or still gathering
                     return
                 }
             }

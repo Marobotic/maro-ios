@@ -53,3 +53,29 @@ targets:
         UIAppFonts:
           - jetbrainsmono_nerd_regular.ttf
           - jetbrainsmono_nerd_bold.ttf
+  # Round 2 I.6: the device-to-device crypto, alone, against the shared interop
+  # vector (design/round2-hpke-vector.json). macOS, so no simulator is needed.
+  MaroCryptoTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: Maro/Sources/DeviceCrypto.swift
+      - path: MaroTests
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: dev.marobotic.maro.cryptotests
+        CODE_SIGN_IDENTITY: "-"
+schemes:
+  Maro:
+    build:
+      targets:
+        Maro: all
+  MaroCryptoTests:
+    build:
+      targets:
+        MaroCryptoTests: [test]
+    test:
+      targets:
+        - MaroCryptoTests
