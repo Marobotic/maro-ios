@@ -126,6 +126,13 @@ actor YouTubeDirect {
                 if let length = groups.last?.joined().trimmingCharacters(in: .whitespaces), length.contains(":") {
                     t.duration = length.split(separator: ":").reduce(0) { $0 * 60 + (Double($1) ?? 0) }
                 }
+                // The artist's and the album's pages, when the runs link them.
+                let metaRuns = ((r["flexColumns"] as? [JSON])?[safe: 1]?.obj("musicResponsiveListItemFlexColumnRenderer")?.obj("text")?["runs"] as? [JSON]) ?? []
+                for run in metaRuns {
+                    let id = run.obj("navigationEndpoint")?.obj("browseEndpoint")?.str("browseId") ?? ""
+                    if id.hasPrefix("UC") && t.artistId.isEmpty { t.artistId = id }
+                    if id.hasPrefix("MPRE") && t.albumId.isEmpty { t.albumId = id }
+                }
                 let thumbs = (r.obj("thumbnail")?.obj("musicThumbnailRenderer")?.obj("thumbnail")?["thumbnails"] as? [JSON]) ?? []
                 t.artUrl = thumbs.last?.str("url") ?? ""
                 out.append(t)

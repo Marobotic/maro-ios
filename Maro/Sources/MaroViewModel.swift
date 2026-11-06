@@ -3198,8 +3198,107 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     // -- view ---------------------------------------------------------------
 
     func selectTab(_ key: String) {
-        state.view = key
+        var s = state
+        s.view = key
+        s.pages = []
+        state = s
         if key == Sync.viewDiscover { loadDiscover() }
+    }
+
+    // -- artist and album pages ---------------------------------------------
+
+    func openArtist(_ name: String, id: String = "", art: String = "") {
+        let name = name.trimmingCharacters(in: .whitespaces)
+        if name.isEmpty && id.isEmpty { return }
+        // Already on it (a song on this artist's own page).
+        if case .artist(let n, let i, _)? = state.pages.last,
+           (!id.isEmpty && i == id) || (!name.isEmpty && YTMParse.fold(n) == YTMParse.fold(name)) { return }
+        push(.artist(name: name, id: id, art: art))
+    }
+
+    func openAlbum(_ name: String, id: String = "", art: String = "", artist: String = "") {
+        let name = name.trimmingCharacters(in: .whitespaces)
+        if name.isEmpty && id.isEmpty { return }
+        if case .album(let n, let i, _, _)? = state.pages.last, (!id.isEmpty && i == id) || (id.isEmpty && n == name) { return }
+        push(.album(name: name, id: id, art: art, artist: artist))
+    }
+
+    func openAlbum(of t: Track) {
+        openAlbum(t.album, id: t.albumId, art: t.artUrl, artist: t.artistNames.first ?? "")
+    }
+
+    func openReleases(_ title: String, artist: String, ref: BrowseRef) {
+        push(.releases(title: title, artist: artist, ref: ref))
+    }
+
+    func pageBack() {
+        if !state.pages.isEmpty { state.pages.removeLast() }
+    }
+
+    private func push(_ page: DetailPage) {
+        if state.pages.last == page { return }
+        PageStore.shared.load(page)
+        var s = state
+        s.pages.append(page)
+        if s.pages.count > 40 { s.pages.removeFirst() }
+        s.settingsOpen = false
+        state = s
+    }
+
+    /** What this phone already holds of an artist or an album: the page when YouTube Music cannot be reached. */
+    func knownTracks(artist: String = "", album: String = "") -> [Track] {
+        let s = state
+        let pool = likedTracks + s.recent + s.songs + s.localQueue + s.queue + s.playlistTracks + s.searchResults + s.discoverTracks
+        let a = YTMParse.fold(artist), b = YTMParse.fold(album)
+        var seen = Set<String>(), out: [Track] = []
+        for t in pool where !t.id.isEmpty && !seen.contains(t.id) {
+            let match = !a.isEmpty ? t.artistNames.contains { YTMParse.fold($0) == a } : (!b.isEmpty && YTMParse.fold(t.album) == b)
+            if match {
+                seen.insert(t.id)
+                out.append(t)
+            }
+        }
+        return out
+    }
+
+    // -- launch route (testing) ---------------------------------------------
+
+    /**
+     * `-jbRoute <route>` at launch opens a screen: artist:<name>,
+     * album:<name>[|<artist>], search:<query>, settings, library,
+     * playlist:liked, tab:<key>. Only for looking at screens on a device.
+     */
+    private func applyLaunchRoute() {
+        let args = ProcessInfo.processInfo.arguments
+        guard let i = args.firstIndex(of: "-jbRoute"), i + 1 < args.count else { return }
+        let parts = args[i + 1].split(separator: ":", maxSplits: 1).map(String.init)
+        let kind = parts.first ?? "", value = parts.count > 1 ? parts[1] : ""
+        Task {
+            await sleep(seconds: 2)
+            switch kind {
+            case "artist": openArtist(value)
+            case "album":
+                let bits = value.components(separatedBy: "|")
+                openAlbum(bits[0], artist: bits.count > 1 ? bits[1] : "")
+            case "search":
+                selectTab(Sync.viewSearch)
+                setSearchText(value)
+            case "settings":
+                if !state.settingsOpen { toggleSettings() }
+            case "library": selectTab(Sync.viewPlaylists)
+            case "tab": selectTab(value)
+            case "playlist":
+                selectTab(Sync.viewPlaylists)
+                for _ in 0..<30 {
+                    if let row = state.library.first(where: { !$0.isHeader && ($0.source == value || $0.name == value) }) {
+                        openPlaylist(row)
+                        break
+                    }
+                    await sleep(seconds: 0.5)
+                }
+            default: break
+            }
+        }
     }
 
     func toggleStats() {

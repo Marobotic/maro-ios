@@ -51,7 +51,7 @@ actor YouTubeMusic {
         return ""
     }
 
-    private func call(_ endpoint: String, _ body: JSON, signed: Bool) async throws -> JSON {
+    func call(_ endpoint: String, _ body: JSON, signed: Bool) async throws -> JSON {
         var body = body
         let d = Calendar(identifier: .gregorian).dateComponents(in: TimeZone(identifier: "UTC")!, from: Date())
         let version = String(format: "1.%04d%02d%02d.01.00", d.year ?? 2026, d.month ?? 1, d.day ?? 1)

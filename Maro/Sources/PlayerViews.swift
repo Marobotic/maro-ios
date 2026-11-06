@@ -127,6 +127,7 @@ struct LiveBitrate: View {
 
 private struct FullPlayer: View {
     @Environment(\.openJam) private var openJam
+    @Environment(\.presentDialog) private var present
     let state: UiState
     @ObservedObject var vm: MaroViewModel
     let collapse: (() -> Void)?
@@ -146,7 +147,10 @@ private struct FullPlayer: View {
                         }
                     }
                     if let track, !track.artist.isEmpty {
+                        // The artist and the album open their pages.
                         OmpText(track.artist, size: 11, color: Omp.sourceColor(track.source))
+                            .contentShape(Rectangle())
+                            .onTapGesture { openArtists(of: track, vm: vm, present: present) }
                     }
                     if !state.loadingKey.isEmpty {
                         HStack(spacing: 5) {
@@ -155,7 +159,11 @@ private struct FullPlayer: View {
                         }
                     } else if let track {
                         HStack(spacing: 0) {
-                            if !track.album.isEmpty { OmpText(track.album, size: 10, color: Omp.t3) }
+                            if !track.album.isEmpty {
+                                OmpText(track.album, size: 10, color: Omp.t3)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture { vm.openAlbum(of: track) }
+                            }
                             LiveBitrate(state: state, vm: vm, separator: !track.album.isEmpty)
                         }
                     }
@@ -332,6 +340,11 @@ struct JamView: View {
                     OmpText(track?.title.ifBlank("Nothing playing") ?? "Nothing playing", size: titleSize, color: Omp.foreground, bold: true)
                     if let track, !track.artist.isEmpty {
                         OmpText(track.artist, size: 13, color: Color.mix(Omp.sourceColor(track.source), Omp.t2, 0.55))
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                close()
+                                vm.openArtist(track.artistNames.first ?? track.artist, id: track.artistId)
+                            }
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)

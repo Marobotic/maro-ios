@@ -97,6 +97,9 @@ struct Track: Equatable, Hashable {
     var duration: Double = 0
     var playedAt: Int64 = 0
     var viaYoutube = false
+    /** YouTube Music's ids for the artist (UC...) and the release (MPREb...), when the row carried them. */
+    var artistId = ""
+    var albumId = ""
 
     /** One song reaches the panel under several ids; all of them are this song. */
     var trackIds: [String] {
@@ -125,11 +128,20 @@ struct Track: Equatable, Hashable {
     }
 
     func toJSON() -> JSON {
-        [
+        var o: JSON = [
             "source": source, "id": id, "sourceId": sourceId, "videoId": videoId,
             "title": title, "artist": artist, "album": album, "art": artUrl,
             "duration": duration, "viaYoutube": viaYoutube,
         ]
+        if !artistId.isEmpty { o["artistId"] = artistId }
+        if !albumId.isEmpty { o["albumId"] = albumId }
+        return o
+    }
+
+    /** Each artist of "A, B & C" on its own. */
+    var artistNames: [String] {
+        artist.components(separatedBy: ", ").flatMap { $0.components(separatedBy: " & ") }
+            .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
     }
 
     static func from(_ o: JSON?) -> Track {
@@ -146,9 +158,18 @@ struct Track: Equatable, Hashable {
             artUrl: o.str("art").ifEmpty(o.str("artUrl")),
             duration: o.double("duration"),
             playedAt: o.int64("played_at"),
-            viaYoutube: o.bool("viaYoutube")
+            viaYoutube: o.bool("viaYoutube"),
+            artistId: o.str("artistId"),
+            albumId: o.str("albumId")
         )
     }
+}
+
+/** One service's line in Settings > Health. */
+struct HealthState: Equatable {
+    /** "yes", "no", "checking", "offline" or "off" (not signed in). */
+    var state = "off"
+    var why = ""
 }
 
 /** One row of the Playlists tab's library: a section header or a playlist. */
@@ -299,6 +320,15 @@ struct UiState: Equatable {
     var phoneMusicBytes: Int64 = 0
     var phoneMusicCount = 0
     var phoneCacheBytes: Int64 = 0
+    /** Songs this phone kept on its own as they played (not saved by you): count and size. */
+    var phoneKeptCount = 0
+    var phoneKeptBytes: Int64 = 0
+    /** "Limit for songs on disk" in GB; 0 is unlimited. */
+    var songsLimitGb = 0
+    var playlistCacheCount = 0
+    var artworkCount = 0
+    /** Settings > Health: per service ("maro", "spotify", "ytm", "sc") its state and why. */
+    var health: [String: HealthState] = [:]
     var artworkProgress: [String: Int] = [:]
 
     // Connectivity & offline behaviour
@@ -337,6 +367,8 @@ struct UiState: Equatable {
 
     // View
     var view = Sync.viewQueue
+    /** Artist and album pages opened over the tabs, newest last: Back pops one. */
+    var pages: [DetailPage] = []
     var settingsOpen = false
     /** The "?" stats panel. Opened and closed by its button only. */
     var statsOpen = false

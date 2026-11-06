@@ -10,6 +10,16 @@ struct ViewArea: View {
 
     var body: some View {
         let view = queueOnly ? Sync.viewQueue : wide && state.view == Sync.viewQueue ? Sync.viewLyrics : state.view
+        if !queueOnly, let page = state.pages.last {
+            DetailPageView(page: page, state: state, vm: vm)
+                .id(page.key + "#\(state.pages.count)")
+                .transition(.opacity.combined(with: .offset(x: 12)))
+        } else {
+            tab(view)
+        }
+    }
+
+    private func tab(_ view: String) -> some View {
         Group {
             switch view {
             case Sync.viewLyrics: LyricsView(state: state, vm: vm)
@@ -107,27 +117,37 @@ final class VisibleRows: ObservableObject {
 
 @MainActor
 func trackMenu(_ track: Track, liked: Bool, vm: MaroViewModel) -> OmpDialog {
-    // "Add to queue" only for a song that is not queued yet; "Play next" moves one that is.
-    .songMenu(track: track, items: [
-        // Tapping the row already plays it; this is for when you care
-        // where it comes from. Each falls back if that service cannot.
-        .init(icon: .spotify, label: "Play on Spotify", tint: Omp.spotify) { vm.playOn(track, "spotify") },
-        .init(icon: .ytm, label: "Play on YouTube Music", tint: Omp.ytm) { vm.playOn(track, "ytm") },
-        .init(icon: .sc, label: "Play on SoundCloud", tint: Omp.sc) { vm.playOn(track, "sc") },
-        .init(icon: .next, label: "Play next") { vm.queueNext(track) },
+    typealias Item = OmpDialog.Item
+    // Tapping the row already plays it; this is for when you care
+    // where it comes from. Each falls back if that service cannot.
+    var items: [Item] = [
+        Item(icon: .spotify, label: "Play on Spotify", tint: Omp.spotify) { vm.playOn(track, "spotify") },
+        Item(icon: .ytm, label: "Play on YouTube Music", tint: Omp.ytm) { vm.playOn(track, "ytm") },
+        Item(icon: .sc, label: "Play on SoundCloud", tint: Omp.sc) { vm.playOn(track, "sc") },
+        Item(icon: .next, label: "Play next") { vm.queueNext(track) },
         // Songs like this one: Spotify's radio for a Spotify song, YouTube Music's otherwise.
-        .init(icon: .radio, label: "Start radio") { vm.startRadio(track) },
-    ] + (vm.isQueued(track) ? [] : [
-        .init(icon: .addQueue, label: "Add to queue") { vm.addToQueue(track) },
-    ]) + [
-        .init(icon: .download, label: "Save offline") { vm.saveOffline(track) },
+        Item(icon: .radio, label: "Start radio") { vm.startRadio(track) },
+    ]
+    if !track.artist.isEmpty {
+        items.append(Item(icon: .user, label: "Go to artist") { vm.openArtist(track.artistNames.first ?? track.artist, id: track.artistId) })
+    }
+    if !track.album.isEmpty {
+        items.append(Item(icon: .disc, label: "Go to album") { vm.openAlbum(of: track) })
+    }
+    // "Add to queue" only for a song that is not queued yet; "Play next" moves one that is.
+    if !vm.isQueued(track) {
+        items.append(Item(icon: .addQueue, label: "Add to queue") { vm.addToQueue(track) })
+    }
+    items += [
+        Item(icon: .download, label: "Save offline") { vm.saveOffline(track) },
         // A cover that is wrong, broken or blurry: thrown away and fetched again.
-        .init(icon: .brush, label: "Fix artwork") { vm.fixArtwork(track) },
-        .init(icon: .heart, label: liked ? "Unlike" : "Like", tint: liked ? Omp.soft : Omp.foreground) { vm.likeTrack(track) },
-        .init(icon: .bell, label: "Set as alarm") { vm.setAsAlarm(track) },
-        .init(icon: .link, label: "Share on Spotify") { vm.shareSpotifyLink(track) },
-        .init(icon: .link, label: "Share on YouTube Music") { vm.shareYouTubeLink(track) },
-    ])
+        Item(icon: .brush, label: "Fix artwork") { vm.fixArtwork(track) },
+        Item(icon: .heart, label: liked ? "Unlike" : "Like", tint: liked ? Omp.soft : Omp.foreground) { vm.likeTrack(track) },
+        Item(icon: .bell, label: "Set as alarm") { vm.setAsAlarm(track) },
+        Item(icon: .link, label: "Share on Spotify") { vm.shareSpotifyLink(track) },
+        Item(icon: .link, label: "Share on YouTube Music") { vm.shareYouTubeLink(track) },
+    ]
+    return .songMenu(track: track, items: items)
 }
 
 /**
@@ -137,6 +157,7 @@ func trackMenu(_ track: Track, liked: Bool, vm: MaroViewModel) -> OmpDialog {
  * queue, add to the queue elsewhere.
  */
 struct SongRow: View {
+    @Environment(\.presentDialog) private var present
     let index: Int
     let track: Track
     let isCurrent: Bool
@@ -158,20 +179,32 @@ struct SongRow: View {
         let playable = available && gone.isEmpty
         let rest = [Omp.sourceLabel(track.source), track.duration > 0 ? Omp.fmtTime(track.duration) : "", when]
             .filter { !$0.isEmpty && $0 != "Queue" }
+            .joined(separator: " · ")
         let sub: String = {
             if !gone.isEmpty { return gone }
             if !available { return "not on this phone" }
-            if track.artist.isEmpty { return rest.joined(separator: " · ") }
-            return ([track.artist] + rest).joined(separator: " · ")
+            return rest
         }()
+        let artistLink = playable && !track.artist.isEmpty
         HStack(spacing: 6) {
             CoverArt(track: track, icon: Omp.sourceGlyph(track.source), size: Omp.rowArt)
             HeartButton(liked: liked, size: 15, box: 34) { vm.likeTrack(track) }
             VStack(alignment: .leading, spacing: 3) {
                 OmpText(track.title.ifBlank(track.id), size: 13, color: Omp.foreground, bold: true)
-                HStack(spacing: 6) {
-                    if track.saved && playable { SavedCheck(color: Omp.sourceColor(track.source)) }
-                    OmpText(sub, size: 11.5, color: playable ? Omp.t2 : Omp.urgent)
+                HStack(spacing: 5) {
+                    if track.saved && playable { SavedCheck() }
+                    if artistLink {
+                        // The artist opens the artist page; the rest of the row plays.
+                        HStack(spacing: 0) {
+                            OmpText(track.artist, size: 11.5, color: Omp.t2)
+                                .layoutPriority(1)
+                                .contentShape(Rectangle())
+                                .onTapGesture { openArtists(of: track, vm: vm, present: present) }
+                            if !sub.isEmpty { OmpText(" · " + sub, size: 11.5, color: Omp.t2) }
+                        }
+                    } else {
+                        OmpText(sub, size: 11.5, color: playable ? Omp.t2 : Omp.urgent)
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -371,12 +404,27 @@ private struct PlaylistsView: View {
 struct PlaylistCover: View {
     let row: LibraryRow
     let size: CGFloat
+    /** Its songs, when open: without a sleeve of its own, the first four covers make one. */
+    var tracks: [Track] = []
 
     var body: some View {
         if row.source == "liked" {
             ZStack {
                 Omp.themeAccent
                 Icon(.heart, size: size * 0.42, color: .white, filled: true)
+            }
+            .frame(width: size, height: size)
+        } else if row.art.isEmpty && tracks.count >= 4 {
+            let half = size / 2
+            VStack(spacing: 0) {
+                HStack(spacing: 0) {
+                    CoverArt(track: tracks[0], icon: .note, size: half)
+                    CoverArt(track: tracks[1], icon: .note, size: half)
+                }
+                HStack(spacing: 0) {
+                    CoverArt(track: tracks[2], icon: .note, size: half)
+                    CoverArt(track: tracks[3], icon: .note, size: half)
+                }
             }
             .frame(width: size, height: size)
         } else {
@@ -475,63 +523,6 @@ private struct CreatePlaylistRow: View {
     }
 }
 
-/**
- * A list's page: the slim back bar, then one row with the 56 pt cover beside
- * the name and the count, then one row of compact actions (the accent Play
- * square, then icon buttons): the desktop's phone header.
- */
-struct CompactHeader<Cover: View>: View {
-    let backLabel: String
-    let name: String
-    let meta: String
-    let canPlay: Bool
-    let onBack: () -> Void
-    let onPlay: () -> Void
-    var onQueue: (() -> Void)? = nil
-    var onShuffle: (() -> Void)? = nil
-    var onRefresh: (() -> Void)? = nil
-    @ViewBuilder let cover: () -> Cover
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                MButton(backLabel, icon: .back, kind: .ghost, height: 26, action: onBack)
-                    .padding(.leading, -8)
-                Spacer(minLength: 0)
-                if let onRefresh { TButton(.refreshAlt, size: 14, box: 28, color: Omp.t2, action: onRefresh) }
-            }
-            .frame(minHeight: 26)
-            HStack(alignment: .center, spacing: 12) {
-                cover().frame(width: 56, height: 56)
-                VStack(alignment: .leading, spacing: 2) {
-                    OmpText(name, size: 17, color: Omp.foreground, bold: true, maxLines: 2)
-                        .lineSpacing(1)
-                    OmpText(meta, size: 11.5, color: Omp.t2)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .padding(.top, 6)
-            if canPlay {
-                HStack(spacing: 6) {
-                    Button(action: onPlay) {
-                        Icon(.playSmall, size: 12, color: .white)
-                            .frame(width: 36, height: 36)
-                            .background(Omp.themeAccent)
-                    }
-                    .buttonStyle(PressStyle(scale: 0.92))
-                    if let onQueue { TButton(.addQueue, size: 16, color: Omp.t2, action: onQueue) }
-                    if let onShuffle { TButton(.shuffleAlt, size: 16, color: Omp.t2, action: onShuffle) }
-                    Spacer(minLength: 0)
-                }
-                .padding(.top, 6)
-            }
-        }
-        .padding(.horizontal, 10)
-        .padding(.top, 4)
-        .padding(.bottom, 8)
-    }
-}
-
 /** A shuffled copy, played from its first song (the desktop's Shuffle). */
 @MainActor
 func playShuffled(_ tracks: [Track], name: String, vm: MaroViewModel) {
@@ -553,16 +544,17 @@ private struct PlaylistDetail: View {
         let count = state.playlistTotal > 0 ? state.playlistTotal : max(row.count, tracks.count)
         let service = libraryServiceLabel(row.source).0
         VStack(spacing: 0) {
-            CompactHeader(
+            PageHeader(
                 backLabel: "Library",
+                kind: "Playlist",
                 name: row.name.ifBlank("Playlist"),
-                meta: "\(count) \(count == 1 ? "track" : "tracks") · \(service)",
                 canPlay: !tracks.isEmpty,
                 onBack: { vm.closePlaylist() },
                 onPlay: { vm.playOpenPlaylist() },
-                onQueue: { vm.addAllToQueue(tracks) },
                 onShuffle: { playShuffled(tracks, name: row.name, vm: vm) },
-                cover: { PlaylistCover(row: row, size: 56) }
+                onQueue: { vm.addAllToQueue(tracks) },
+                cover: { PlaylistCover(row: row, size: 64, tracks: tracks) },
+                meta: { PageMeta("\(count) \(count == 1 ? "track" : "tracks") · \(service)") }
             )
             if state.playlistLoading {
                 LoadingNote()

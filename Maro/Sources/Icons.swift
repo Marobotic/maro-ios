@@ -13,7 +13,7 @@ enum Glyph: Hashable {
     case volume, volumeLow, volumeMute, expand
     case trash, trashSmall, refresh, refreshAlt, addQueue, search, close, plus
     case heart, check, radio, download, link, bell
-    case spotify, ytm, sc, cloud, clear, edit, warning, note, brush
+    case spotify, ytm, sc, cloud, clear, edit, warning, note, brush, user, disc
 }
 
 /** One piece of a glyph: drawn as a line, filled, or both (the desktop's fill + stroke polygons). */
@@ -114,6 +114,8 @@ enum GlyphBook {
         case .warning: return ([("M12 3 2 21h20z", .stroke), ("M12 10v5", .stroke), ("M12 18h.01", .stroke)], 2)
         case .note: return ([("M9 18V5l12-2v13", .stroke), (circle(6, 18, 3), .stroke), (circle(18, 16, 3), .stroke)], 2)
         case .brush: return ([("M18 3l3 3-9 9-3-3z", .stroke), ("M9 12c-3 0-5 2-5 5 0 1-1 2-2 2 2 2 7 2 9-1 1-1.5 1-3.5 1-3", .stroke)], 2)
+        case .user: return ([("M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2", .stroke), (circle(12, 7, 4), .stroke)], 2)
+        case .disc: return ([(circle(12, 12, 10), .stroke), (circle(12, 12, 2), .stroke)], 2)
         }
     }
 
