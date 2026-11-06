@@ -736,7 +736,6 @@ private struct SearchView: View {
     let state: UiState
     @ObservedObject var vm: MaroViewModel
     @FocusState private var focused: Bool
-    @State private var searched = ""
 
     var body: some View {
         let query = state.searchText.trimmingCharacters(in: .whitespaces)
@@ -800,7 +799,7 @@ private struct SearchView: View {
                         .padding(.top, 16)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 } else {
-                    EmptyNote(message: searched == query ? "Nothing matches \u{201C}\(query)\u{201D}." : "Press Search to search.")
+                    EmptyNote(message: query.count < 2 ? "Keep typing to search." : "Nothing matches \u{201C}\(query)\u{201D}.")
                 }
             } else {
                 TrackList(tracks: state.searchResults, state: state, vm: vm) { i, t in
@@ -816,7 +815,6 @@ private struct SearchView: View {
     }
 
     private func submit() {
-        searched = vm.state.searchText.trimmingCharacters(in: .whitespaces)
         focused = false
         vm.doSearch()
     }

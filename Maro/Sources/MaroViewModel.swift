@@ -3002,11 +3002,70 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
 
     // -- search -------------------------------------------------------------
 
-    func setSearchText(_ text: String) { state.searchText = text }
+    private var searchDebounce: Task<Void, Never>?
+
+    /**
+     * Search as you type: 200 ms after the last keystroke, from two
+     * characters. A query kept in the search cache draws at once; a longer
+     * one whose start is kept shows that start's songs, narrowed to the
+     * typed words, until its own answer lands.
+     */
+    func setSearchText(_ text: String) {
+        state.searchText = text
+        searchDebounce?.cancel()
+        let q = text.trimmingCharacters(in: .whitespaces)
+        if q.isEmpty {
+            searchToken += 1
+            state.searching = false
+            state.searchResults = []
+            state.searchLink = ""
+            return
+        }
+        if q.count < 2 { return }
+        if !Self.isLink(q) { showKept(q) }
+        searchDebounce = Task { [weak self] in
+            await sleep(seconds: 0.2)
+            guard let self, !Task.isCancelled else { return }
+            self.runSearch(announce: false)
+        }
+    }
 
     func pickSearchSource(_ key: String) {
         state.searchSource = key
         doSearch()
+    }
+
+    private static func isLink(_ q: String) -> Bool {
+        q.hasPrefix("http") || q.contains("spotify.com/") || q.contains("soundcloud.com/") || q.contains("snd.sc/") || q.contains("youtu")
+    }
+
+    /** What the cache already knows for this query: its own answer, or a kept start of it narrowed down. */
+    private func showKept(_ q: String) {
+        let cache = SearchCache.shared, source = state.searchSource
+        if let hit = cache.get(SearchCache.key(q, source: source)) {
+            state.searchResults = hit.tracks
+            state.searchLink = ""
+            state.searching = false
+            return
+        }
+        let lower = q.lowercased()
+        let words = lower.split(separator: " ").map(String.init)
+        var n = lower.count - 1
+        while n >= 2 {
+            let prefix = String(lower.prefix(n)).trimmingCharacters(in: .whitespaces)
+            let key = SearchCache.key(prefix, source: source)
+            if prefix.count >= 2, cache.has(key), let hit = cache.get(key) {
+                state.searchResults = hit.tracks.filter { t in
+                    let hay = (t.title + " " + t.artist).lowercased()
+                    return words.allSatisfy { hay.contains($0) }
+                }
+                state.searchLink = ""
+                state.searching = true
+                return
+            }
+            n -= 1
+        }
+        state.searching = true
     }
 
     /**
@@ -3016,21 +3075,37 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
      */
     private var searchToken = 0
 
+    /** Enter, the Search button or a source: at once, saying so when nothing is found. */
     func doSearch() {
+        searchDebounce?.cancel()
+        runSearch(announce: true)
+    }
+
+    private func runSearch(announce: Bool) {
         let q = state.searchText.trimmingCharacters(in: .whitespaces)
         if q.isEmpty { return }
         searchToken += 1
         let token = searchToken
-        state.searching = true
-        state.searchResults = []
         state.searchLink = ""
+        let link = Self.isLink(q)
+        let cacheKey = SearchCache.key(q, source: state.searchSource)
+        if !link, let hit = SearchCache.shared.get(cacheKey) {
+            // Kept: drawn now, with no spinner; asked again quietly when older than ten minutes.
+            state.searchResults = hit.tracks
+            state.searching = false
+            if Date().timeIntervalSince1970 - hit.at < 600 { return }
+        } else {
+            // A narrowed kept start stays on screen until the answer lands.
+            if link { state.searchResults = [] }
+            state.searching = true
+        }
         // `list`: a pasted playlist, album or Mix - its songs play as one list, under this name.
         func done(_ found: [Track], _ empty: String, list: String = "") {
             guard token == searchToken else { return }
             state.searching = false
             state.searchResults = found
             state.searchLink = found.count > 1 ? list : ""
-            if found.isEmpty { showStatus(empty, "error") }
+            if found.isEmpty && announce { showStatus(empty, "error") }
         }
         func first(_ pattern: String) -> String? {
             guard let re = try? NSRegularExpression(pattern: pattern),
@@ -3091,7 +3166,6 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             async let yt: [Track] = wantYouTube ? YouTubeDirect.shared.search(q) : []
             async let sc: [Track] = wantSoundCloud ? ((try? await SoundCloud.shared.search(q)) ?? []) : []
             let (a, b, c) = await (sp, yt, sc)
-            guard token == searchToken else { return }
             // The preferred service's copy first, then Spotify, YouTube, SoundCloud.
             var lists = ["spotify": a, "ytm": b, "sc": c]
             let order = [state.playbackSource] + ["spotify", "ytm", "sc"]
@@ -3100,9 +3174,12 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 merged = Self.merge(merged, lists[key] ?? [])
                 lists[key] = nil
             }
+            if !merged.isEmpty { SearchCache.shared.put(cacheKey, merged) }
+            // Only the newest query's answer draws; a late one is dropped.
+            guard token == searchToken else { return }
             state.searching = false
             state.searchResults = merged
-            if merged.isEmpty { showStatus("Nothing found for \(q)", "info") }
+            if merged.isEmpty && announce { showStatus("Nothing found for \(q)", "info") }
         }
     }
 
