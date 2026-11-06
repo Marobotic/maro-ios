@@ -96,6 +96,9 @@ actor YouTubeMusic {
             req.setValue(cookies, forHTTPHeaderField: "Cookie")
             req.setValue("SAPISIDHASH \(ts)_\(hash)", forHTTPHeaderField: "Authorization")
             req.setValue(YtmVault.shared.authUser, forHTTPHeaderField: "X-Goog-AuthUser")
+            // Jukebox online's cookies travel with its Chrome's own name.
+            let vaultUA = YtmVault.shared.userAgent
+            if !vaultUA.isEmpty && !YtmVault.shared.cookie.isEmpty { req.setValue(vaultUA, forHTTPHeaderField: "User-Agent") }
         }
         let (data, resp) = try await http.data(for: req)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0

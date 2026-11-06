@@ -410,7 +410,10 @@ struct PlaylistCover: View {
     var tracks: [Track] = []
 
     var body: some View {
-        if row.source == "liked" {
+        if let look = LikedLook.of(row) {
+            // The services' own Liked covers, drawn alike when the image can't load.
+            CoverArt(artUrl: look.url, icon: .heart, size: size, likedLook: look)
+        } else if row.source == "liked" {
             ZStack {
                 Omp.themeAccent
                 Icon(.heart, size: size * 0.42, color: .white, filled: true)
@@ -458,9 +461,7 @@ private struct LibraryRowView: View {
             VStack(alignment: .leading, spacing: 3) {
                 OmpText(row.name.ifBlank("Playlist"), size: 13, color: Omp.foreground, bold: true)
                 if let job {
-                    OmpText(job.running && job.total > 0 ? "Downloading \(job.done + job.failed)/\(job.total)"
-                            : job.finished ? "Saved \(job.done) · \(job.failed) skipped" : "Preparing download…",
-                            size: 11.5, color: Omp.soft)
+                    OmpText(job.label, size: 11.5, color: Omp.soft)
                 } else {
                     let count = state.countFor(row)
                     HStack(spacing: 6) {
@@ -505,7 +506,7 @@ private struct LibraryRowView: View {
         .onTapGesture { vm.openPlaylist(row) }
         .onLongPressGesture(perform: onMenu)
         // Artwork lands in the background as soon as the row shows, and stays on disk.
-        .task(id: row) { vm.prefetchArt(row.art.ifBlank(row.id)) }
+        .task(id: row) { if LikedLook.of(row) == nil { vm.prefetchArt(row.art.ifBlank(row.id)) } }
     }
 }
 

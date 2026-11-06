@@ -4,8 +4,8 @@ import SwiftUI
 import UIKit
 
 /**
- * Settings in the desktop's redesign, in its order: Health, Your account,
- * Connected services, Playback, Quality, Library, Stored data, About. A Back
+ * Settings in the desktop's redesign, in its order: Accounts (health and
+ * sign-ins in one list), Playback, Quality, Library, Stored data, About. A Back
  * button and the title, red uppercase section heads, and every row a #161616
  * block with the #242424 hairline; accounts as taller cards with a square
  * service mark.
@@ -24,8 +24,7 @@ struct SettingsPage: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 2) {
-                            health
-                            account
+                            accounts
                             playback
                             quality
                             library
@@ -59,55 +58,43 @@ struct SettingsPage: View {
     }
 
     /**
-     * Health: whether each account answers right now, with the sessions this
-     * phone holds; a service that stopped working offers a fresh sign-in.
+     * Accounts (round 2 D): Health and the accounts in one list, a row per
+     * service - its own mark, name, who is signed in, whether it works right
+     * now, and what can be done about it. "Check all" checks every row.
      */
-    @ViewBuilder private var health: some View {
-        SettingsHead(label: "Health", first: true)
-        VStack(spacing: 0) {
-            HealthRow(glyph: .cloud, tint: Omp.themeAccent, label: "Jukebox", health: state.health["maro"]) { purgeAndSignIn("maro", "Jukebox") }
-            HealthRow(glyph: .spotify, tint: Omp.spotify, label: "Spotify", health: state.health["spotify"]) { purgeAndSignIn("spotify", "Spotify") }
-            HealthRow(glyph: .ytm, tint: Omp.ytm, label: "YouTube Music", health: state.health["ytm"]) { purgeAndSignIn("ytm", "YouTube Music") }
-            HealthRow(glyph: .sc, tint: Omp.sc, label: "SoundCloud", health: state.health["sc"]) { purgeAndSignIn("sc", "SoundCloud") }
-            HStack(spacing: 10) {
-                OmpText("Checked with the sessions on this phone", size: 11, color: Omp.t3)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                MButton("Check now") { vm.checkHealth(force: true) }
-            }
-            .frame(minHeight: 46)
+    @ViewBuilder private var accounts: some View {
+        HStack(spacing: 10) {
+            SettingsHead(label: "Accounts", first: true)
+            MButton("Check all") { vm.checkHealth(force: true) }
+                .padding(.bottom, 8)
         }
+        VStack(spacing: 0) {
+            ServiceAccountRow(service: "maro", label: "Jukebox",
+                              account: state.signedIn ? state.email.ifBlank("Signed in") : "Not signed in",
+                              on: state.signedIn, health: state.health["maro"],
+                              onCheck: { vm.checkHealth(only: "maro") },
+                              onSign: {
+                                  present(.confirm(message: "Sign out of Jukebox on this phone? Your other devices stay signed in.", confirm: "Sign out") { vm.signOutMaro() })
+                              },
+                              onPurge: { purgeAndSignIn("maro", "Jukebox") })
+            service("spotify", "Spotify", slot: ServiceSessions.librespot, account: Spotify.shared.user)
+            service("ytm", "YouTube Music", slot: ServiceSessions.ytm, account: YtmVault.shared.status.account)
+            service("sc", "SoundCloud", slot: ServiceSessions.soundcloud,
+                    account: ServiceSessions.shared.session(ServiceSessions.soundcloud)?.obj("user")?.str("name") ?? "")
+        }
+        SettingsNote("Signed in here or on any other device, a service is on your account and every device uses it; signing out of one signs every device out of it. YouTube Music is kept signed in by Jukebox online.")
     }
 
-    @ViewBuilder private var account: some View {
-        SettingsHead(label: "Your account")
-        AccountCard(
-            label: "Jukebox",
-            tint: Omp.themeAccent,
-            on: state.signedIn,
-            value: state.signedIn ? state.email.ifBlank("Signed in") : "Not signed in",
-            note: "Your library and queue sync here.",
-            action: "Sign out"
-        ) {
-            present(.confirm(message: "Sign out of Jukebox on this phone? Your other devices stay signed in.", confirm: "Sign out") { vm.signOutMaro() })
-        }
-        // The account's sessions: whichever device signs in puts
-        // it here, and every device uses it.
-        SettingsHead(label: "Connected services")
-        ServiceCard(label: "Spotify", tint: Omp.spotify, slot: ServiceSessions.librespot, name: Spotify.shared.user,
-                    onNote: "Playback, search and playlists.", offNote: "Full quality with a subscription.", state: state) {
-            vm.connectService("spotify")
-        }
-        ServiceCard(label: "YouTube Music", tint: Omp.ytm, slot: ServiceSessions.ytm, name: YtmVault.shared.status.account,
-                    onNote: "Your library and uploads. Kept signed in by Jukebox online.", offNote: "Sign in with Google once; Jukebox online keeps it signed in.", state: state) {
-            vm.connectService("ytm")
-        }
-        ServiceCard(label: "SoundCloud", tint: Omp.sc, slot: ServiceSessions.soundcloud,
-                    name: ServiceSessions.shared.session(ServiceSessions.soundcloud)?.obj("user")?.str("name") ?? "",
-                    onNote: "Your playlists and likes.", offNote: "Search and play work without it. Sign in for your playlists.",
-                    state: state) {
-            vm.connectService("sc")
-        }
-        SettingsNote("Signed in here or on any other device, a service is on your account and every device uses it. Signing out of one signs every device out of it.")
+    private func service(_ key: String, _ label: String, slot: String, account: String) -> ServiceAccountRow {
+        let on = state.services.contains(slot)
+        return ServiceAccountRow(
+            service: key, label: label,
+            account: on ? account.ifBlank("Signed in") : "Not connected",
+            on: on, health: state.health[key],
+            onCheck: { vm.checkHealth(only: key) },
+            onSign: { vm.connectService(key) },
+            onPurge: { purgeAndSignIn(key, label) }
+        )
     }
 
     @ViewBuilder private var playback: some View {
@@ -425,70 +412,23 @@ private struct SettingsChoice: View {
     }
 }
 
-/** An account as a card: the square service mark, its name, who is signed in, a note, and the button. */
-private struct AccountCard: View {
+/**
+ * One service in Accounts: its own mark (Jukebox: the app's pixel note), its
+ * name and who is signed in, its health with why, and its actions - Check
+ * now, Sign in / Sign out, and Purge and sign in when it stopped working.
+ */
+private struct ServiceAccountRow: View {
+    let service: String
     let label: String
-    let tint: Color
+    let account: String
     let on: Bool
-    let value: String
-    let note: String
-    let action: String
-    let onAction: () -> Void
-
-    var body: some View {
-        HStack(spacing: 14) {
-            Rectangle().fill(tint).frame(width: 10, height: 10)
-            VStack(alignment: .leading, spacing: 4) {
-                OmpText(label, size: 12, color: Omp.foreground, bold: true)
-                OmpText(value, size: 11, color: on ? tint : Omp.t2)
-                OmpText(note, size: 11, color: Omp.t2)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            MButton(action, kind: action == "Sign out" ? .danger : .normal, action: onAction)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 14)
-        .frame(maxWidth: .infinity, minHeight: 72, alignment: .leading)
-        .background(on ? Color.mix(tint, Omp.row, 0.05) : Omp.row)
-        .overlay(Rectangle().strokeBorder(on ? Color.mix(tint, Omp.line, 0.44) : Omp.line, lineWidth: 1))
-    }
-}
-
-/** One music service as the account holds it, with Connect / Sign out. */
-private struct ServiceCard: View {
-    let label: String
-    let tint: Color
-    let slot: String
-    let name: String
-    let onNote: String
-    let offNote: String
-    let state: UiState
-    let onTap: () -> Void
-
-    var body: some View {
-        let on = state.services.contains(slot)
-        AccountCard(
-            label: label,
-            tint: tint,
-            on: on,
-            value: on ? (name.isEmpty ? "Signed in" : name) : "Not connected",
-            note: on ? onNote : offNote,
-            action: on ? "Sign out" : "Connect",
-            onAction: onTap
-        )
-    }
-}
-
-/** One account's health: its mark, name, why it fails, a 7 pt status square and word. */
-private struct HealthRow: View {
-    let glyph: Glyph
-    let tint: Color
-    let label: String
     let health: HealthState?
+    let onCheck: () -> Void
+    let onSign: () -> Void
     let onPurge: () -> Void
 
     private static let words: [String: String] = [
-        "yes": "Working", "no": "Not working", "checking": "Checking…", "offline": "Offline", "off": "Not signed in",
+        "yes": "Working", "no": "Not working", "checking": "Checking\u{2026}", "offline": "Offline", "off": "Not signed in",
     ]
 
     private static func dot(_ state: String) -> Color {
@@ -501,22 +441,37 @@ private struct HealthRow: View {
     }
 
     var body: some View {
-        let h = health ?? HealthState()
-        HStack(spacing: 10) {
-            Icon(glyph, size: 15, color: tint)
-            VStack(alignment: .leading, spacing: 2) {
-                OmpText(label, size: 12, color: Omp.foreground)
-                // Working rows may say more too (YouTube Music: kept alive, and when).
-                if !h.why.isEmpty { OmpText(h.why, size: 10.5, color: Omp.t3) }
+        let h = health ?? HealthState(state: on ? "checking" : "off")
+        let tint = service == "maro" ? Omp.themeAccent : Omp.sourceColor(service)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 12) {
+                ServiceMark(service: service, size: 20)
+                    .padding(.top, 1)
+                VStack(alignment: .leading, spacing: 3) {
+                    OmpText(label, size: 12.5, color: Omp.foreground, bold: true)
+                    OmpText(account, size: 11, color: on ? tint : Omp.t2)
+                    if !h.why.isEmpty { OmpText(h.why, size: 10.5, color: Omp.t3, maxLines: 3) }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                HStack(spacing: 6) {
+                    Rectangle().fill(Self.dot(h.state)).frame(width: 7, height: 7)
+                    OmpText(Self.words[h.state] ?? "Not signed in", size: 11.5, color: Omp.t2)
+                }
+                .padding(.top, 2)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
             HStack(spacing: 6) {
-                Rectangle().fill(Self.dot(h.state)).frame(width: 7, height: 7)
-                OmpText(Self.words[h.state] ?? "Not signed in", size: 11.5, color: Omp.t2)
+                Spacer(minLength: 0)
+                if on { MButton("Check now", action: onCheck) }
+                if h.state == "no" { MButton("Purge and sign in", kind: .danger, action: onPurge) }
+                if service != "maro" || on {
+                    MButton(on ? "Sign out" : "Sign in", kind: on ? .ghost : .normal, action: onSign)
+                }
             }
-            if h.state == "no" { MButton("Purge and sign in", kind: .danger, action: onPurge) }
         }
-        .frame(minHeight: 42)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Omp.row)
         .overlay(alignment: .bottom) { Rectangle().fill(Omp.line).frame(height: 1) }
     }
 }

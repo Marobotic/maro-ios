@@ -354,7 +354,8 @@ final class MaroClient: @unchecked Sendable {
      * Returns nil when the engine has not pushed one yet.
      */
     func sync() async -> JSON? {
-        guard let resp = try? await call("GET", "/sync"), !resp.str("kind").isEmpty else { return nil }
+        // Without the saved song lists (they have a store of their own, /playlists).
+        guard let resp = try? await call("GET", "/sync?lists=0"), !resp.str("kind").isEmpty else { return nil }
         return resp
     }
 
@@ -449,10 +450,35 @@ final class MaroClient: @unchecked Sendable {
         return entry.arr("tracks") == nil ? nil : entry
     }
 
-    /** Store a song list read on this phone, for every device. */
-    func putSavedPlaylist(_ key: String, _ entry: JSON) async -> Bool {
-        guard let got = await answer("PUT", "/playlists/" + Self.escape(key), body: entry, timeout: 30) else { return false }
-        return (200..<300).contains(got.code)
+    /**
+     * Store a song list read on this phone, for every device. "newer" when
+     * the account already holds a newer copy (read that one), "ok", or nil.
+     */
+    func putSavedPlaylist(_ key: String, _ entry: JSON) async -> String? {
+        guard let got = await answer("PUT", "/playlists/" + Self.escape(key), body: entry, timeout: 60),
+              (200..<300).contains(got.code) else { return nil }
+        return got.body.str("kept") == "newer" ? "newer" : "ok"
+    }
+
+    /** The account's stored lists, without their songs: [{key, count, savedAt, snapshotId}], or nil. */
+    func savedPlaylistIndex() async -> [JSON]? {
+        guard let got = await answer("GET", "/playlists", timeout: 15), (200..<300).contains(got.code) else { return nil }
+        return (got.body.arr("playlists") ?? []).compactMap { $0 as? JSON }
+    }
+
+    // -- account preferences (round 2 D.3) --
+
+    /** {ok, prefs: {preferredSource, ...}, rev, at}, or nil when the droplet could not say. */
+    func prefs() async -> JSON? {
+        guard let got = await answer("GET", "/prefs", timeout: 15), (200..<300).contains(got.code), got.body.obj("prefs") != nil else { return nil }
+        return got.body
+    }
+
+    /** Merge a change the user made into the account's preferences; the new doc, or nil. */
+    func putPrefs(_ change: JSON, device: String) async -> JSON? {
+        guard let got = await answer("PUT", "/prefs", body: ["prefs": change, "device": device], timeout: 15),
+              (200..<300).contains(got.code) else { return nil }
+        return got.body
     }
 
     // -- the YouTube Music session kept alive on the droplet (round 2 C) --
@@ -471,7 +497,7 @@ final class MaroClient: @unchecked Sendable {
 
     /** Seed the droplet's keeper with a fresh sign-in: {ok, state, account, at}, or nil / the error. */
     func seedYtmSession(cookies: String, headers: JSON) async -> (ok: Bool, body: JSON)? {
-        guard let got = await answer("POST", "/ytm/session", body: ["cookies": cookies, "headers": headers], timeout: 120) else { return nil }
+        guard let got = await answer("POST", "/ytm/session", body: ["cookies": cookies, "headers": headers], timeout: 300) else { return nil }
         let ok = (200..<300).contains(got.code) && (got.body["ok"] as? Bool) != false
         return (ok, got.body)
     }
@@ -490,7 +516,23 @@ final class MaroClient: @unchecked Sendable {
 
     /** The account's shared player, or nil when the droplet is unreachable. */
     func getPlayer() async -> JSON? {
-        (try? await call("GET", "/player", timeout: 15))?.obj("player")
+        let resp = try? await call("GET", "/player", timeout: 15)
+        // The account preferences' revision rides along (round 2 D.3), for a
+        // device that missed the relay's "prefs" message.
+        if let rev = resp?["prefsRev"] as? NSNumber { notePrefsRev(rev.intValue) }
+        return resp?.obj("player")
+    }
+
+    private var _prefsRev = -1
+
+    private func notePrefsRev(_ rev: Int) {
+        lock.lock(); _prefsRev = rev; lock.unlock()
+    }
+
+    /** The prefs revision the last GET /player named; -1 before any. */
+    var prefsRev: Int {
+        lock.lock(); defer { lock.unlock() }
+        return _prefsRev
     }
 
     /**

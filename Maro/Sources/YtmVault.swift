@@ -73,7 +73,13 @@ final class YtmVault: @unchecked Sendable {
     /** Jukebox online holds a session for this account (working or not). */
     var seeded: Bool {
         lock.lock(); defer { lock.unlock() }
-        return ["ok", "expired", "error"].contains(vaultState) || copy != nil
+        return ["ok", "expired", "error", "pending"].contains(vaultState) || copy != nil
+    }
+
+    /** The droplet Chrome's user agent: sent with its cookies, as it asks. */
+    var userAgent: String {
+        lock.lock(); defer { lock.unlock() }
+        return copy?.obj("headers")?.str("user-agent") ?? ""
     }
 
     /**
@@ -83,7 +89,7 @@ final class YtmVault: @unchecked Sendable {
      */
     var mayUseLegacy: Bool {
         lock.lock(); defer { lock.unlock() }
-        return copy == nil && (vaultState == "none" || vaultState == "unknown")
+        return copy == nil && vaultState == "none"
     }
 
     // -- in step with the droplet ----------------------------------------
@@ -146,9 +152,14 @@ final class YtmVault: @unchecked Sendable {
         guard let client, client.session != nil else { return "Sign in to Jukebox first" }
         let cookies = session.str("cookies")
         guard !cookies.isEmpty else { return "The sign-in carried no cookies - try again" }
-        guard let got = await client.seedYtmSession(cookies: cookies, headers: session.obj("headers") ?? [:]) else {
-            return "Couldn't reach Jukebox online to keep the sign-in - try again"
+        // The droplet answers once it has imported the cookies and run a full
+        // keepalive (about 90 s, up to ~4 min). A dropped request, or a seed
+        // already running (409 pending), is followed on the status instead.
+        let got = await client.seedYtmSession(cookies: cookies, headers: session.obj("headers") ?? [:])
+        if got == nil || got?.body.str("state") == "pending" {
+            return await followSeed(client)
         }
+        guard let got else { return "Couldn't reach Jukebox online to keep the sign-in - try again" }
         guard got.ok else {
             let why = got.body.str("error")
             return why.isEmpty ? "Jukebox online did not take the sign-in - try again" : "Jukebox online: \(why)"
@@ -157,6 +168,23 @@ final class YtmVault: @unchecked Sendable {
         // Its fresh export, the copy every app uses.
         await refresh()
         return nil
+    }
+
+    /** A seed still running on the droplet: its status every 10 s for up to 5 minutes. */
+    private func followSeed(_ client: MaroClient) async -> String? {
+        for _ in 0..<30 {
+            try? await Task.sleep(nanoseconds: 10_000_000_000)
+            guard let got = await client.ytmSession(withCookies: false) else { continue }
+            let state = got.str("state")
+            if state == "pending" { continue }
+            take(got, cookies: false)
+            if state == "ok" {
+                await refresh()
+                return nil
+            }
+            return state == "expired" ? "Google did not keep that sign-in - try again" : "Jukebox online could not keep the sign-in - try again"
+        }
+        return "Jukebox online is still taking the sign-in - Health will say when it is done"
     }
 
     /** Signed out of YouTube Music: the droplet's keeper stopped and wiped, and the copy here gone. */

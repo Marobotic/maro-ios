@@ -34,6 +34,8 @@ private struct Pending {
 private struct Downloaded {
     let ready: Bool
     let track: Track
+    /** The engine's reason when it could not (a removed video says so). */
+    var error = ""
 }
 
 func sleep(seconds: Double) async {
@@ -180,6 +182,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         s.solo = solo
         s.savingOffline = prefs.object(forKey: "savingOffline") as? Bool ?? true
         s.songsLimitGb = prefs.integer(forKey: "songsLimitGb")
+        // The account's preferred source as last read (the account's copy wins once it answers).
+        s.playbackSource = prefs.string(forKey: "preferredSource") ?? "auto"
         state = s
         applyLaunchRoute()
         Task {
@@ -353,6 +357,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     private func heldCount(_ row: LibraryRow) -> Int? {
         if row.source == "liked" { return likedKnown ? likedTracks.count : nil }
         let key = "\(row.source):\(row.id)"
+        // The account's stored copy (its latest), then one held here.
+        if let n = accountIndex[key]?.count, n > 0 { return n }
         if let n = savedCounts[key], n > 0 { return n }
         return keptCounts[key]
     }
@@ -711,6 +717,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     private func syncPlayer() async {
         if solo { return }
         if let doc = await client.getPlayer() { await applyPlayer(doc) }
+        // The account's preferences moved on while this phone wasn't listening.
+        if client.prefsRev > prefsRev { await pullPrefs(force: true) }
     }
 
     private func applyPlayer(_ incoming: JSON) async {
@@ -894,6 +902,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     private func pullSync(force: Bool = false) async {
         guard let data = await client.sync() else { return }
         markOnline(true)
+        // The stored song lists' index (counts, and which held copies are behind).
+        await refreshAccountIndex(force: force)
         let at = data.str("at")
         if !force && !at.isEmpty && at == lastSyncAt { return }
         lastSyncAt = at
@@ -1052,6 +1062,10 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             if prompt.error.isEmpty && prompt.code.isEmpty && !prompt.url.isEmpty { openUrl(prompt.url) }
             state.loginPrompt = prompt
             return
+        case "prefs":
+            // Another device changed the account's preferences.
+            applyPrefs(p)
+            return
         case "playlist.tracks":
             onPlaylistPage(p)
         case "search":
@@ -1119,7 +1133,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         case .download:
             // Hand the finished upload to the downloader, which counts it and
             // copies it to the phone in its own time.
-            downloadInbox.append(Downloaded(ready: ready, track: job.track.with(videoId: videoId.ifEmpty(job.track.videoId))))
+            downloadInbox.append(Downloaded(ready: ready, track: job.track.with(videoId: videoId.ifEmpty(job.track.videoId)), error: p.str("error")))
         }
     }
 
@@ -1180,6 +1194,11 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         // only takes the artist's own upload.
         let oneOff = oneOffPrefer.removeValue(forKey: track.id)
         let prefer = oneOff ?? state.playbackSource
+        // The saved choice stays as it is; this phone just can't follow it now.
+        if oneOff == nil && prefer == "spotify" && track.source == "spotify" && !Spotify.shared.hasLogin && !preferNoteShown {
+            preferNoteShown = true
+            showStatus("Spotify isn't signed in on this device - playing from YouTube Music", "info")
+        }
         log.info("tap \(track.title, privacy: .public) (\(track.source, privacy: .public)) prefer=\(prefer, privacy: .public) spotifyLogin=\(Spotify.shared.hasLogin) spotifyReady=\(Spotify.shared.ready)")
         if prefer == "spotify" && track.source == "spotify" && Spotify.shared.hasLogin {
             if !spotifyCanStart() { return playYouTubeInstead(track, tag: tag) }
@@ -1959,6 +1978,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         state.services = currentServices()
         Spotify.shared.start()
         syncSpotifyLists()
+        await pullPrefs()
     }
 
     private var vaultAskedAt: Double = -.infinity
@@ -2611,8 +2631,13 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 playWhenLoaded = nil
                 playList(tracks, 0, name: row.name)
             }
-            // A Spotify list older than half an hour is read again behind it.
-            if listDue(row) { Task { await fetchSpotifyList(row) } }
+            // A newer copy on the account, or a Spotify list older than half
+            // an hour, is read again behind it.
+            if accountNewer(row) {
+                Task { await fetchAccountList(row) }
+            } else if listDue(row) {
+                Task { await fetchSpotifyList(row) }
+            }
             return
         }
         state = s
@@ -2629,6 +2654,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                     playWhenLoaded = nil
                     playList(cached.tracks, 0, name: row.name)
                 }
+                // The account's stored copy replaces it when there is one.
+                if accountIndex["\(row.source):\(row.id)"] != nil, await fetchAccountList(row) != nil { return }
                 if listDue(row) { await fetchSpotifyList(row) }
                 return
             }
@@ -2641,6 +2668,36 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     }
 
     // -- song lists held for every playlist (round 2 B) ----------------------
+
+    /**
+     * The account's stored lists without their songs ("source:id" -> count,
+     * savedAt, snapshotId), from GET /cache/playlists: the rows' counts, and
+     * whether a held copy is behind.
+     */
+    private var accountIndex: [String: (count: Int, savedAt: Double, snapshotId: String)] = [:]
+    private var indexAt: Double = -.infinity
+
+    /** The account's list index, at most once a minute unless forced. */
+    private func refreshAccountIndex(force: Bool = false) async {
+        if !force && uptime() - indexAt < 60 { return }
+        indexAt = uptime()
+        guard let rows = await client.savedPlaylistIndex() else { return }
+        var index: [String: (count: Int, savedAt: Double, snapshotId: String)] = [:]
+        for r in rows {
+            let key = r.str("key").ifEmpty("\(r.str("source")):\(r.str("id"))")
+            index[key] = (r.int("count"), Self.savedAt(r), r.str("snapshotId"))
+        }
+        accountIndex = index
+        recount()
+    }
+
+    /** Whether the account holds a newer copy of a list than the one held here. */
+    private func accountNewer(_ row: LibraryRow) -> Bool {
+        let key = "\(row.source):\(row.id)"
+        guard row.source != "liked", let stored = accountIndex[key] else { return false }
+        guard let mine = savedPlaylists[key] else { return true }
+        return stored.savedAt > Self.savedAt(mine) + 1
+    }
 
     /** When each list was last read on this phone ("source:id" -> epoch seconds). */
     private var listFetchedAt: [String: Double] = [:]
@@ -2659,7 +2716,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     private func listDue(_ row: LibraryRow, maxAge: Double? = nil) -> Bool {
         guard row.source == "spotify", Spotify.shared.hasLogin else { return false }
         let key = "spotify:\(row.id)"
-        let last = max(listFetchedAt[key] ?? 0, savedPlaylists[key].map(Self.savedAt) ?? 0)
+        let last = max(listFetchedAt[key] ?? 0, savedPlaylists[key].map(Self.savedAt) ?? 0, accountIndex[key]?.savedAt ?? 0)
         return Date().timeIntervalSince1970 - last > (maxAge ?? Self.listRefresh)
     }
 
@@ -2732,7 +2789,15 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         }
         if offer {
             let client = client
-            Task.detached(priority: .utility) { _ = await client.putSavedPlaylist(key, entry) }
+            Task {
+                let answer = await client.putSavedPlaylist(key, entry)
+                if answer == "ok" {
+                    accountIndex[key] = (tracks.count, savedAt, "")
+                } else if answer == "newer" {
+                    // The account had a newer copy than this read: that one wins.
+                    await fetchAccountList(row)
+                }
+            }
         }
     }
 
@@ -3024,7 +3089,6 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             // The count is the list's real songs, never a stored number.
             let total = tracks.count
             setDownload(key, DownloadJob(total: total, running: true))
-            showStatus("Downloading \(total) \(total == 1 ? "song" : "songs") to this phone", "info")
             await downloadTracks(key, total: total, tracks)
         }
     }
@@ -3068,29 +3132,93 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         }
     }
 
+    /**
+     * Whether a song is saved on this phone already: its file under its
+     * video id, or any of its ids (source id, matched copy) mapping to a
+     * saved file.
+     */
+    private func savedOnPhone(_ t: Track) -> Bool {
+        let v = videoIdOf(t)
+        if !v.isEmpty && localFiles[v] != nil { return true }
+        return t.trackIds.contains { state.localAvailable.contains($0) }
+    }
+
+    /** Why a song can't be saved any more (marked by an earlier download or play), or nil. */
+    private func unavailableReason(_ t: Track) -> String? {
+        let why = state.goneReason(t)
+        if !why.isEmpty { return why }
+        let v = videoIdOf(t)
+        return v.isEmpty ? nil : state.gone[v]
+    }
+
+    /**
+     * The service's answer when it removed a song for good (YouTube "video
+     * unavailable", private, taken down; not playable; 404), or nil for a
+     * failure worth trying again (no connection, a timeout, no match yet).
+     */
+    private static func removedReason(_ error: String) -> String? {
+        let e = error.lowercased()
+        let signs = ["video unavailable", "unavailable", "removed", "private", "not available", "terminated",
+                     "copyright", "deleted", "404", "no longer", "not playable", "taken down"]
+        return signs.contains { e.contains($0) } ? error : nil
+    }
+
+    /** A song the service removed: marked in every list with the reason, and never asked for again. */
+    private func markUnavailable(_ t: Track, _ reason: String) {
+        let v = videoIdOf(t).ifEmpty(t.videoId)
+        if !v.isEmpty { markGone(v, reason) }
+        if !t.id.isEmpty && t.source != "ytm" {
+            state.gone["\(t.source):\(t.id)"] = reason
+            UserDefaults.standard.set(state.gone, forKey: "goneSongs")
+        }
+    }
+
+    /**
+     * Save a playlist's songs on this phone (round 2 D.4): the list's real
+     * songs, every one already saved here skipped, a removed one marked
+     * unavailable instead of failing again; only the missing ones are fetched.
+     * With nothing missing it is done at once.
+     */
     private func downloadTracks(_ key: String, total: Int, _ tracks: [Track]) async {
+        let already = tracks.filter(savedOnPhone)
+        var unavailable = 0
+        var missing: [Track] = []
+        for t in tracks where !savedOnPhone(t) {
+            if unavailableReason(t) != nil { unavailable += 1 } else { missing.append(t) }
+        }
+        let wanted = missing.count
         var done = 0, failed = 0
-        func bump() { setDownload(key, DownloadJob(total: total, done: done, failed: failed, running: true)) }
+        func job(_ running: Bool) -> DownloadJob {
+            DownloadJob(total: total, done: done, failed: failed, running: running,
+                        already: already.count, unavailable: unavailable, wanted: wanted)
+        }
+        func bump() { setDownload(key, job(true)) }
+        func notAvailable(_ n: Int) -> String { n == 1 ? "1 isn't available any more" : "\(n) aren't available any more" }
+        if missing.isEmpty {
+            setDownload(key, job(false))
+            showStatus("All \(already.count) \(already.count == 1 ? "song is" : "songs are") saved on this phone"
+                       + (unavailable > 0 ? ", \(notAvailable(unavailable))" : ""), "ok")
+            return
+        }
+        showStatus("\(wanted) of \(total) to download" + (already.isEmpty ? "" : ", \(already.count) already saved"), "info")
         // A previous job that timed out may have left results behind.
         downloadInbox.removeAll()
         bump()
-        var todo = tracks[...]
+        var todo = missing[...]
         while !todo.isEmpty {
             var asks: [JSON] = []
-            var wanted = 0
+            var asked = 0
             while let t = todo.first, asks.count < downloadBatch {
                 todo = todo.dropFirst()
                 let videoId = videoIdOf(t)
-                if !videoId.isEmpty && localFiles[videoId] != nil {
-                    done += 1
-                } else if !videoId.isEmpty && serverCached.contains(videoId) {
+                if !videoId.isEmpty && serverCached.contains(videoId) {
                     if await saveLocalNow(t.with(videoId: videoId), videoId) { done += 1 } else { failed += 1 }
                 } else {
                     let requestId = UUID().uuidString.lowercased()
                     let track = videoId.isEmpty ? t : t.with(videoId: videoId)
                     pending[requestId] = Pending(track: track, purpose: .download(key: key))
                     asks.append(["requestId": requestId, "track": track.toJSON()])
-                    wanted += 1
+                    asked += 1
                 }
                 bump()
             }
@@ -3099,7 +3227,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 var got = 0
                 let deadline = uptime() + 600
                 var lastResult = uptime()
-                while got < wanted && uptime() < deadline && uptime() - lastResult < 30 {
+                while got < asked && uptime() < deadline && uptime() - lastResult < 30 {
                     if downloadInbox.isEmpty {
                         await sleep(seconds: 0.25)
                         continue
@@ -3107,23 +3235,30 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                     let r = downloadInbox.removeFirst()
                     lastResult = uptime()
                     got += 1
-                    if r.ready, await saveLocalNow(r.track, r.track.videoId) { done += 1 } else { failed += 1 }
+                    if r.ready, await saveLocalNow(r.track, r.track.videoId) {
+                        done += 1
+                    } else if !r.ready, let why = Self.removedReason(r.error) {
+                        markUnavailable(r.track, why)
+                        unavailable += 1
+                    } else {
+                        failed += 1
+                    }
                     bump()
                 }
-                failed += wanted - got
+                failed += asked - got
             } else {
                 // The relay is down (probably offline): the rest of this chunk
                 // cannot be prepared either.
                 markOnline(false)
-                failed += wanted
+                failed += asked
             }
             bump()
         }
-        setDownload(key, DownloadJob(total: total, done: done, failed: failed, running: false))
-        showStatus(
-            failed == 0 ? "Saved \(done) songs on this phone" : "Saved \(done) of \(total), \(failed) could not be saved",
-            failed == 0 ? "ok" : "info"
-        )
+        setDownload(key, job(false))
+        var parts = ["\(already.count + done) saved"]
+        if unavailable > 0 { parts.append(notAvailable(unavailable)) }
+        if failed > 0 { parts.append("\(failed) couldn't be saved - try again") }
+        showStatus(parts.joined(separator: ", "), failed == 0 ? "ok" : "info")
     }
 
     // -- settings -----------------------------------------------------------
@@ -3137,14 +3272,18 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
      * Jukebox account, then Spotify, YouTube Music and SoundCloud with the
      * sessions this phone holds. At most once a minute unless forced.
      */
-    func checkHealth(force: Bool = false) {
-        if !force && uptime() - healthAt < 60 { return }
-        healthAt = uptime()
+    func checkHealth(force: Bool = false, only: String? = nil) {
+        if only == nil {
+            if !force && uptime() - healthAt < 60 { return }
+            healthAt = uptime()
+        }
         let scToken = ServiceSessions.shared.session(ServiceSessions.soundcloud)?.str("token") ?? ""
         let ytmOn = state.services.contains(ServiceSessions.ytm) || YtmVault.shared.seeded
-        let signed: [String: Bool] = ["maro": state.signedIn, "spotify": Spotify.shared.hasLogin, "ytm": ytmOn, "sc": !scToken.isEmpty]
+        var signed: [String: Bool] = ["maro": state.signedIn, "spotify": Spotify.shared.hasLogin, "ytm": ytmOn, "sc": !scToken.isEmpty]
+        // One row's Check now: only that service.
+        if let only { signed = signed.filter { $0.key == only } }
         let online = state.online
-        var health: [String: HealthState] = [:]
+        var health = state.health
         for (key, on) in signed {
             if !on {
                 health[key] = HealthState(state: "off")
@@ -3199,6 +3338,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         let ago = YtmVault.ago(v.at)
         let offline = v.reached ? "" : " (last copy - Jukebox online not reachable)"
         switch v.state {
+        case "pending":
+            return HealthState(state: "checking", why: "Jukebox online is taking the sign-in\u{2026}")
         case "ok":
             let kept = "Kept alive by Jukebox online" + (ago.isEmpty ? "" : ", last refreshed \(ago)")
             return HealthState(state: "yes", why: kept + offline)
@@ -3244,10 +3385,52 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         prefs.set(enabled, forKey: "savingOffline")
     }
 
+    // -- account preferences (round 2 D.3) ---------------------------------
+    //
+    // The preferred source is the account's, the same on every device
+    // (GET/PUT /cache/prefs). It is written only when the user picks one and
+    // never changed on its own: a phone that can't follow it (Spotify not
+    // signed in here) plays what it can and says so, leaving the choice.
+
+    private var prefsRev = -1
+    private var prefsAt: Double = -.infinity
+    private var preferNoteShown = false
+
+    /** The account's preferences, at start and every few minutes (the relay tells of changes at once). */
+    private func pullPrefs(force: Bool = false) async {
+        if !force && uptime() - prefsAt < 240 { return }
+        prefsAt = uptime()
+        guard let doc = await client.prefs() else { return }
+        applyPrefs(doc)
+    }
+
+    private func applyPrefs(_ doc: JSON) {
+        guard let p = doc.obj("prefs") else { return }
+        let rev = doc.int("rev", -1)
+        if rev >= 0 && rev < prefsRev { return }
+        prefsRev = max(prefsRev, rev)
+        let source = p.str("preferredSource")
+        guard Omp.sourceOptions.contains(where: { $0.0 == source }) else { return }
+        prefs.set(source, forKey: "preferredSource")
+        if source != state.playbackSource { state.playbackSource = source }
+    }
+
+    /** The user picked a preferred source: onto the account, for every device. */
     func setPlaybackSource(_ value: String) {
         state.playbackSource = value
+        prefs.set(value, forKey: "preferredSource")
+        preferNoteShown = false
+        // Older desktops still listen for this.
         send("playback.source", ["value": value])
-        showStatus("Playback source set to \(value)", "ok")
+        let device = deviceId(), label = Omp.sourceOptions.first { $0.0 == value }?.1 ?? value
+        Task {
+            if let doc = await client.putPrefs(["preferredSource": value], device: device) {
+                applyPrefs(doc)
+                showStatus("Preferred source: \(label), on every device", "ok")
+            } else {
+                showStatus("Couldn't save the preferred source to your account - try again", "error")
+            }
+        }
     }
 
     /** Rename this phone everywhere: the picker here, the account, the desktop panel. */

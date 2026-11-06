@@ -300,6 +300,8 @@ struct CoverArt: View {
     let icon: Glyph
     let size: CGFloat
     var busy = false
+    /** A service's Liked list: its look drawn until (or unless) the image loads. */
+    var likedLook: LikedLook? = nil
     @State private var image: UIImage? = nil
 
     var body: some View {
@@ -315,6 +317,8 @@ struct CoverArt: View {
             Color(hex: 0x171717)
             if let image = shown {
                 Image(uiImage: image).resizable().scaledToFill()
+            } else if let likedLook {
+                LikedLookView(look: likedLook, size: side)
             } else if busy {
                 OmpSpinner(size: 12, color: Omp.t2)
             } else {
@@ -595,5 +599,48 @@ struct SquareSwitch: View {
         .frame(width: 42, height: 24)
         .overlay(Rectangle().strokeBorder(on ? Omp.themeAccent : Color(hex: 0x3A3A3A), lineWidth: 1))
         .animation(.timingCurve(0.33, 1, 0.68, 1, duration: 0.16), value: on)
+    }
+}
+
+/**
+ * Spotify's Liked Songs and YouTube Music's Liked Music (round 2 E): their
+ * services' own covers, cached like any cover, and the same look drawn here
+ * when the image can't load - never a blank tile or a mosaic.
+ */
+enum LikedLook: Equatable {
+    case spotify, ytm
+
+    static func of(_ row: LibraryRow) -> LikedLook? {
+        if row.source == "spotify" && row.id == "__liked__" { return .spotify }
+        if row.source == "ytm" && (row.id == "LM" || row.id == "VLLM" || row.name.lowercased() == "liked music") { return .ytm }
+        return nil
+    }
+
+    var url: String {
+        switch self {
+        case .spotify: return "https://misc.scdn.co/liked-songs/liked-songs-640.png"
+        case .ytm: return "https://www.gstatic.com/youtube/media/ytm/images/pbg/liked-music-@576.png"
+        }
+    }
+}
+
+/** The drawn Liked cover: Spotify's purple-blue gradient with the white heart, YouTube Music's red-orange with a thumbs-up. */
+struct LikedLookView: View {
+    let look: LikedLook
+    let size: CGFloat
+
+    var body: some View {
+        ZStack {
+            if look == .spotify {
+                LinearGradient(colors: [Color(hex: 0x450AF5), Color(hex: 0x8E8EE5), Color(hex: 0xC4EFD9)],
+                               startPoint: .topLeading, endPoint: .bottomTrailing)
+                Icon(.heart, size: size * 0.42, color: .white, filled: true)
+            } else {
+                LinearGradient(colors: [Color(hex: 0xC9182B), Color(hex: 0xFF5A36)],
+                               startPoint: .topLeading, endPoint: .bottomTrailing)
+                Icon(.thumbsUp, size: size * 0.42, color: .white)
+            }
+        }
+        .frame(width: size, height: size)
     }
 }

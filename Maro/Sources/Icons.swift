@@ -13,7 +13,7 @@ enum Glyph: Hashable {
     case volume, volumeLow, volumeMute, expand
     case trash, trashSmall, refresh, refreshAlt, addQueue, search, close, plus
     case heart, check, radio, download, link, bell
-    case spotify, ytm, sc, cloud, clear, edit, warning, note, brush, user, disc
+    case spotify, ytm, sc, cloud, clear, edit, warning, note, brush, user, disc, thumbsUp, pixelNote
 }
 
 /** One piece of a glyph: drawn as a line, filled, or both (the desktop's fill + stroke polygons). */
@@ -26,6 +26,8 @@ private struct GlyphPart {
 private struct GlyphSpec {
     let parts: [GlyphPart]
     let weight: CGFloat
+    /** The filled parts are one shape whose overlaps are holes (the platform marks). */
+    var evenOdd = false
 }
 
 private enum PartMode { case stroke, fill, both }
@@ -101,11 +103,29 @@ enum GlyphBook {
         case .link:
             return ([("M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71", .stroke)], 2)
         case .bell: return ([("M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4", .stroke)], 2)
+        // The platforms' own marks (round 2 D), filled in one colour; the
+        // holes (Spotify's bars, YouTube Music's ring and play) are cut out
+        // with the even-odd rule.
         case .spotify:
-            return ([(circle(12, 12, 9), .stroke),
-                     ("M6.5 9.5c4-1 7.4-.5 10.5 1M7 12.5c3.2-.7 6-.3 8.7.9M7.6 15.3c2.5-.5 4.7-.2 6.8.8", .stroke)], 2)
-        case .ytm: return ([(rect(3, 5, 18, 14), .stroke), ("m10 9 5 3-5 3z", .fill)], 2)
-        case .sc: return ([(cloudD, .stroke), ("M8 21h2m2-2v2m3-2v2", .stroke)], 2)
+            return ([(circle(12, 12, 11), .fill),
+                     ("M5.2 9.6C9.6 6.9 14.6 7.2 18.8 10.1L18 11.9C14.2 9.4 9.8 9.1 5.9 11.4Z", .fill),
+                     ("M6.4 13C9.9 11 14 11.3 17.4 13.4L16.7 15C13.7 13.2 10.3 13 7 14.6Z", .fill),
+                     ("M7.4 16.2C10.2 14.8 13.3 15 15.9 16.5L15.3 17.8C13 16.6 10.4 16.4 7.9 17.6Z", .fill)], 2)
+        case .ytm:
+            return ([(circle(12, 12, 11), .fill), (circle(12, 12, 6.6), .fill), (circle(12, 12, 5.4), .fill),
+                     ("M10 9.2L15.4 12L10 14.8Z", .fill)], 2)
+        case .sc:
+            return ([("M10.2 17V8.7C11.2 8 12.4 7.6 13.6 7.6C16.6 7.6 19 9.8 19.4 12.7C19.7 12.6 20.1 12.5 20.5 12.5C22.4 12.5 23.6 13.6 23.6 14.8C23.6 16 22.4 17 20.7 17Z", .fill),
+                     (rect(8.4, 9.2, 1.1, 7.8), .fill), (rect(6.4, 10.2, 1.1, 6.8), .fill), (rect(4.4, 11.4, 1.1, 5.6), .fill),
+                     (rect(2.4, 12.6, 1.1, 4.4), .fill), (rect(0.6, 13.8, 1, 3.2), .fill)], 2)
+        // Jukebox's own mark: the launcher icon's pixel note, as blocks.
+        case .pixelNote:
+            return ([(rect(9, 2.25, 13.6, 3.75), .fill), (rect(9, 2.25, 2, 15.5), .fill), (rect(20.6, 2.25, 2, 15.5), .fill),
+                     (rect(5.1, 13.9, 4, 1.9), .fill), (rect(3.2, 15.75, 7.8, 2.05), .fill), (rect(1.35, 17.8, 7.8, 1.9), .fill), (rect(3.2, 19.65, 3.9, 1.95), .fill),
+                     (rect(16.8, 13.9, 4, 1.9), .fill), (rect(14.9, 15.75, 7.7, 2.05), .fill), (rect(13.05, 17.8, 7.8, 1.9), .fill), (rect(14.9, 19.65, 3.9, 1.95), .fill)], 2)
+        case .thumbsUp:
+            return ([("M7 10v12", .stroke),
+                     ("M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88Z", .stroke)], 2)
         case .cloud: return ([(cloudD, .stroke)], 2)
         case .clear: return ([("M3 6h18M19 6l-1 14H6L5 6M8 6V4h8v2M10 10v6M14 10v6", .stroke)], 2)
         // The desktop menus draw these from the font; drawn here in the same
@@ -126,7 +146,7 @@ enum GlyphBook {
         let (parts, weight) = raw(g)
         let spec = GlyphSpec(parts: parts.map { d, mode in
             GlyphPart(path: SvgPath.parse(d), fill: mode != .stroke, stroke: mode != .fill)
-        }, weight: weight)
+        }, weight: weight, evenOdd: ([.spotify, .ytm, .sc] as [Glyph]).contains(g))
         cache[g] = spec
         return spec
     }
@@ -163,9 +183,14 @@ struct Icon: View {
             let k = box.width / 24
             let scale = CGAffineTransform(scaleX: k, y: k)
             let style = StrokeStyle(lineWidth: width * k, lineCap: .square, lineJoin: .miter)
+            if spec.evenOdd {
+                var shape = Path()
+                for part in spec.parts where part.fill { shape.addPath(part.path.applying(scale)) }
+                ctx.fill(shape, with: .color(color), style: FillStyle(eoFill: true))
+            }
             for part in spec.parts {
                 let p = part.path.applying(scale)
-                if part.fill || fillAll { ctx.fill(p, with: .color(color)) }
+                if !spec.evenOdd && (part.fill || fillAll) { ctx.fill(p, with: .color(color)) }
                 if part.stroke { ctx.stroke(p, with: .color(color), style: style) }
             }
         }
@@ -404,6 +429,26 @@ enum SvgPath {
                           control1: map(c1 - t * s1, s1 + t * c1),
                           control2: map(c2 + t * s2, s2 - t * c2))
             theta = theta2
+        }
+    }
+}
+
+/**
+ * A service's own mark in its colour (round 2 D): Spotify, YouTube Music and
+ * SoundCloud their platform marks; Jukebox the app's pixel note, as in the
+ * header and the launcher icon.
+ */
+struct ServiceMark: View {
+    let service: String
+    var size: CGFloat = 16
+
+    var body: some View {
+        if ["spotify", "ytm", "sc"].contains(service) {
+            Icon(Omp.sourceGlyph(service), size: size, color: Omp.sourceColor(service))
+        } else {
+            Image("LaunchNote").resizable().interpolation(.none).scaledToFit()
+                .frame(width: size, height: size)
+                .accessibilityHidden(true)
         }
     }
 }

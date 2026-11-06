@@ -240,7 +240,7 @@ private struct Strip: View {
         HStack(spacing: 12) {
             Button {
                 present(.menu(title: "Account", items: [
-                    .init(icon: .cloud, label: state.email.ifBlank("Jukebox"), tint: state.selectedAccount == "maro" ? Omp.soft : Omp.foreground) { vm.selectAccount("maro") },
+                    .init(icon: .pixelNote, label: state.email.ifBlank("Jukebox"), tint: state.selectedAccount == "maro" ? Omp.soft : Omp.foreground) { vm.selectAccount("maro") },
                     .init(icon: .spotify, label: state.spotifyConnected ? spotifyName : "Spotify not connected",
                           tint: state.selectedAccount == "spotify" ? Omp.soft : Omp.foreground) { vm.selectAccount("spotify") },
                     .init(icon: .ytm, label: state.ytmConnected ? ytmName : "YouTube Music not connected",

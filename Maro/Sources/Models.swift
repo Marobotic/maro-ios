@@ -209,13 +209,34 @@ struct Device: Equatable, Hashable {
 
 /** Progress of a "Download playlist" job, keyed by its playlist id. */
 struct DownloadJob: Equatable {
+    /** The list's real songs. */
     var total = 0
+    /** Fetched and saved by this job. */
     var done = 0
     var failed = 0
     var running = false
+    /** Saved on this phone before it started: skipped. */
+    var already = 0
+    /** Removed by the service: marked, not asked for. */
+    var unavailable = 0
+    /** How many it set out to fetch. */
+    var wanted = 0
 
-    var finished: Bool { !running && total > 0 && done + failed >= total }
-    var fraction: Double { total > 0 ? Double(done + failed) / Double(total) : 0 }
+    var finished: Bool { !running && total > 0 && already + unavailable + done + failed >= total }
+    var fraction: Double { total > 0 ? Double(already + unavailable + done + failed) / Double(total) : 0 }
+    /** "Downloading 3/12 · 70 already saved", then "81 saved · 1 unavailable". */
+    var label: String {
+        if running && total > 0 {
+            let left = wanted > 0 ? "Downloading \(done + failed)/\(wanted)" : "Downloading\u{2026}"
+            return left + (already > 0 ? " \u{B7} \(already) already saved" : "")
+        }
+        if !running && total == 0 && failed > 0 { return "Couldn't load the list" }
+        guard finished else { return "Preparing download\u{2026}" }
+        var out = "Saved \(already + done)"
+        if unavailable > 0 { out += " \u{B7} \(unavailable) unavailable" }
+        if failed > 0 { out += " \u{B7} \(failed) failed" }
+        return out
+    }
 }
 
 enum PlaybackMode: String {
@@ -434,7 +455,11 @@ struct UiState: Equatable {
     }
 
     /** Why a YouTube Music song can't be played any more, or "" (desktop goneReason). */
-    func goneReason(_ t: Track) -> String { t.source == "ytm" ? gone[t.id] ?? "" : "" }
+    func goneReason(_ t: Track) -> String {
+        if t.source == "ytm" { return gone[t.id] ?? "" }
+        // A song of another service a playlist download found removed.
+        return t.id.isEmpty ? "" : gone["\(t.source):\(t.id)"] ?? ""
+    }
 
     /** Online everything is playable; offline only the songs actually on this phone are. */
     func canPlay(_ t: Track?) -> Bool {
