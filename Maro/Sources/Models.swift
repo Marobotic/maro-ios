@@ -266,6 +266,12 @@ struct Progress: Equatable {
 
 struct UiState: Equatable {
     var signedIn = false
+    /**
+     * After the Jukebox sign-in (round 2 F): "checking" (the splash, while
+     * the account's services are looked at), "pick" ("How do you want to
+     * listen?": no service at all), or "in" (the app).
+     */
+    var listenGate = "checking"
     var email = ""
     var selectedAccount = "maro"
     var busy = false

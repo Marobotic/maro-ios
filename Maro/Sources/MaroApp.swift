@@ -8,8 +8,18 @@ struct MaroApp: App {
         WindowGroup {
             Group {
                 if vm.state.signedIn {
-                    HomeScreen(vm: vm)
-                        .sheet(item: $vm.signIn) { ServiceSignInSheet(signIn: $0) }
+                    // Round 2 F: the splash while the account is asked, the
+                    // listen question only with no service at all, else the app.
+                    switch vm.state.listenGate {
+                    case "checking":
+                        SplashScreen()
+                    case "pick":
+                        ListenScreen(vm: vm)
+                            .sheet(item: $vm.signIn) { ServiceSignInSheet(signIn: $0) }
+                    default:
+                        HomeScreen(vm: vm)
+                            .sheet(item: $vm.signIn) { ServiceSignInSheet(signIn: $0) }
+                    }
                 } else {
                     LoginScreen(vm: vm)
                 }
@@ -224,5 +234,58 @@ struct LoginScreen: View {
             .background(Omp.page, in: Rectangle())
             .overlay(Rectangle().strokeBorder(Omp.edge, lineWidth: 1))
         }
+    }
+}
+
+/** The launch screen's look (the logo on the splash colour), while the account is asked. */
+struct SplashScreen: View {
+    var body: some View {
+        ZStack {
+            Color("SplashBackground").ignoresSafeArea()
+            Image("LaunchNote").resizable().scaledToFit().frame(width: 84, height: 84)
+        }
+    }
+}
+
+/**
+ * "How do you want to listen?" (round 2 F): only when the Jukebox account has
+ * no music service at all. A service signed in here goes onto the account and
+ * the app opens; Continue as guest is remembered on the account. No "Sign in
+ * to Jukebox" here: that is done already.
+ */
+struct ListenScreen: View {
+    @ObservedObject var vm: MaroViewModel
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 12) {
+                Image("LaunchNote").resizable().scaledToFit().frame(width: 64, height: 64)
+                    .padding(.top, 56)
+                Text("How do you want to listen?")
+                    .font(Omp.font(20, bold: true)).foregroundColor(Omp.foreground)
+                    .multilineTextAlignment(.center)
+                Text("Connect a music service to your Jukebox account. Every device you use gets it.")
+                    .font(Omp.font(13)).foregroundColor(Omp.muted)
+                    .multilineTextAlignment(.center)
+                    .padding(.bottom, 14)
+                MButton("Sign in with Spotify", icon: .spotify, iconSize: 18, iconColor: Omp.spotify, small: false, expand: true, height: 46) {
+                    vm.connectService("spotify")
+                }
+                MButton("Sign in with YouTube Music", icon: .ytm, iconSize: 18, iconColor: Omp.ytm, small: false, expand: true, height: 46) {
+                    vm.connectService("ytm")
+                }
+                MButton("Sign in with SoundCloud", icon: .sc, iconSize: 18, iconColor: Omp.sc, small: false, expand: true, height: 46) {
+                    vm.connectService("sc")
+                }
+                MButton("Continue as guest", kind: .ghost, small: false, expand: true, height: 46) {
+                    vm.continueAsGuest()
+                }
+                .padding(.top, 6)
+            }
+            .padding(.horizontal, 24)
+            .frame(maxWidth: 440)
+            .frame(maxWidth: .infinity)
+        }
+        .background(Omp.page.ignoresSafeArea())
     }
 }

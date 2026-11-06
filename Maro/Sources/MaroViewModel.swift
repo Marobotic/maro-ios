@@ -184,6 +184,9 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         s.songsLimitGb = prefs.integer(forKey: "songsLimitGb")
         // The account's preferred source as last read (the account's copy wins once it answers).
         s.playbackSource = prefs.string(forKey: "preferredSource") ?? "auto"
+        // Into the app at once when this phone already went in once; else the
+        // splash until the account's services are known (round 2 F).
+        s.listenGate = prefs.bool(forKey: "listenIn") ? "in" : "checking"
         state = s
         applyLaunchRoute()
         Task {
@@ -192,7 +195,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             publishLocalAvailable()
             if state.signedIn {
                 ensurePhonePump()
-                Task { await refreshServices() }
+                Task { await refreshServices(); await decideListenGate() }
+                gateDeadline()
                 await pullAccount()
                 await pullSync()
                 await syncPlayer()
@@ -252,6 +256,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         if old.library.count != state.library.count && !NetworkWatch.expensive { prefetchLibraryArt(state.library) }
         // And their kept song lists counted, so each row shows what we hold.
         if old.library != state.library { loadKeptCounts(state.library) }
+        // A service signed in from "How do you want to listen?": into the app.
+        if state.listenGate == "pick" && !state.services.isEmpty { setGate("in") }
     }
 
     private func prefetchLibraryArt(_ rows: [LibraryRow]) {
@@ -2011,11 +2017,14 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             state.busy = true
             state.error = nil
             if await call() {
+                // The splash until the account's services are known (round 2 F).
+                state.listenGate = "checking"
                 state.signedIn = true
                 state.email = client.email ?? ""
                 state.busy = false
                 _ = await ServiceSessions.shared.unlock(password: password, email: state.email)
-                Task { await refreshServices() }
+                Task { await refreshServices(); await decideListenGate() }
+                gateDeadline()
                 ensurePhonePump()
                 await pullAccount()
                 await pullSync()
@@ -2080,6 +2089,50 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         fresh.error = error
         state = fresh
         progress = Progress()
+        // The next account decides afresh whether to ask how to listen.
+        prefs.removeObject(forKey: "listenIn")
+    }
+
+    // -- first run (round 2 F) ------------------------------------------------
+    //
+    // Jukebox sign-in first; then straight into the app when the account has
+    // any music service (a session on the account, or YouTube Music kept by
+    // Jukebox online), or chose to listen as a guest; only with none at all
+    // "How do you want to listen?". Decided once the account has been asked,
+    // behind the splash, so the question never flashes up and away. Offline:
+    // straight in.
+
+    /** The account's preference key for "Continue as guest" (shared by every app). */
+    static let listenChoiceKey = "listenChoice"
+
+    private func setGate(_ gate: String) {
+        if state.listenGate != gate { state.listenGate = gate }
+        if gate == "in" { prefs.set(true, forKey: "listenIn") }
+    }
+
+    private func decideListenGate() async {
+        guard state.signedIn, state.listenGate == "checking" else { return }
+        if !state.services.isEmpty { return setGate("in") }
+        guard let doc = await client.prefs() else { return setGate("in") }     // offline: straight in
+        applyPrefs(doc)
+        guard state.listenGate == "checking" else { return }
+        let guest = doc.obj("prefs")?.str(Self.listenChoiceKey) == "guest"
+        setGate(guest || !state.services.isEmpty ? "in" : "pick")
+    }
+
+    /** Never more than a few seconds of splash: whatever is known by then decides. */
+    private func gateDeadline() {
+        Task {
+            await sleep(seconds: 8)
+            if state.signedIn && state.listenGate == "checking" { setGate("in") }
+        }
+    }
+
+    /** "Continue as guest": remembered on the account, so no window or device asks again. */
+    func continueAsGuest() {
+        setGate("in")
+        let device = deviceId()
+        Task { _ = await client.putPrefs([Self.listenChoiceKey: "guest"], device: device) }
     }
 
     /**
