@@ -3405,6 +3405,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 selectTab(Sync.viewSearch)
                 setSearchText(value)
             case "settings":
+                if !value.isEmpty { SettingsPage.scrollTo = value }
                 if !state.settingsOpen { toggleSettings() }
             case "library": selectTab(Sync.viewPlaylists)
             case "tab": selectTab(value)

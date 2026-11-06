@@ -21,20 +21,29 @@ struct SettingsPage: View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 0) {
                 SettingsTop(title: "Settings") { vm.toggleSettings() }
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 2) {
-                        health
-                        account
-                        playback
-                        quality
-                        library
-                        storedData
-                        SettingsHead(label: "About")
-                        SettingsStat(label: "Version", value: "Jukebox " + Self.version)
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 2) {
+                            health
+                            account
+                            playback
+                            quality
+                            library
+                            storedData
+                            SettingsHead(label: "About")
+                            SettingsStat(label: "Version", value: "Jukebox " + Self.version)
+                        }
+                        .padding(.bottom, 56)
                     }
-                    .padding(.bottom, 56)
+                    .scrollIndicators(.hidden)
+                    .onAppear {
+                        // The launch route's section (testing): settings:stored and the like.
+                        if let target = Self.scrollTo {
+                            Self.scrollTo = nil
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { proxy.scrollTo(target, anchor: .top) }
+                        }
+                    }
                 }
-                .scrollIndicators(.hidden)
             }
             .padding(.horizontal, 12)
             .padding(.top, 16)
@@ -102,7 +111,7 @@ struct SettingsPage: View {
     }
 
     @ViewBuilder private var playback: some View {
-        SettingsHead(label: "Playback")
+        SettingsHead(label: "Playback").id("playback")
         SettingsChoice(label: "Preferred source", value: state.playbackSource, options: Omp.sourceOptions) { vm.setPlaybackSource($0) }
         PlaybackDeviceRow()
         SettingsAction(label: "This phone's name", value: state.deviceName, action: "Rename") {
@@ -135,7 +144,7 @@ struct SettingsPage: View {
     @ViewBuilder private var library: some View {
         let lists = state.playlists.filter { $0.source != "liked" }
         let listTracks = lists.reduce(0) { $0 + $1.count }
-        SettingsHead(label: "Library")
+        SettingsHead(label: "Library").id("library")
         SettingsStat(label: "Queue", value: "\(state.displayState().queue.count) tracks")
         SettingsStat(label: "Liked", value: "\(likedCount) tracks")
         SettingsStat(label: "Your playlists", value: "\(lists.count) · \(listTracks) tracks")
@@ -150,7 +159,7 @@ struct SettingsPage: View {
     }
 
     @ViewBuilder private var storedData: some View {
-        SettingsHead(label: "Stored data")
+        SettingsHead(label: "Stored data").id("stored")
         SettingsAction(label: "Songs on disk", value: "\(songsOnDisk) songs  ·  \(Omp.fmtBytes(bytesOnDisk))", action: "Clear") { purge("songs") }
         SettingsNote(songsNote)
         SettingsChoice(label: "Limit for songs on disk", value: String(state.songsLimitGb), options: Self.limitOptions) { vm.setSongsLimit(Int($0) ?? 0) }
@@ -168,6 +177,9 @@ struct SettingsPage: View {
             : "Sign in to \(name) again? The new sign-in replaces the session that stopped working, on every device."
         present(.confirm(message: what, confirm: key == "maro" ? "Sign out" : "Sign in") { vm.purgeAndSignIn(key) })
     }
+
+    /** A section to open at (the launch route's settings:<section>). */
+    static var scrollTo: String?
 
     /** "0.2.0 (33)": the version and build this phone is running. */
     static let version: String = {
