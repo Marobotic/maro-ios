@@ -62,6 +62,12 @@ enum Omp {
 
     /** The redesign's red accent. */
     static let themeAccent = Color(hex: 0xB14242)
+    /** The mockup's red: the saved check and a page's kind label. */
+    static let markRed = Color(hex: 0xE5323F)
+    /** Outlined buttons' border. */
+    static let outline = Color(hex: 0x2A2A2A)
+    /** An album page's artist links. */
+    static let link = Color(hex: 0x6FC3B2)
 
     static let card = row
     static let cardRaised = raise

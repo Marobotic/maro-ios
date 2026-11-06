@@ -263,11 +263,28 @@ struct EqBars: View {
 }
 
 /** The saved-offline mark: a check in the song's service colour. */
+/**
+ * Saved on this phone: one mark for every song from every service - a 12 pt
+ * red (#E5323F) disc with a white check (m6 12 4 4 8-8, stroke 4, square
+ * caps) drawn at 8 pt.
+ */
 struct SavedCheck: View {
-    let color: Color
-
     var body: some View {
-        Icon(.check, size: 11, color: color)
+        ZStack {
+            Circle().fill(Omp.markRed)
+            Canvas { ctx, box in
+                let k = box.width / 24
+                var p = Path()
+                p.move(to: CGPoint(x: 6 * k, y: 12 * k))
+                p.addLine(to: CGPoint(x: 10 * k, y: 16 * k))
+                p.addLine(to: CGPoint(x: 18 * k, y: 8 * k))
+                ctx.stroke(p, with: .color(.white), style: StrokeStyle(lineWidth: 4 * k, lineCap: .square, lineJoin: .miter))
+            }
+            .frame(width: 8, height: 8)
+        }
+        .frame(width: 12, height: 12)
+        .accessibilityElement()
+        .accessibilityLabel("Saved on this phone")
     }
 }
 

@@ -315,6 +315,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
 
     private func applyLiked(_ arr: [Any]) {
         let tracks = Sync.tracks(arr).map(giveVideoId)
+        likedKnown = true
         if tracks.map(\.id) == likedTracks.map(\.id) { return }
         var s = state
         s.likedKeys = Sync.likedKeys(arr)
@@ -324,7 +325,30 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             s.playlistTracks = likedTracks
             s.playlistTotal = likedTracks.count
         }
+        countLiked(&s)
         state = s
+    }
+
+    /** Whether the liked list itself has arrived (from the snapshot or the long-poll). */
+    private var likedKnown = false
+
+    /**
+     * Liked Songs' count is the liked list this phone holds: the library
+     * snapshot's own count for it lags behind (62 there, 82 in the list).
+     */
+    private func countLiked(_ s: inout UiState) {
+        guard likedKnown else { return }
+        let n = likedTracks.count
+        s.library = s.library.map { row in
+            guard row.source == "liked", !row.isHeader, row.count != n else { return row }
+            var r = row
+            r.count = n
+            return r
+        }
+        if var open = s.selectedPlaylist, open.source == "liked", open.count != n {
+            open.count = n
+            s.selectedPlaylist = open
+        }
     }
 
     private func musicDirectory() -> URL {
@@ -782,12 +806,14 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         if !recent.isEmpty { s.recent = recent }
         s.likedKeys = Sync.likedKeys(likedArr)
         likedTracks = Sync.tracks(likedArr).map(giveVideoId)
+        if likedArr != nil { likedKnown = true }
         s.likedIds = Set(likedTracks.flatMap(\.trackIds))
         if s.selectedPlaylist?.source == "liked" {
             s.playlistTracks = likedTracks
             s.playlistTotal = likedTracks.count
         }
         s.library = Sync.library(snap.obj("playlists"))
+        countLiked(&s)
         let saved = Sync.savedPlaylists(snap.obj("savedPlaylists"))
         if !saved.isEmpty { savedPlaylists = saved }
         // What the desktop streams and downloads at: its setting, shared.
@@ -2318,6 +2344,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             s.playlistTracks = likedTracks
             s.playlistTotal = likedTracks.count
         }
+        likedKnown = true
+        countLiked(&s)
         state = s
         // Saved on the droplet (every other device has it at once); a few
         // tries if the connection drops.
