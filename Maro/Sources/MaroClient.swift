@@ -481,20 +481,6 @@ final class MaroClient: @unchecked Sendable {
         return got.body
     }
 
-    // -- the YouTube Music session kept alive on the droplet (round 2 C) --
-
-    /**
-     * The account's YouTube Music session as the droplet keeps it:
-     * {ok, state, account, at, cookies, headers}. A 404 is the answer
-     * {state: "none"}; nil only when the droplet could not be asked.
-     */
-    func ytmSession(withCookies: Bool = true) async -> JSON? {
-        guard let got = await answer("GET", withCookies ? "/ytm/session" : "/ytm/session/status", timeout: 15) else { return nil }
-        if got.code == 404 { return ["ok": false, "state": "none"] }
-        guard (200..<300).contains(got.code) else { return nil }
-        return got.body
-    }
-
     func setPlayback(_ device: String) async -> Bool {
         guard let resp = try? await call("POST", "/account/playback", body: ["device": device]) else { return false }
         return resp.str("playback") == device

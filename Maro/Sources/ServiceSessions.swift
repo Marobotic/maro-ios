@@ -24,7 +24,9 @@ final class ServiceSessions: @unchecked Sendable {
     static let soundcloud = "soundcloud"
     static let ytm = "ytm"
     static let librespot = "librespot"
-    static let all = [librespot, ytm, soundcloud]
+    // YouTube Music is not here: its session is this phone's own (YtmDevice),
+    // never taken from or put on the account (round 2 H).
+    static let all = [librespot, soundcloud]
 
     private static let iterations: UInt32 = 210_000
     private static let info = "maro.music/service-credentials/v1"

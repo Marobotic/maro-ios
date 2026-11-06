@@ -9,8 +9,8 @@ import WebKit
  * proof of a finished sign-in, same session shapes. The result goes onto the
  * account (ServiceSessions.publish), where every client takes it.
  *
- *   YouTube Music: Google's sign-in, done when YouTube's SAPISID cookie is set
- *                  and the page is back on youtube.com.
+ *   YouTube Music: Google's sign-in in this phone's own persistent store (YtmDevice),
+ *                  done at YouTube's SAPISID cookie; the session never leaves the phone.
  *   SoundCloud:    soundcloud.com/signin, done at its oauth_token cookie.
  *   Spotify:       Spotify's authorize page (PKCE, the desktop helper's client
  *                  and loopback address); the code is caught as the page heads
@@ -20,7 +20,8 @@ import WebKit
 @MainActor
 final class ServiceSignIn: NSObject, ObservableObject, WKNavigationDelegate, Identifiable {
     enum Outcome {
-        case session(JSON)          // ytm / soundcloud: the payload for the account
+        case session(JSON)          // soundcloud: the payload for the account
+        case device                 // ytm: signed in, in this phone's own store (YtmDevice)
         case spotifyToken(String)   // spotify: an access token for the player
         case failed(String)
         case cancelled
@@ -84,7 +85,9 @@ final class ServiceSignIn: NSObject, ObservableObject, WKNavigationDelegate, Ide
         self.onDone = onDone
         title = service == "spotify" ? "Sign in to Spotify" : service == "ytm" ? "Sign in to YouTube Music" : "Sign in to SoundCloud"
         let config = WKWebViewConfiguration()
-        config.websiteDataStore = .nonPersistent()      // a fresh sign-in, nobody else's cookies
+        // YouTube Music signs in inside this phone's own persistent store, where
+        // the session stays (round 2 H); the others in a fresh private one.
+        config.websiteDataStore = service == "ytm" ? YtmDevice.shared.store : .nonPersistent()
         webView = WKWebView(frame: .zero, configuration: config)
         super.init()
         webView.navigationDelegate = self
@@ -102,6 +105,8 @@ final class ServiceSignIn: NSObject, ObservableObject, WKNavigationDelegate, Ide
             } else {
                 self.webView.customUserAgent = Self.safariFallback
             }
+            // The keeper visits YouTube Music under the same name the session was made with.
+            if self.service == "ytm" { UserDefaults.standard.set(self.webView.customUserAgent, forKey: "ytmUserAgent") }
             self.load()
         }
     }
@@ -158,8 +163,9 @@ final class ServiceSignIn: NSObject, ObservableObject, WKNavigationDelegate, Ide
             let yt = cookies.filter { $0.domain.hasSuffix("youtube.com") }
             let names = Set(yt.map(\.name))
             guard names.contains("SAPISID") || names.contains("__Secure-3PAPISID"), host.hasSuffix("youtube.com") else { return }
-            status = "Signed in - saving it to your account"
-            finish(.session(Self.youtubeSession(yt)))
+            // The session stays in this phone's store; nothing is exported.
+            status = "Signed in on this phone"
+            finish(.device)
         } else {
             guard let token = cookies.first(where: { $0.name == "oauth_token" && $0.domain.hasSuffix("soundcloud.com") })?.value,
                   !token.isEmpty else { return }
@@ -172,40 +178,6 @@ final class ServiceSignIn: NSObject, ObservableObject, WKNavigationDelegate, Ide
             guard let user else { return onDone(.failed("SoundCloud did not accept that sign-in - try again")) }
             onDone(.session(["token": token, "user": user]))
         }
-    }
-
-    /**
-     * The desktop's YouTube Music session: ytmusicapi's browser headers (the
-     * cookie header and a SAPISIDHASH) and the same cookies as the Netscape
-     * file yt-dlp reads.
-     */
-    static func youtubeSession(_ cookies: [HTTPCookie]) -> JSON {
-        let origin = "https://music.youtube.com"
-        let header = cookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
-        let sapisid = cookies.first { $0.name == "SAPISID" }?.value
-            ?? cookies.first { $0.name == "__Secure-3PAPISID" }?.value ?? ""
-        let ts = Int(Date().timeIntervalSince1970)
-        let hash = Insecure.SHA1.hash(data: Data("\(ts) \(sapisid) \(origin)".utf8)).map { String(format: "%02x", $0) }.joined()
-        let headers: JSON = [
-            "accept": "*/*",
-            "accept-encoding": "gzip, deflate",
-            "accept-language": "en-US,en;q=0.5",
-            "authorization": "SAPISIDHASH \(ts)_\(hash)",
-            "content-encoding": "gzip",
-            "content-type": "application/json",
-            "cookie": header,
-            "origin": origin,
-            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0",
-            "x-goog-authuser": "0",
-        ]
-        var lines = ["# Netscape HTTP Cookie File", ""]
-        for c in cookies {
-            let domain = c.domain.hasPrefix(".") ? c.domain : "." + c.domain
-            let expires = Int(c.expiresDate?.timeIntervalSince1970 ?? 0)
-            lines.append([domain, "TRUE", c.path.isEmpty ? "/" : c.path, c.isSecure ? "TRUE" : "FALSE",
-                          "\(expires)", c.name, c.value].joined(separator: "\t"))
-        }
-        return ["headers": headers, "cookies": lines.joined(separator: "\n") + "\n", "oauth": NSNull()]
     }
 
     // -- Google's refusals, said in Jukebox's own words ----------------------

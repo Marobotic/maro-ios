@@ -162,7 +162,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         AudioCache.client = client
         AudioCache.tier = { [weak self] in self?.state.quality ?? "max" }
         ArtLoader.shared.client = client
-        YtmVault.shared.client = client
+        // This phone's own YouTube Music session: restored, read, kept fresh (round 2 H).
+        Task { await YtmDevice.shared.start() }
         // Covers changed on the account (Fix artwork on another device, a
         // song's first proper cover): checked now and every two minutes.
         Task.detached(priority: .utility) {
@@ -1975,28 +1976,22 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             // The account's sessions no longer open: the password changed.
             return signInAgain("Your Jukebox password changed. Sign in again.")
         }
-        // YouTube Music: Jukebox online's copy, at start and every 10 minutes
-        // (this runs every 5), and at once whenever YouTube Music refuses it.
-        if uptime() - vaultAskedAt > 570 {
-            vaultAskedAt = uptime()
-            await YtmVault.shared.refresh()
-        }
+        // This phone's own YouTube Music session read before the services are counted.
+        await YtmDevice.shared.start()
         state.services = currentServices()
         Spotify.shared.start()
         syncSpotifyLists()
         await pullPrefs()
     }
 
-    private var vaultAskedAt: Double = -.infinity
-
     /**
      * The services this phone can use: the account's sealed sessions
-     * (Spotify, YouTube Music, SoundCloud - each app's own sign-in), plus
-     * YouTube Music when Jukebox online holds a healthy session for it.
+     * (Spotify, SoundCloud), and YouTube Music when this phone is signed in
+     * to it itself (YtmDevice; that session never leaves the phone).
      */
     private func currentServices() -> [String] {
         var out = ServiceSessions.shared.available
-        if YtmVault.shared.inUse && !out.contains(ServiceSessions.ytm) { out.append(ServiceSessions.ytm) }
+        if YtmDevice.shared.signedIn { out.append(ServiceSessions.ytm) }
         return out
     }
 
@@ -2044,7 +2039,6 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         Task {
             await client.logout()
             ServiceSessions.shared.forgetAll()
-            YtmVault.shared.forgetLocal()
             Spotify.shared.start()
             resetToSignIn(email: email, error: why)
         }
@@ -2054,7 +2048,9 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         Task {
             await client.logout()
             ServiceSessions.shared.forgetAll()
-            YtmVault.shared.forgetLocal()
+            // Signed out of Jukebox here: the next account must not inherit this
+            // phone's YouTube Music sign-in.
+            await YtmDevice.shared.signOut()
             Spotify.shared.start()      // no login left: stops it
             resetToSignIn()
         }
@@ -2161,10 +2157,17 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     func connectService(_ key: String) {
         let slot = key == "spotify" ? ServiceSessions.librespot : key == "ytm" ? ServiceSessions.ytm : ServiceSessions.soundcloud
         let label = key == "spotify" ? "Spotify" : key == "ytm" ? "YouTube Music" : "SoundCloud"
-        // YouTube Music shown only through Jukebox online's session: there is
-        // no sign-in of this account's own to sign out of, so this signs in.
-        let ownSession = slot != ServiceSessions.ytm || ServiceSessions.shared.session(slot) != nil
-        if state.services.contains(slot) && ownSession {
+        if state.services.contains(slot) {
+            if slot == ServiceSessions.ytm {
+                // This phone's own session: signed out here only (round 2 H).
+                Task {
+                    await YtmDevice.shared.signOut()
+                    ConsoleLog.shared.log("ServiceSignIn", "YouTube Music signed out on this phone")
+                    state.services = currentServices()
+                    showStatus("Signed out of YouTube Music on this phone", "ok")
+                }
+                return
+            }
             Task {
                 await ServiceSessions.shared.signOut(slot, client: client)
                 ConsoleLog.shared.log("ServiceSignIn", "\(label) signed out")
@@ -2181,7 +2184,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     private func startSignIn(_ key: String) {
         let slot = key == "spotify" ? ServiceSessions.librespot : key == "ytm" ? ServiceSessions.ytm : ServiceSessions.soundcloud
         let label = key == "spotify" ? "Spotify" : key == "ytm" ? "YouTube Music" : "SoundCloud"
-        guard ServiceSessions.shared.hasKey else {
+        // YouTube Music's session stays on this phone, so it needs no account key.
+        guard key == "ytm" || ServiceSessions.shared.hasKey else {
             ConsoleLog.shared.log("ServiceSignIn", "\(label) connect blocked: Jukebox sign-in required")
             showStatus("Sign in to Jukebox again to connect music services.", "info")
             return
@@ -2193,6 +2197,9 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             case .session(let payload):
                 ConsoleLog.shared.log("ServiceSignIn", "\(label) sign-in completed; publishing session")
                 Task { await self.saveSession(slot, payload, label: label) }
+            case .device:
+                ConsoleLog.shared.log("ServiceSignIn", "YouTube Music signed in on this phone")
+                Task { await self.ytmSignedInHere() }
             case .spotifyToken(let token):
                 ConsoleLog.shared.log("ServiceSignIn", "Spotify authorization received; starting player sign-in")
                 showStatus("Signing in to Spotify…", "info")
@@ -2220,6 +2227,20 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         state.services = currentServices()
         if slot == ServiceSessions.librespot { Spotify.shared.start() }
         showStatus("Signed in to \(label) - on your account, so every device has it", "ok")
+    }
+
+    /**
+     * Signed in to YouTube Music on this phone (round 2 H): the session stays
+     * in this phone's store. Any old copy on the account's /service/ytm slot
+     * is deleted, so no stale session is ever picked up anywhere.
+     */
+    private func ytmSignedInHere() async {
+        _ = await client.deleteServiceBlob(ServiceSessions.ytm)
+        await YtmDevice.shared.signedInNow()
+        state.services = currentServices()
+        showStatus(YtmDevice.shared.signedIn ? "Signed in to YouTube Music on this phone" : "YouTube Music sign-in didn't stick - try again",
+                   YtmDevice.shared.signedIn ? "ok" : "error")
+        checkHealth(force: true)
     }
 
 
@@ -3308,7 +3329,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             healthAt = uptime()
         }
         let scToken = ServiceSessions.shared.session(ServiceSessions.soundcloud)?.str("token") ?? ""
-        let ytmOn = YtmVault.shared.inUse || ServiceSessions.shared.session(ServiceSessions.ytm) != nil
+        let ytmOn = YtmDevice.shared.signedIn
         var signed: [String: Bool] = ["maro": state.signedIn, "spotify": Spotify.shared.hasLogin, "ytm": ytmOn, "sc": !scToken.isEmpty]
         // One row's Check now: only that service.
         if let only { signed = signed.filter { $0.key == only } }
@@ -3355,23 +3376,17 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     }
 
     /**
-     * YouTube Music's health says which session is in use: Jukebox online's
-     * kept one while the server says it is healthy ("Kept alive by Jukebox
-     * online, last refreshed 4 min ago"), else this phone's own sign-in,
-     * checked with YouTube Music itself.
+     * YouTube Music's health is this phone's own session (round 2 H), asked
+     * of YouTube Music itself: "Signed in on this device as <account>", or
+     * "Google signed this device out" with a one-tap sign-in (the web view
+     * remembers the account, so usually no password).
      */
     private func ytmHealth() async -> HealthState {
-        await YtmVault.shared.refresh()
-        let v = YtmVault.shared.status
-        if YtmVault.shared.inUse {
-            let ago = YtmVault.ago(v.at)
-            let offline = v.reached ? "" : " (last copy - Jukebox online not reachable)"
-            return HealthState(state: "yes", why: "Kept alive by Jukebox online" + (ago.isEmpty ? "" : ", last refreshed \(ago)") + offline)
-        }
         let name = await YouTubeMusic.shared.accountName()
+        YtmDevice.shared.setAccount(name)
         return !name.isEmpty
-            ? HealthState(state: "yes", why: "This phone's own sign-in")
-            : HealthState(state: "no", why: "Google signed this session out")
+            ? HealthState(state: "yes", why: "Signed in on this device as \(name)")
+            : HealthState(state: "no", why: "Google signed this device out - Sign in")
     }
 
     /** "Purge and sign in": a new sign-in, whose session replaces the one that stopped working. */

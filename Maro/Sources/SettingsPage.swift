@@ -79,11 +79,11 @@ struct SettingsPage: View {
                               onPurge: { purgeAndSignIn("maro", "Jukebox") })
             service("spotify", "Spotify", slot: ServiceSessions.librespot, account: Spotify.shared.user)
             service("ytm", "YouTube Music", slot: ServiceSessions.ytm,
-                    account: YtmVault.shared.inUse ? YtmVault.shared.status.account.ifBlank("Kept by Jukebox online") : "")
+                    account: YtmDevice.shared.account.ifBlank("Signed in on this phone"))
             service("sc", "SoundCloud", slot: ServiceSessions.soundcloud,
                     account: ServiceSessions.shared.session(ServiceSessions.soundcloud)?.obj("user")?.str("name") ?? "")
         }
-        SettingsNote("Signed in here or on any other device, a service is on your account and every device uses it; signing out of one signs every device out of it. When Jukebox online keeps a healthy YouTube Music session for your account, it is used instead.")
+        SettingsNote("Signed in here or on any other device, a service is on your account and every device uses it; signing out of one signs every device out of it. YouTube Music is the exception: each device signs in on its own, and that sign-in stays on the device.")
     }
 
     private func service(_ key: String, _ label: String, slot: String, account: String) -> ServiceAccountRow {
@@ -94,8 +94,7 @@ struct SettingsPage: View {
             on: on, health: state.health[key],
             onCheck: { vm.checkHealth(only: key) },
             onSign: { vm.connectService(key) },
-            onPurge: { purgeAndSignIn(key, label) },
-            ownSignIn: key == "ytm" ? ServiceSessions.shared.session(slot) != nil : nil
+            onPurge: { purgeAndSignIn(key, label) }
         )
     }
 
@@ -466,7 +465,8 @@ private struct ServiceAccountRow: View {
             HStack(spacing: 6) {
                 Spacer(minLength: 0)
                 if on { MButton("Check now", action: onCheck) }
-                if h.state == "no" { MButton("Purge and sign in", kind: .danger, action: onPurge) }
+                // YouTube Music: one tap (the web view remembers the account).
+                if h.state == "no" { MButton(service == "ytm" ? "Sign in" : "Purge and sign in", kind: .danger, action: onPurge) }
                 if service != "maro" || on {
                     let own = ownSignIn ?? on
                     MButton(own ? "Sign out" : "Sign in", kind: own ? .ghost : .normal, action: onSign)

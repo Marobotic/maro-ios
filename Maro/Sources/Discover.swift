@@ -33,18 +33,20 @@ struct DiscoverSection: Equatable, Hashable {
 
 actor YouTubeMusic {
     static let shared = YouTubeMusic()
-    private let http = URLSession(configuration: .ephemeral)
+    // Cookies are set by hand from the phone's one store; this session keeps none of its own.
+    private let http: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.httpShouldSetCookies = false
+        config.httpCookieAcceptPolicy = .never
+        return URLSession(configuration: config)
+    }()
     private static let origin = "https://music.youtube.com"
 
     /**
-     * The session's cookie header: Jukebox online's kept session while the
-     * server says it is healthy ("ok"), else this phone's own YouTube Music
-     * sign-in (the account's sealed session, as before round 2).
+     * The session's cookie header: this phone's own YouTube Music sign-in,
+     * read from its persistent web view store (YtmDevice, round 2 H).
      */
-    private func cookie() -> String {
-        if YtmVault.shared.inUse { return YtmVault.shared.cookie }
-        return ServiceSessions.shared.session(ServiceSessions.ytm)?.obj("headers")?.str("cookie") ?? ""
-    }
+    private func cookie() -> String { YtmJar.shared.header }
 
     /**
      * Whether an answer says the session is signed out: YouTube's own
@@ -93,24 +95,24 @@ actor YouTubeMusic {
             let hash = Insecure.SHA1.hash(data: Data("\(ts) \(sid) \(Self.origin)".utf8)).map { String(format: "%02x", $0) }.joined()
             req.setValue(cookies, forHTTPHeaderField: "Cookie")
             req.setValue("SAPISIDHASH \(ts)_\(hash)", forHTTPHeaderField: "Authorization")
-            if YtmVault.shared.inUse {
-                // Jukebox online's cookies travel with its Chrome's own name.
-                req.setValue(YtmVault.shared.authUser, forHTTPHeaderField: "X-Goog-AuthUser")
-                let vaultUA = YtmVault.shared.userAgent
-                if !vaultUA.isEmpty { req.setValue(vaultUA, forHTTPHeaderField: "User-Agent") }
-            } else {
-                req.setValue("0", forHTTPHeaderField: "X-Goog-AuthUser")
-            }
+            req.setValue("0", forHTTPHeaderField: "X-Goog-AuthUser")
         }
         let (data, resp) = try await http.data(for: req)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        // Every cookie the answer sets goes back into the phone's one store,
+        // so the session rotates in one place (round 2 H).
+        if !cookies.isEmpty, let answer = resp as? HTTPURLResponse, let url = answer.url {
+            var fields: [String: String] = [:]
+            for (k, v) in answer.allHeaderFields { if let k = k as? String, let v = v as? String { fields[k] = v } }
+            let fresh = HTTPCookie.cookies(withResponseHeaderFields: fields, for: url)
+            if !fresh.isEmpty { await YtmDevice.shared.absorb(fresh) }
+        }
         let json = code == 200 ? JSONText.parse(data) as? JSON : nil
-        // Turned away (401 / 403 / signed out): Jukebox online's state read at
-        // once, and the call tried once more if that changed which session (or
-        // which cookies) to use. Never a rotation of our own.
+        // Turned away (401 / 403 / signed out): the store read again (the
+        // keeper may have rotated it), and the call tried once more if the
+        // cookies changed.
         if !cookies.isEmpty && !retried && (code == 401 || code == 403 || json.map(Self.signedOut) == true) {
-            _ = await YtmVault.shared.refreshAfterRefusal()
-            if cookie() != cookies { return try await call(endpoint, original, signed: signed, retried: true) }
+            if await YtmDevice.shared.reread() { return try await call(endpoint, original, signed: signed, retried: true) }
         }
         guard let json else {
             throw YouTubeDirect.Refused(reason: "YouTube Music answered \(code)")
