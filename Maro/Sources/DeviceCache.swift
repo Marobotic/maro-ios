@@ -47,6 +47,11 @@ final class DeviceCache: @unchecked Sendable {
         files.forEach { try? FileManager.default.removeItem(at: $0) }
     }
 
+    /** How many opened playlists are kept. */
+    func playlistCount() -> Int {
+        ((try? FileManager.default.contentsOfDirectory(at: playlistDir, includingPropertiesForKeys: nil)) ?? []).count
+    }
+
     func downloadedSongs() -> [Track] { Sync.tracks(readJSON(songsFile) as? [Any]) }
 
     func saveDownloadedSongs(_ songs: [Track]) { write(songsFile, songs.map { $0.toJSON() }) }

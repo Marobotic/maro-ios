@@ -175,7 +175,9 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         s.playbackMode = solo || prefs.string(forKey: "playbackMode") == PlaybackMode.standalonePhone.rawValue ? .standalonePhone : .remoteDesktop
         s.solo = solo
         s.savingOffline = prefs.object(forKey: "savingOffline") as? Bool ?? true
+        s.songsLimitGb = prefs.integer(forKey: "songsLimitGb")
         state = s
+        applyLaunchRoute()
         Task {
             await loadDeviceState()
             await restoreSnapshot()
@@ -423,6 +425,51 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         state.phoneMusicBytes = music.reduce(0) { $0 + ArtLoader.size(of: $1) }
         state.phoneMusicCount = music.count
         state.phoneCacheBytes = ArtLoader.shared.diskBytes()
+        let kept = ((try? FileManager.default.contentsOfDirectory(at: keptDirectory(), includingPropertiesForKeys: nil)) ?? [])
+            .filter { audioExtensions.contains($0.pathExtension) }
+        state.phoneKeptBytes = kept.reduce(0) { $0 + ArtLoader.size(of: $1) }
+        state.phoneKeptCount = kept.count
+        state.playlistCacheCount = deviceCache.playlistCount()
+    }
+
+    func setSongsLimit(_ gb: Int) {
+        state.songsLimitGb = gb
+        prefs.set(gb, forKey: "songsLimitGb")
+        trimKeptSongs()
+        showStatus(gb == 0 ? "Songs on disk: unlimited" : "Songs on disk: up to \(gb) GB", "ok")
+    }
+
+    /**
+     * Over the limit for songs on disk, the songs this phone kept as they
+     * played go, the ones played longest ago first. Songs you saved stay.
+     */
+    private func trimKeptSongs() {
+        let gb = state.songsLimitGb
+        guard gb > 0 else { return }
+        let limit = Int64(gb) * 1_073_741_824
+        let keptDir = keptDirectory(), musicDir = musicDirectory()
+        Task {
+            let removed = await Task.detached(priority: .utility) { () -> [String] in
+                let fm = FileManager.default
+                let saved = ((try? fm.contentsOfDirectory(at: musicDir, includingPropertiesForKeys: nil)) ?? [])
+                    .reduce(Int64(0)) { $0 + ArtLoader.size(of: $1) }
+                let kept = ((try? fm.contentsOfDirectory(at: keptDir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? [])
+                    .map { f -> (URL, Int64, Date) in
+                        (f, ArtLoader.size(of: f), (try? f.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast)
+                    }
+                    .sorted { $0.2 < $1.2 }
+                var total = saved + kept.reduce(Int64(0)) { $0 + $1.1 }
+                var gone: [String] = []
+                for entry in kept where total > limit {
+                    try? fm.removeItem(at: entry.0)
+                    total -= entry.1
+                    gone.append(entry.0.deletingPathExtension().lastPathComponent)
+                }
+                return gone
+            }.value
+            for id in removed { keptFiles.removeValue(forKey: id) }
+            if !removed.isEmpty { refreshPhoneStorage() }
+        }
     }
 
     /**
@@ -1063,6 +1110,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         }
         if let file = localFiles[videoId] ?? keptFiles[videoId], FileManager.default.fileExists(atPath: file.path) {
             playRoute = "file"
+            // Played now: the last a limit on songs on disk lets go.
+            try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: file.path)
             // A saved song's rate is its size over its length: the file is the
             // whole song, so that is exactly what is being heard.
             let bytes = (try? FileManager.default.attributesOfItem(atPath: file.path)[.size] as? NSNumber)?.doubleValue ?? 0
@@ -1727,6 +1776,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         let dir = keptDirectory(), client = client
         guard let file = try? await Task.detached(operation: { try await AudioSaver.saveTo(videoId, dir: dir, client: client) }).value else { return }
         keptFiles[videoId] = file
+        trimKeptSongs()
     }
 
     /** Copy the droplet's copy of [videoId] to the music folder. Returns once done. */
@@ -1910,6 +1960,13 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             }
             return
         }
+        startSignIn(key)
+    }
+
+    /** Sign in to a service on its own page, on this phone; the new session replaces the account's. */
+    private func startSignIn(_ key: String) {
+        let slot = key == "spotify" ? ServiceSessions.librespot : key == "ytm" ? ServiceSessions.ytm : ServiceSessions.soundcloud
+        let label = key == "spotify" ? "Spotify" : key == "ytm" ? "YouTube Music" : "SoundCloud"
         guard ServiceSessions.shared.hasKey else {
             ConsoleLog.shared.log("ServiceSignIn", "\(label) connect blocked: Jukebox sign-in required")
             showStatus("Sign in to Jukebox again to connect music services.", "info")
@@ -2760,12 +2817,76 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
 
     // -- settings -----------------------------------------------------------
 
+    // -- health -------------------------------------------------------------
+
+    private var healthAt: Double = -.infinity
+
+    /**
+     * Settings > Health: whether each account answers right now - the
+     * Jukebox account, then Spotify, YouTube Music and SoundCloud with the
+     * sessions this phone holds. At most once a minute unless forced.
+     */
+    func checkHealth(force: Bool = false) {
+        if !force && uptime() - healthAt < 60 { return }
+        healthAt = uptime()
+        let ytmCookie = ServiceSessions.shared.session(ServiceSessions.ytm)?.obj("headers")?.str("cookie") ?? ""
+        let scToken = ServiceSessions.shared.session(ServiceSessions.soundcloud)?.str("token") ?? ""
+        let signed: [String: Bool] = ["maro": state.signedIn, "spotify": Spotify.shared.hasLogin, "ytm": !ytmCookie.isEmpty, "sc": !scToken.isEmpty]
+        let online = state.online
+        var health: [String: HealthState] = [:]
+        for (key, on) in signed {
+            if !on {
+                health[key] = HealthState(state: "off")
+            } else if !online {
+                health[key] = HealthState(state: "offline", why: "No internet connection")
+            } else {
+                health[key] = HealthState(state: "checking")
+            }
+        }
+        state.health = health
+        guard online else { return }
+        let client = client
+        if signed["maro"] == true {
+            Task {
+                let ok = await client.account() != nil
+                state.health["maro"] = ok ? HealthState(state: "yes") : HealthState(state: "no", why: "The account did not answer")
+            }
+        }
+        if signed["spotify"] == true {
+            Task {
+                Spotify.shared.start()
+                let found = await Spotify.shared.search("music")
+                let why = Spotify.shared.ready ? "Search did not answer" : "The player did not connect"
+                state.health["spotify"] = !found.isEmpty ? HealthState(state: "yes") : HealthState(state: "no", why: why)
+            }
+        }
+        if signed["ytm"] == true {
+            Task {
+                let name = await YouTubeMusic.shared.accountName()
+                state.health["ytm"] = !name.isEmpty ? HealthState(state: "yes") : HealthState(state: "no", why: "Google signed this session out")
+            }
+        }
+        if signed["sc"] == true {
+            Task {
+                let me = await SoundCloud.shared.me(token: scToken)
+                state.health["sc"] = me != nil ? HealthState(state: "yes") : HealthState(state: "no", why: "SoundCloud refused the sign-in")
+            }
+        }
+    }
+
+    /** "Purge and sign in": a new sign-in, whose session replaces the one that stopped working. */
+    func purgeAndSignIn(_ key: String) {
+        if key == "maro" { return signOutMaro() }
+        startSignIn(key)
+    }
+
     func purge(_ scope: String) {
-        send("purge", ["scope": scope])
+        // Songs on disk are this phone's own; the rest is cleared on the desktop too.
+        if scope != "songs" { send("purge", ["scope": scope]) }
         // The phone's own copies of the same things.
         if scope == "artwork" || scope == "all" { ArtLoader.shared.clear() }
         if scope == "playlists" || scope == "all" { deviceCache.clearPlaylists() }
-        if scope == "all" {
+        if scope == "all" || scope == "songs" {
             AudioCache.clear()
             try? FileManager.default.removeItem(at: keptDirectory())
             keptFiles = [:]
@@ -3308,7 +3429,10 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
 
     func toggleSettings() {
         state.settingsOpen.toggle()
-        if state.settingsOpen { refreshPhoneStorage() }
+        if state.settingsOpen {
+            refreshPhoneStorage()
+            checkHealth()
+        }
     }
 
     func showStatus(_ msg: String, _ kind: String) {
