@@ -3,16 +3,19 @@ import SwiftUI
 @main
 struct MaroApp: App {
     @StateObject private var vm = MaroViewModel()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
             Group {
                 if vm.state.signedIn {
-                    // Round 2 F: the splash while the account is asked, the
-                    // listen question only with no service at all, else the app.
+                    // Round 2 F and I: "Checking your accounts" while the other
+                    // devices and the account are asked, the listen question only
+                    // with no service at all, else the app.
                     switch vm.state.listenGate {
                     case "checking":
-                        SplashScreen()
+                        CheckingAccountsScreen(vm: vm)
+                            .sheet(item: $vm.signIn) { ServiceSignInSheet(signIn: $0) }
                     case "pick":
                         ListenScreen(vm: vm)
                             .sheet(item: $vm.signIn) { ServiceSignInSheet(signIn: $0) }
@@ -26,7 +29,66 @@ struct MaroApp: App {
             }
             .preferredColorScheme(.dark)
             .tint(Omp.themeAccent)
+            // The local route while open; the YouTube Music role moves after a
+            // long time away (round 2 I.5).
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .active { vm.appActive(true) } else if phase == .background { vm.appActive(false) }
+            }
         }
+    }
+}
+
+/**
+ * "Checking your accounts" (round 2 I): Spotify, YouTube Music and SoundCloud,
+ * each resolving to where it comes from - another device, the account, or not
+ * connected. A service only an unreachable device has offers "I can't reach
+ * my other devices" (sign in here).
+ */
+struct CheckingAccountsScreen: View {
+    @ObservedObject var vm: MaroViewModel
+
+    var body: some View {
+        let state = vm.state
+        ZStack {
+            Color("SplashBackground").ignoresSafeArea()
+            VStack(spacing: 14) {
+                Image("LaunchNote").resizable().scaledToFit().frame(width: 64, height: 64)
+                Text("Checking your accounts\u{2026}")
+                    .font(Omp.font(17, bold: true)).foregroundColor(Omp.foreground)
+                VStack(spacing: 0) {
+                    row("spotify", "Spotify", state)
+                    row("ytm", "YouTube Music", state)
+                    row("soundcloud", "SoundCloud", state)
+                }
+                .frame(maxWidth: 380)
+                if !state.unreachableServices.isEmpty {
+                    MButton("I can't reach my other devices", kind: .primary, small: false, expand: true, height: 44) { vm.cantReachDevices() }
+                        .frame(maxWidth: 380)
+                    MButton("Continue", kind: .ghost, small: false, expand: true, height: 40) { vm.skipAccountCheck() }
+                        .frame(maxWidth: 380)
+                }
+            }
+            .padding(.horizontal, 24)
+        }
+    }
+
+    private func row(_ key: String, _ label: String, _ state: UiState) -> some View {
+        let source = state.accountSources[key] ?? ""
+        let known = !source.isEmpty
+        let on = known && source != "Not connected"
+        return HStack(spacing: 10) {
+            ServiceMark(service: key == "soundcloud" ? "sc" : key, size: 18)
+            OmpText(label, size: 13, color: Omp.foreground, bold: true)
+            Spacer(minLength: 8)
+            if !known {
+                OmpSpinner(size: 12, color: Omp.t2)
+            } else {
+                OmpText(on ? source + " \u{2713}" : source, size: 11.5, color: on ? Omp.ok : Omp.t3)
+            }
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 44)
+        .overlay(alignment: .bottom) { Rectangle().fill(Omp.line).frame(height: 1) }
     }
 }
 

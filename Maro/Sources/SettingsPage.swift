@@ -77,24 +77,29 @@ struct SettingsPage: View {
                                   present(.confirm(message: "Sign out of Jukebox on this phone? Your other devices stay signed in.", confirm: "Sign out") { vm.signOutMaro() })
                               },
                               onPurge: { purgeAndSignIn("maro", "Jukebox") })
-            service("spotify", "Spotify", slot: ServiceSessions.librespot, account: Spotify.shared.user)
+            service("spotify", "Spotify", slot: ServiceSessions.librespot, account: Spotify.shared.user, source: "spotify")
             service("ytm", "YouTube Music", slot: ServiceSessions.ytm,
-                    account: YtmDevice.shared.account.ifBlank("Signed in on this phone"))
+                    account: DeviceLink.shared.amHolder ? YtmDevice.shared.account : "", source: "ytm")
             service("sc", "SoundCloud", slot: ServiceSessions.soundcloud,
-                    account: ServiceSessions.shared.session(ServiceSessions.soundcloud)?.obj("user")?.str("name") ?? "")
+                    account: ServiceSessions.shared.session(ServiceSessions.soundcloud)?.obj("user")?.str("name") ?? "", source: "soundcloud")
         }
-        SettingsNote("Signed in here or on any other device, a service is on your account and every device uses it; signing out of one signs every device out of it. YouTube Music is the exception: each device signs in on its own, and that sign-in stays on the device.")
+        SettingsNote("Sign in once on any device and every device of your account works: Spotify and SoundCloud are shared between your devices (and kept on your account), YouTube Music stays signed in on one device and the others use it through that one; it moves to the device you're using.")
     }
 
-    private func service(_ key: String, _ label: String, slot: String, account: String) -> ServiceAccountRow {
+    private func service(_ key: String, _ label: String, slot: String, account: String, source: String) -> ServiceAccountRow {
         let on = state.services.contains(slot)
+        // Who is signed in, and where it comes from (round 2 I): "From Maro's PC".
+        let from = state.accountSources[source] ?? ""
+        let line = [account, from == "Not connected" ? "" : from].filter { !$0.isEmpty }.joined(separator: " \u{B7} ")
         return ServiceAccountRow(
             service: key, label: label,
-            account: on ? account.ifBlank("Signed in") : "Not connected",
+            account: on ? line.ifBlank("Signed in") : "Not connected",
             on: on, health: state.health[key],
             onCheck: { vm.checkHealth(only: key) },
             onSign: { vm.connectService(key) },
-            onPurge: { purgeAndSignIn(key, label) }
+            onPurge: { purgeAndSignIn(key, label) },
+            // YouTube Music borrowed from another device: "Sign in" here makes this phone the holder.
+            ownSignIn: key == "ytm" ? DeviceLink.shared.amHolder : nil
         )
     }
 

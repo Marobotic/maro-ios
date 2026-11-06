@@ -466,6 +466,42 @@ final class MaroClient: @unchecked Sendable {
         return (got.body.arr("playlists") ?? []).compactMap { $0 as? JSON }
     }
 
+    // -- devices and messages between them (round 2 I) --
+
+    /** PUT /devices/self: this device, its public key, what it holds, its local route. */
+    func registerDevice(_ body: JSON) async -> Bool {
+        guard let got = await answer("PUT", "/devices/self", body: body, timeout: 15) else { return false }
+        return (200..<300).contains(got.code)
+    }
+
+    /** Every device of the account, or nil when the server can't say. */
+    func devices() async -> [JSON]? {
+        guard let got = await answer("GET", "/devices", timeout: 15), (200..<300).contains(got.code) else { return nil }
+        return (got.body.arr("devices") ?? []).compactMap { $0 as? JSON }
+    }
+
+    /** A typed message straight to one device's relay queue. */
+    func relayTo(_ deviceId: String, type: String, payload: JSON, from: String) async -> Bool {
+        guard let got = await answer("POST", "/relay/to/" + Self.escape(deviceId), body: ["type": type, "payload": payload, "from": from], timeout: 15) else { return false }
+        return (200..<300).contains(got.code) && (got.body["ok"] as? Bool) != false
+    }
+
+    /** YouTube Music changes waiting for the holder. */
+    func pending() async -> [JSON]? {
+        guard let got = await answer("GET", "/ytm/pending", timeout: 15), (200..<300).contains(got.code) else { return nil }
+        return (got.body.arr("items") ?? []).compactMap { $0 as? JSON }
+    }
+
+    func addPending(_ op: String, _ args: JSON, from: String) async -> Bool {
+        guard let got = await answer("POST", "/ytm/pending", body: ["op": op, "args": args, "from": from], timeout: 15) else { return false }
+        return (200..<300).contains(got.code)
+    }
+
+    func deletePending(_ id: String) async -> Bool {
+        guard let got = await answer("DELETE", "/ytm/pending/" + Self.escape(id), timeout: 15) else { return false }
+        return (200..<300).contains(got.code)
+    }
+
     // -- finding songs (round 2 J) --
 
     /** GET /cache/find/<kind>?... ("artist" or "album"); nil when the server can't say. */

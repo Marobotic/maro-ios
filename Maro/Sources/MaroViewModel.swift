@@ -163,6 +163,11 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         AudioCache.tier = { [weak self] in self?.state.quality ?? "max" }
         ArtLoader.shared.client = client
         PageStore.client = client
+        // Sign in once, every device works (round 2 I): this phone's link to the others.
+        DeviceLink.shared.client = client
+        DeviceLink.shared.host = self
+        DeviceLink.shared.deviceId = deviceId()
+        DeviceLink.shared.deviceName = Omp.phoneName
         // This phone's own YouTube Music session: restored, read, kept fresh (round 2 H).
         Task { await YtmDevice.shared.start() }
         // Covers changed on the account (Fix artwork on another device, a
@@ -259,7 +264,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         // And their kept song lists counted, so each row shows what we hold.
         if old.library != state.library { loadKeptCounts(state.library) }
         // A service signed in from "How do you want to listen?": into the app.
-        if state.listenGate == "pick" && !state.services.isEmpty { setGate("in") }
+        if (state.listenGate == "pick" || (state.listenGate == "checking" && !state.unreachableServices.isEmpty)) && !state.services.isEmpty { setGate("in") }
     }
 
     private func prefetchLibraryArt(_ rows: [LibraryRow]) {
@@ -351,6 +356,9 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
 
     /** Whether the liked list itself has arrived (from the snapshot or the long-poll). */
     private var likedKnown = false
+
+    /** When the app last went to the background (round 2 I.5), nil while in front. */
+    var backgroundedAt: Date?
 
     /**
      * Songs held per playlist ("source:id" -> how many), for lists not on the
@@ -1069,6 +1077,11 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             // code shown first.
             if prompt.error.isEmpty && prompt.code.isEmpty && !prompt.url.isEmpty { openUrl(prompt.url) }
             state.loginPrompt = prompt
+            return
+        case "session.request", "session.offer", "ytm.request", "ytm.result", "ytm.pending",
+             "ytm.handover", "ytm.handover.ack", "devices.changed", "ytm.holder":
+            // Between this account's devices (round 2 I).
+            DeviceLink.shared.handle(msg)
             return
         case "prefs":
             // Another device changed the account's preferences.
@@ -1992,7 +2005,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
      */
     private func currentServices() -> [String] {
         var out = ServiceSessions.shared.available
-        if YtmDevice.shared.signedIn { out.append(ServiceSessions.ytm) }
+        // YouTube Music: held here, or borrowed from the device that holds it (round 2 I).
+        if YtmDevice.shared.signedIn || !DeviceLink.shared.holder.isEmpty { out.append(ServiceSessions.ytm) }
         return out
     }
 
@@ -2105,8 +2119,15 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     }
 
     private func decideListenGate() async {
-        guard state.signedIn, state.listenGate == "checking" else { return }
+        guard state.signedIn else { return }
+        // "Checking your accounts" (round 2 I): the other devices asked first -
+        // behind that screen on a first run, quietly on every later start.
+        await checkAccounts()
+        guard state.listenGate == "checking" else { return }
         if !state.services.isEmpty { return setGate("in") }
+        // A service only an unreachable device has: the screen stays, offering
+        // "I can't reach my other devices".
+        if !state.unreachableServices.isEmpty { return }
         guard let doc = await client.prefs() else { return setGate("in") }     // offline: straight in
         applyPrefs(doc)
         guard state.listenGate == "checking" else { return }
@@ -2117,8 +2138,9 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     /** Never more than a few seconds of splash: whatever is known by then decides. */
     private func gateDeadline() {
         Task {
-            await sleep(seconds: 8)
-            if state.signedIn && state.listenGate == "checking" { setGate("in") }
+            await sleep(seconds: 12)
+            // Not while "I can't reach my other devices" is offered: that waits for a tap.
+            if state.signedIn && state.listenGate == "checking" && state.unreachableServices.isEmpty { setGate("in") }
         }
     }
 
@@ -2127,6 +2149,20 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         setGate("in")
         let device = deviceId()
         Task { _ = await client.putPrefs([Self.listenChoiceKey: "guest"], device: device) }
+    }
+
+    /**
+     * "I can't reach my other devices" (round 2 I): sign in to the missing
+     * service here instead of getting it from the device that has it.
+     */
+    func cantReachDevices() {
+        guard let first = state.unreachableServices.first else { return setGate(state.services.isEmpty ? "pick" : "in") }
+        connectService(first)
+    }
+
+    /** Past "Checking your accounts" with what is there. */
+    func skipAccountCheck() {
+        setGate(state.services.isEmpty ? "pick" : "in")
     }
 
     /**
@@ -2160,9 +2196,12 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         let label = key == "spotify" ? "Spotify" : key == "ytm" ? "YouTube Music" : "SoundCloud"
         if state.services.contains(slot) {
             if slot == ServiceSessions.ytm {
-                // This phone's own session: signed out here only (round 2 H).
+                // Borrowed from another device: signing in here makes this phone the holder.
+                guard DeviceLink.shared.amHolder || YtmDevice.shared.signedIn else { return startSignIn(key) }
+                // Held here: signed out here, and nobody holds it until someone signs in.
                 Task {
                     await YtmDevice.shared.signOut()
+                    await linkSetHolder(nil)
                     ConsoleLog.shared.log("ServiceSignIn", "YouTube Music signed out on this phone")
                     state.services = currentServices()
                     showStatus("Signed out of YouTube Music on this phone", "ok")
@@ -2238,6 +2277,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     private func ytmSignedInHere() async {
         _ = await client.deleteServiceBlob(ServiceSessions.ytm)
         await YtmDevice.shared.signedInNow()
+        // Signing in here makes this phone the holder; the old one lets go (round 2 I).
+        if YtmDevice.shared.signedIn { await linkSetHolder(deviceId()) }
         state.services = currentServices()
         showStatus(YtmDevice.shared.signedIn ? "Signed in to YouTube Music on this phone" : "YouTube Music sign-in didn't stick - try again",
                    YtmDevice.shared.signedIn ? "ok" : "error")
@@ -3330,7 +3371,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             healthAt = uptime()
         }
         let scToken = ServiceSessions.shared.session(ServiceSessions.soundcloud)?.str("token") ?? ""
-        let ytmOn = YtmDevice.shared.signedIn
+        let ytmOn = YtmDevice.shared.signedIn || !DeviceLink.shared.holder.isEmpty
         var signed: [String: Bool] = ["maro": state.signedIn, "spotify": Spotify.shared.hasLogin, "ytm": ytmOn, "sc": !scToken.isEmpty]
         // One row's Check now: only that service.
         if let only { signed = signed.filter { $0.key == only } }
@@ -3383,6 +3424,13 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
      * remembers the account, so usually no password).
      */
     private func ytmHealth() async -> HealthState {
+        // Borrowed: the holder's state (round 2 I).
+        let link = DeviceLink.shared
+        if !link.amHolder, let peer = link.holderPeer {
+            return peer.online
+                ? HealthState(state: "yes", why: "Through \(peer.name) - online")
+                : HealthState(state: "offline", why: "Through \(peer.name) - offline, changes will sync")
+        }
         let name = await YouTubeMusic.shared.accountName()
         YtmDevice.shared.setAccount(name)
         return !name.isEmpty
@@ -3442,6 +3490,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
 
     private func applyPrefs(_ doc: JSON) {
         guard let p = doc.obj("prefs") else { return }
+        applyHolder(doc)
         let rev = doc.int("rev", -1)
         if rev >= 0 && rev < prefsRev { return }
         prefsRev = max(prefsRev, rev)
@@ -3449,6 +3498,13 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         guard Omp.sourceOptions.contains(where: { $0.0 == source }) else { return }
         prefs.set(source, forKey: "preferredSource")
         if source != state.playbackSource { state.playbackSource = source }
+    }
+
+    /** prefs.ytmHolder from the account doc: the one device holding YouTube Music (round 2 I). */
+    private func applyHolder(_ doc: JSON) {
+        guard let p = doc.obj("prefs") else { return }
+        let holder = p.str("ytmHolder")
+        Task { await DeviceLink.shared.holderIs(holder) }
     }
 
     /** The user picked a preferred source: onto the account, for every device. */
@@ -4018,4 +4074,101 @@ extension ISO8601DateFormatter {
         f.formatOptions = [.withInternetDateTime]
         return f.date(from: s)
     }
+}
+
+// -- sign in once, every device works (round 2 I and I.5) ----------------------
+
+extension MaroViewModel: DeviceLinkHost {
+    func linkChanged() {
+        state.services = currentServices()
+        if ServiceSessions.shared.session(ServiceSessions.librespot) != nil { Spotify.shared.start() }
+        state.accountSources = accountSources()
+        Task { await DeviceLink.shared.register() }
+    }
+
+    func linkStatus(_ message: String, _ kind: String) { showStatus(message, kind) }
+
+    var linkPlayingDevice: String { playerDoc?.str("device") ?? "" }
+
+    var linkPlayingHere: Bool { isPhone && state.localPlaying }
+
+    func linkSetHolder(_ id: String?) async {
+        let value: Any = id ?? NSNull()
+        if let doc = await client.putPrefs(["ytmHolder": value], device: deviceId()) { applyPrefs(doc) }
+    }
+
+    /**
+     * Each service's source line, as onboarding ("Checking your accounts")
+     * and Settings > Accounts show it.
+     */
+    func accountSources() -> [String: String] {
+        let link = DeviceLink.shared
+        link.updateSources()
+        var out: [String: String] = [:]
+        for service in ["spotify", "soundcloud"] {
+            let s = link.sources[service] ?? ""
+            if s == "here" {
+                out[service] = "This device"
+            } else if s.hasPrefix("peer:") {
+                out[service] = "From " + String(s.dropFirst("peer:".count))
+            } else if s == "account" {
+                out[service] = "On your account"
+            } else {
+                out[service] = "Not connected"
+            }
+        }
+        if link.amHolder {
+            out["ytm"] = "Signed in here (moves to the device you're using)"
+        } else if let peer = link.holderPeer {
+            out["ytm"] = peer.online ? "Through \(peer.name) - online" : "Through \(peer.name) - offline, changes will sync"
+        } else {
+            out["ytm"] = "Not connected"
+        }
+        return out
+    }
+
+    /**
+     * Who has which service, checked with the other devices: this device on
+     * the account, the account's copies, a session from a device that holds
+     * one, and who holds YouTube Music. Quiet on every start; behind
+     * "Checking your accounts" on the first.
+     */
+    func checkAccounts() async {
+        let link = DeviceLink.shared
+        link.startLan()
+        await link.register()
+        await link.refreshPeers()
+        await link.askForSessions()
+        state.services = currentServices()
+        state.accountSources = accountSources()
+        // A service only an unreachable device has, with no copy on the account.
+        var unreachable: [String] = []
+        if ServiceSessions.shared.session(ServiceSessions.librespot) == nil, link.peers.contains(where: { $0.spotify && !$0.online }) { unreachable.append("spotify") }
+        if ServiceSessions.shared.session(ServiceSessions.soundcloud) == nil, link.peers.contains(where: { $0.soundcloud && !$0.online }) { unreachable.append("sc") }
+        state.unreachableServices = unreachable
+        if link.amHolder { await link.applyPending() }
+    }
+
+    /** The app came to the front or went away (scene phase). */
+    func appActive(_ active: Bool) {
+        let link = DeviceLink.shared
+        if active {
+            backgroundedAt = nil
+            if state.signedIn { link.startLan() }
+            return
+        }
+        link.stopLan()
+        backgroundedAt = Date()
+        // I.5: after more than 10 minutes away and not playing, the YouTube
+        // Music role goes to the device in use. iOS suspends an app that isn't
+        // playing, so this happens if the app is still running by then (or at
+        // termination, below).
+        let mark = backgroundedAt
+        Task {
+            try? await Task.sleep(nanoseconds: 600_000_000_000)
+            guard backgroundedAt == mark, backgroundedAt != nil, !linkPlayingHere else { return }
+            await link.handOver(reason: "phone away for 10 minutes")
+        }
+    }
+
 }

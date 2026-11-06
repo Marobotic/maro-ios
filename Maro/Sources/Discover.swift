@@ -76,6 +76,9 @@ actor YouTubeMusic {
     }
 
     private func call(_ endpoint: String, _ original: JSON, signed: Bool, retried: Bool) async throws -> JSON {
+        // Not the YouTube Music holder: the call borrowed from the device that is
+        // (round 2 I); unreachable, it goes on anonymously.
+        if signed && !retried && cookie().isEmpty, let borrowed = await DeviceLink.shared.borrow(endpoint, original) { return borrowed }
         var body = original
         let d = Calendar(identifier: .gregorian).dateComponents(in: TimeZone(identifier: "UTC")!, from: Date())
         let version = String(format: "1.%04d%02d%02d.01.00", d.year ?? 2026, d.month ?? 1, d.day ?? 1)

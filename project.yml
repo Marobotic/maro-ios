@@ -43,6 +43,10 @@ targets:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
+        # Round 2 I: the local route between this account's devices on the same Wi-Fi.
+        NSLocalNetworkUsageDescription: Jukebox talks to your other devices on this network (your PC, other phones) so a sign-in on one works on all of them.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
         # Keeps playback going with the screen off or the app in the background.
         UIBackgroundModes:
           - audio

@@ -106,6 +106,18 @@ final class YtmDevice: NSObject, WKNavigationDelegate {
 
     func setAccount(_ name: String) { account = name }
 
+    /** The Google and YouTube cookies as rows, for a hand-over (round 2 I.5); sealed by the caller. */
+    func exportCookies() async -> [JSON] {
+        let all = await store.httpCookieStore.allCookies()
+        return Self.rows(all.filter { $0.domain.hasSuffix("youtube.com") || $0.domain.hasSuffix("google.com") })
+    }
+
+    /** Cookies handed over by the previous holder: into this phone's store, then read. */
+    func importCookies(_ rows: [JSON]) async {
+        await setRows(rows)
+        await readCookies()
+    }
+
     /** Signed out on this phone: the store and its backup wiped. */
     func signOut() async {
         await store.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast)
@@ -140,15 +152,18 @@ final class YtmDevice: NSObject, WKNavigationDelegate {
         backup(live.filter { $0.domain.hasSuffix("youtube.com") || $0.domain.hasSuffix("google.com") })
     }
 
-    private func backup(_ cookies: [HTTPCookie]) {
-        let rows: [JSON] = cookies.map { c in
+    private static func rows(_ cookies: [HTTPCookie]) -> [JSON] {
+        cookies.map { c in
             var o: JSON = ["name": c.name, "value": c.value, "domain": c.domain, "path": c.path,
                            "secure": c.isSecure, "httpOnly": c.isHTTPOnly]
             if let e = c.expiresDate { o["expires"] = e.timeIntervalSince1970 }
             if let s = c.sameSitePolicy { o["sameSite"] = s.rawValue }
             return o
         }
-        Keychain.set(JSONText.data(rows), Self.backupItem)
+    }
+
+    private func backup(_ cookies: [HTTPCookie]) {
+        Keychain.set(JSONText.data(Self.rows(cookies)), Self.backupItem)
     }
 
     /** WebKit lost the cookies (a cleared store): put the Keychain backup back. */
@@ -156,6 +171,12 @@ final class YtmDevice: NSObject, WKNavigationDelegate {
         let all = await store.httpCookieStore.allCookies()
         if all.contains(where: Self.isSignIn) { return }
         guard let data = Keychain.get(Self.backupItem), let rows = JSONText.parse(data) as? [JSON] else { return }
+        await setRows(rows)
+        ConsoleLog.shared.log("YouTubeMusic", "restored this phone's sign-in from the Keychain backup")
+    }
+
+    /** Cookie rows (backup or hand-over) into the store. */
+    private func setRows(_ rows: [JSON]) async {
         let now = Date().timeIntervalSince1970
         for o in rows {
             let expires = o.double("expires")
@@ -169,7 +190,6 @@ final class YtmDevice: NSObject, WKNavigationDelegate {
             if !o.str("sameSite").isEmpty { p[.sameSitePolicy] = o.str("sameSite") }
             if let c = HTTPCookie(properties: p) { await store.httpCookieStore.setCookie(c) }
         }
-        ConsoleLog.shared.log("YouTubeMusic", "restored this phone's sign-in from the Keychain backup")
     }
 
     // -- the keeper: music.youtube.com in a hidden web view -------------------

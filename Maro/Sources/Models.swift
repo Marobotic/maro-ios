@@ -272,6 +272,14 @@ struct UiState: Equatable {
      * listen?": no service at all), or "in" (the app).
      */
     var listenGate = "checking"
+    /**
+     * Where each service comes from (round 2 I): "spotify", "ytm", "soundcloud"
+     * -> "This device", "From Maro's PC", "Through Maro's PC - online",
+     * "On your account", "Not connected"...
+     */
+    var accountSources: [String: String] = [:]
+    /** Services only an unreachable device has (no account copy): "spotify", "sc". */
+    var unreachableServices: [String] = []
     var email = ""
     var selectedAccount = "maro"
     var busy = false
