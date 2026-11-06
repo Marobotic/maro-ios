@@ -486,46 +486,83 @@ struct WaveSeek: View {
 
     var body: some View {
         let bars = Self.heights(key)
+        let shown: Double = min(max(drag ?? fraction, 0), 1)
         GeometryReader { geo in
-            let w = max(geo.size.width, 1)
-            let f = min(max(drag ?? fraction, 0), 1)
-            let count = bars.count
-            let gap: CGFloat = 2
-            let barW = max(1, min(4, (w - gap * CGFloat(count - 1)) / CGFloat(count)))
-            let used = barW * CGFloat(count) + gap * CGFloat(count - 1)
+            let layout = WaveLayout(width: geo.size.width, height: geo.size.height, count: bars.count)
             ZStack(alignment: .leading) {
-                HStack(alignment: .center, spacing: gap) {
-                    ForEach(0..<count, id: \.self) { i in
-                        let done = (Double(i) + 0.5) / Double(count) <= f
-                        Rectangle()
-                            .fill(done ? Omp.foreground : Omp.edge)
-                            .frame(width: barW, height: max(2, geo.size.height * bars[i]))
-                    }
-                }
-                .frame(width: used, height: geo.size.height)
-                .frame(maxWidth: .infinity)
+                WaveBars(bars: bars, layout: layout, fraction: shown)
+                    .frame(maxWidth: .infinity)
                 Rectangle().fill(Omp.foreground)
-                    .frame(width: 2, height: geo.size.height)
-                    .offset(x: (w - used) / 2 + min(max(used * f - 1, 0), used - 2))
+                    .frame(width: 2, height: layout.height)
+                    .offset(x: layout.playhead(shown))
             }
             .contentShape(Rectangle())
             .gesture(
                 DragGesture(minimumDistance: 0)
-                    .onChanged { v in if enabled { drag = progress(v.location.x, w, used) } }
+                    .onChanged { v in if enabled { drag = layout.fraction(at: v.location.x) } }
                     .onEnded { v in
                         guard enabled else { return }
                         drag = nil
-                        onSeek(progress(v.location.x, w, used))
+                        onSeek(layout.fraction(at: v.location.x))
                     }
             )
         }
         .frame(height: 26)
         .opacity(loading ? 0.55 : 1)
     }
+}
 
-    private func progress(_ x: CGFloat, _ w: CGFloat, _ used: CGFloat) -> Double {
-        let left = (w - used) / 2
-        return Double(min(max((x - left) / max(used, 1), 0), 1))
+/** Where the waveform's bars sit in its box. */
+private struct WaveLayout {
+    let width: CGFloat
+    let height: CGFloat
+    let count: Int
+    let gap: CGFloat = 2
+
+    var barWidth: CGFloat {
+        let n = CGFloat(max(count, 1))
+        let room: CGFloat = max(width, 1) - gap * (n - 1)
+        return max(1, min(4, room / n))
+    }
+
+    var used: CGFloat {
+        let n = CGFloat(max(count, 1))
+        return barWidth * n + gap * (n - 1)
+    }
+
+    var left: CGFloat { (max(width, 1) - used) / 2 }
+
+    func playhead(_ f: Double) -> CGFloat {
+        let x: CGFloat = used * CGFloat(f) - 1
+        return left + min(max(x, 0), used - 2)
+    }
+
+    func fraction(at x: CGFloat) -> Double {
+        let t: CGFloat = (x - left) / max(used, 1)
+        return Double(min(max(t, 0), 1))
+    }
+}
+
+private struct WaveBars: View {
+    let bars: [Double]
+    let layout: WaveLayout
+    let fraction: Double
+
+    var body: some View {
+        HStack(alignment: .center, spacing: layout.gap) {
+            ForEach(0..<bars.count, id: .self) { i in
+                bar(i)
+            }
+        }
+        .frame(width: layout.used, height: layout.height)
+    }
+
+    private func bar(_ i: Int) -> some View {
+        let done: Bool = (Double(i) + 0.5) / Double(bars.count) <= fraction
+        let h: CGFloat = max(2, layout.height * CGFloat(bars[i]))
+        return Rectangle()
+            .fill(done ? Omp.foreground : Omp.edge)
+            .frame(width: layout.barWidth, height: h)
     }
 }
 
