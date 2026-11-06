@@ -550,7 +550,7 @@ private struct WaveBars: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: layout.gap) {
-            ForEach(0..<bars.count, id: .self) { i in
+            ForEach(0..<bars.count, id: \.self) { i in
                 bar(i)
             }
         }
