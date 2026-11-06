@@ -47,7 +47,7 @@ struct LyricsView: View {
 }
 
 /** Lyrics without times: plain text from the top, scrolled by hand. */
-private struct PlainLyrics: View {
+struct PlainLyrics: View {
     let lyrics: SongLyrics
 
     var body: some View {

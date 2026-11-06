@@ -272,17 +272,21 @@ struct TransportBar: View {
 /**
  * The full-screen view (the desktop's Jamming mode): the red glow from the
  * left, the cover with its title, heart and controls, and the lyrics large
- * below, following the song. "Hide lyrics" leaves the big cover alone.
+ * below, following the song. "Hide lyrics" leaves the big cover alone; a song
+ * with no lyrics at all gets that layout only, with no button, and the choice
+ * made comes back with the next song that has lyrics.
  */
 struct JamView: View {
     let state: UiState
     @ObservedObject var vm: MaroViewModel
     let close: () -> Void
-    @State private var showLyrics = true
+    @AppStorage("jb.jamLyrics") private var showLyrics = true
 
     var body: some View {
         let lyrics = vm.lyrics
-        let hasLyrics = lyrics.synced && !lyrics.lines.isEmpty
+        // Known to have none: the lookup finished empty. While it runs, the chosen layout stays.
+        let noLyrics = state.track == nil || (!lyrics.loading && lyrics.lines.isEmpty)
+        let lyricsMode = !noLyrics && showLyrics
         GeometryReader { geo in
             ZStack {
                 JamAmbient().ignoresSafeArea()
@@ -290,46 +294,48 @@ struct JamView: View {
                     HStack(spacing: 8) {
                         Image("LaunchNote").resizable().scaledToFit().frame(width: 26, height: 26)
                         Spacer(minLength: 0)
-                        if hasLyrics {
+                        if !noLyrics {
                             MButton(showLyrics ? "Hide lyrics" : "Show lyrics", kind: .dark) {
-                                withAnimation(.easeOut(duration: 0.3)) { showLyrics.toggle() }
+                                withAnimation(.easeOut(duration: 0.22)) { showLyrics.toggle() }
                             }
+                            .transition(.opacity)
                         }
                         MButton("Exit", icon: .close, iconSize: 13, kind: .dark, action: close)
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 12)
                     .frame(minHeight: 52)
-                    if hasLyrics && showLyrics {
+                    if lyricsMode {
                         let side = max(120, min(geo.size.width * 0.5, geo.size.height * 0.26))
                         VStack(spacing: 20) {
-                            artColumn(side: side, titleSize: 16)
-                            LyricLines(lyrics: lyrics, vm: vm, size: 26, minLine: 58, inset: 0, anchor: 0.38,
-                                       fadeTop: 0.2, fadeBottom: 0.74)
+                            artColumn(side: side, titleSize: 16, big: false)
+                            JamLyrics(lyrics: lyrics, vm: vm)
                         }
                         .padding(.horizontal, 16)
                         .padding(.bottom, 16)
-                        .transition(.opacity)
+                        .transition(.opacity.combined(with: .offset(y: 12)))
                     } else {
-                        let side = min(340, geo.size.height * 0.42, geo.size.width * 0.72)
+                        let side = min(360, geo.size.height * 0.42, geo.size.width - 48)
                         VStack(spacing: 12) {
-                            artColumn(side: side, titleSize: 22, centred: true)
+                            artColumn(side: side, titleSize: 22, big: true)
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .padding(.horizontal, 16)
                         .padding(.bottom, 24)
-                        .transition(.opacity)
+                        .transition(.opacity.combined(with: .offset(y: -12)))
                     }
                 }
+                .animation(.easeOut(duration: 0.22), value: lyricsMode)
+                .animation(.easeOut(duration: 0.22), value: noLyrics)
             }
         }
         .background(Omp.page.ignoresSafeArea())
     }
 
     @ViewBuilder
-    private func artColumn(side: CGFloat, titleSize: CGFloat, centred: Bool = false) -> some View {
+    private func artColumn(side: CGFloat, titleSize: CGFloat, big: Bool) -> some View {
         let track = state.track
-        VStack(spacing: centred ? 12 : 8) {
+        VStack(spacing: big ? 14 : 10) {
             CoverArt(track: track, icon: Omp.sourceGlyph(track?.source ?? ""), size: side - 2)
                 .padding(1)
                 .overlay(Rectangle().strokeBorder(Omp.themeAccent, lineWidth: 1))
@@ -352,9 +358,178 @@ struct JamView: View {
                     if let track { vm.likeTrack(track) }
                 }
             }
-            TransportBar(state: state, vm: vm, compact: true)
+            JamControls(state: state, vm: vm, big: big)
         }
         .frame(width: side)
+    }
+}
+
+/** The lyrics column: synced lines following the song, plain ones to scroll, nothing while they load. */
+private struct JamLyrics: View {
+    let lyrics: SongLyrics
+    @ObservedObject var vm: MaroViewModel
+
+    var body: some View {
+        Group {
+            if lyrics.lines.isEmpty {
+                Color.clear
+            } else if lyrics.synced {
+                LyricLines(lyrics: lyrics, vm: vm, size: 26, minLine: 58, inset: 0, anchor: 0.38, fadeTop: 0.2, fadeBottom: 0.74)
+            } else {
+                PlainLyrics(lyrics: lyrics)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/**
+ * The full screen's controls, open and exactly the cover's width: the thin
+ * seek line with its times, then shuffle, previous, the white round play,
+ * next and repeat, evenly spread. No box.
+ */
+private struct JamControls: View {
+    let state: UiState
+    @ObservedObject var vm: MaroViewModel
+    let big: Bool
+
+    var body: some View {
+        let rep = state.repeat
+        VStack(spacing: big ? 16 : 10) {
+            JamSeek(state: state, vm: vm)
+            HStack(spacing: 0) {
+                JamToggle(glyph: .shuffle, on: state.shuffle, enabled: state.queue.count > 1, label: "Shuffle") { vm.toggleShuffle() }
+                Spacer(minLength: 0)
+                JamSkip(glyph: .prev, enabled: state.isCurrent, label: "Previous") { vm.previous() }
+                Spacer(minLength: 0)
+                Button { vm.playPause() } label: {
+                    Icon(state.playing ? .pause : .play, size: 22, color: .black)
+                        .offset(x: state.playing ? 0 : 1.5)
+                        .frame(width: 60, height: 60)
+                        .background(Circle().fill(Color.white))
+                        .contentShape(Circle())
+                }
+                .buttonStyle(PressStyle(scale: 0.94))
+                .disabled(!(state.isCurrent || !state.queue.isEmpty))
+                .accessibilityLabel(state.playing ? "Pause" : "Play")
+                Spacer(minLength: 0)
+                JamSkip(glyph: .next, enabled: state.isCurrent, label: "Next") { vm.next() }
+                Spacer(minLength: 0)
+                JamToggle(glyph: .repeatAll, on: rep != "off", enabled: true, label: rep == "one" ? "Repeat one" : rep == "all" ? "Repeat all" : "Repeat off",
+                          badge: rep == "one" ? "1" : "") {
+                    vm.setRepeat(rep == "off" ? "all" : rep == "all" ? "one" : "off")
+                }
+            }
+        }
+    }
+}
+
+/** Previous / next: 26 pt white icons on 44 pt tap targets. */
+private struct JamSkip: View {
+    let glyph: Glyph
+    let enabled: Bool
+    let label: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Icon(glyph, size: 26, color: .white)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(PressStyle(scale: 0.9))
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.4)
+        .accessibilityLabel(label)
+    }
+}
+
+/** Shuffle / repeat: 20 pt, grey off, red on with a 4 pt dot under; repeat-one adds a small "1". */
+private struct JamToggle: View {
+    let glyph: Glyph
+    let on: Bool
+    let enabled: Bool
+    let label: String
+    var badge = ""
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 4) {
+                ZStack(alignment: .topTrailing) {
+                    Icon(glyph, size: 20, color: on ? Omp.markRed : Omp.iconTint)
+                    if !badge.isEmpty {
+                        OmpText(badge, size: 8, color: Omp.markRed, bold: true)
+                            .offset(x: 5, y: -4)
+                    }
+                }
+                Circle().fill(on ? Omp.markRed : Color.clear).frame(width: 4, height: 4)
+            }
+            .frame(width: 44, height: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressStyle(scale: 0.9))
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.4)
+        .accessibilityLabel(label)
+        .accessibilityAddTraits(on ? .isSelected : [])
+    }
+}
+
+/**
+ * The full screen's seek line: 3 pt, the played part red; dragging shows a
+ * 12 pt knob and the time under the finger. Times in tabular figures.
+ */
+private struct JamSeek: View {
+    let state: UiState
+    @ObservedObject var vm: MaroViewModel
+    @State private var drag: Double? = nil
+
+    var body: some View {
+        let progress = vm.progress
+        TimelineView(.periodic(from: .now, by: progress.playing && drag == nil ? 0.25 : 3600)) { _ in
+            let duration = progress.duration > 0 ? progress.duration : state.track?.duration ?? 0
+            let enabled = state.isCurrent && duration > 0
+            let at = progress.at(uptime())
+            let f = min(max(drag ?? (duration > 0 ? at / duration : 0), 0), 1)
+            VStack(spacing: 4) {
+                GeometryReader { geo in
+                    seekLine(width: geo.size.width, fraction: f, duration: duration, enabled: enabled)
+                }
+                .frame(height: 22)
+                HStack {
+                    OmpText(Omp.fmtTime(drag.map { duration * $0 } ?? at), size: 11, color: Omp.t3).monospacedDigit()
+                    Spacer(minLength: 0)
+                    OmpText(Omp.fmtTime(duration), size: 11, color: Omp.t3).monospacedDigit()
+                }
+            }
+        }
+    }
+
+    private func seekLine(width w: CGFloat, fraction f: Double, duration: Double, enabled: Bool) -> some View {
+        ZStack(alignment: .leading) {
+            Rectangle().fill(Color.white.opacity(0.18)).frame(height: 3)
+            Rectangle().fill(Omp.markRed).frame(width: w * f, height: 3)
+            if drag != nil {
+                Circle().fill(Color.white).frame(width: 12, height: 12).offset(x: w * f - 6)
+                OmpText(Omp.fmtTime(duration * f), size: 11, color: .white).monospacedDigit()
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(Color.black.opacity(0.75))
+                    .offset(x: min(max(w * f - 20, 0), max(w - 40, 0)), y: -22)
+            }
+        }
+        .frame(width: w, height: 22, alignment: .leading)
+        .contentShape(Rectangle())
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { v in if enabled && w > 0 { drag = min(max(v.location.x / w, 0), 1) } }
+                .onEnded { v in
+                    if enabled && w > 0 { vm.seek(duration * min(max(v.location.x / w, 0), 1)) }
+                    drag = nil
+                }
+        )
+        .accessibilityLabel("Seek")
     }
 }
 

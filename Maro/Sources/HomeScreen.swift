@@ -157,6 +157,7 @@ struct HomeScreen: View {
             }
         }
         .overlay { if let dialog { DialogView(dialog: dialog) { self.dialog = nil }.id(dialog.id) } }
+        .onChange(of: vm.jamRequest) { withAnimation(.easeOut(duration: 0.3)) { jamOpen = true } }
         .overlay { if let prompt = vm.state.loginPrompt { LoginPromptView(prompt: prompt, vm: vm) } }
     }
 }

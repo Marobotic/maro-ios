@@ -59,6 +59,9 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     /** The playhead, apart from [state]: only the seek row and lyrics read it. */
     @Published private(set) var progress = Progress()
 
+    /** Bumped to open the full-screen view (the launch route's "jam"). */
+    @Published private(set) var jamRequest = 0
+
     private var lyricsMem: [String: SongLyrics] = [:]
     private var lyricsOrder: [String] = []
     private var lyricsTask: Task<Void, Never>?
@@ -3387,7 +3390,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     /**
      * `-jbRoute <route>` at launch opens a screen: artist:<name>,
      * album:<name>[|<artist>], search:<query>, settings, library,
-     * playlist:liked, tab:<key>. Only for looking at screens on a device.
+     * playlist:liked, tab:<key>, jam (full screen). Only for looking at screens on a device.
      */
     private func applyLaunchRoute() {
         let args = ProcessInfo.processInfo.arguments
@@ -3408,6 +3411,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 if !value.isEmpty { SettingsPage.scrollTo = value }
                 if !state.settingsOpen { toggleSettings() }
             case "library": selectTab(Sync.viewPlaylists)
+            case "jam": jamRequest += 1
             case "tab": selectTab(value)
             case "playlist":
                 selectTab(Sync.viewPlaylists)
