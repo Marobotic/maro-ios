@@ -36,9 +36,29 @@ actor YouTubeMusic {
     private let http = URLSession(configuration: .ephemeral)
     private static let origin = "https://music.youtube.com"
 
-    /** The session's cookie header, when YouTube Music is signed in here. */
+    /**
+     * The session's cookie header: Jukebox online's copy (YtmVault), the only
+     * session used. Until the droplet has ever held one, the account's older
+     * sealed copy, read-only.
+     */
     private func cookie() -> String {
-        ServiceSessions.shared.session(ServiceSessions.ytm)?.obj("headers")?.str("cookie") ?? ""
+        let vault = YtmVault.shared
+        let kept = vault.cookie
+        if !kept.isEmpty || !vault.mayUseLegacy { return kept }
+        return ServiceSessions.shared.session(ServiceSessions.ytm)?.obj("headers")?.str("cookie") ?? ""
+    }
+
+    /**
+     * Whether an answer says the session is signed out: YouTube's own
+     * tracking params carry logged_in "0" when Google dropped the cookies.
+     */
+    private static func signedOut(_ json: JSON) -> Bool {
+        for service in (json.obj("responseContext")?["serviceTrackingParams"] as? [JSON]) ?? [] {
+            for p in (service["params"] as? [JSON]) ?? [] where p.str("key") == "logged_in" {
+                return p.str("value") == "0"
+            }
+        }
+        return false
     }
 
     var signedIn: Bool { !cookie().isEmpty }
@@ -52,7 +72,11 @@ actor YouTubeMusic {
     }
 
     func call(_ endpoint: String, _ body: JSON, signed: Bool) async throws -> JSON {
-        var body = body
+        try await call(endpoint, body, signed: signed, retried: false)
+    }
+
+    private func call(_ endpoint: String, _ original: JSON, signed: Bool, retried: Bool) async throws -> JSON {
+        var body = original
         let d = Calendar(identifier: .gregorian).dateComponents(in: TimeZone(identifier: "UTC")!, from: Date())
         let version = String(format: "1.%04d%02d%02d.01.00", d.year ?? 2026, d.month ?? 1, d.day ?? 1)
         body["context"] = ["client": ["clientName": "WEB_REMIX", "clientVersion": version, "hl": "en"], "user": [:] as JSON]
@@ -71,11 +95,19 @@ actor YouTubeMusic {
             let hash = Insecure.SHA1.hash(data: Data("\(ts) \(sid) \(Self.origin)".utf8)).map { String(format: "%02x", $0) }.joined()
             req.setValue(cookies, forHTTPHeaderField: "Cookie")
             req.setValue("SAPISIDHASH \(ts)_\(hash)", forHTTPHeaderField: "Authorization")
-            req.setValue("0", forHTTPHeaderField: "X-Goog-AuthUser")
+            req.setValue(YtmVault.shared.authUser, forHTTPHeaderField: "X-Goog-AuthUser")
         }
         let (data, resp) = try await http.data(for: req)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-        guard code == 200, let json = JSONText.parse(data) as? JSON else {
+        let json = code == 200 ? JSONText.parse(data) as? JSON : nil
+        // Turned away (401 / 403 / signed out): Jukebox online's fresh copy at
+        // once, and the call once more with it. Never a rotation of our own.
+        if !cookies.isEmpty && !retried && (code == 401 || code == 403 || json.map(Self.signedOut) == true) {
+            if await YtmVault.shared.refreshAfterRefusal() {
+                return try await call(endpoint, original, signed: signed, retried: true)
+            }
+        }
+        guard let json else {
             throw YouTubeDirect.Refused(reason: "YouTube Music answered \(code)")
         }
         return json

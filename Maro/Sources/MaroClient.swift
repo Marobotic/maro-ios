@@ -413,6 +413,74 @@ final class MaroClient: @unchecked Sendable {
         ((try? await call("DELETE", "/service/" + Self.escape(name), timeout: 15))?["ok"] as? Bool) == true
     }
 
+    // -- song lists stored on the account (round 2 B) --
+
+    /**
+     * One status-checked call: (HTTP status, body). nil when the droplet
+     * could not be asked at all (offline), so "none" and "unreachable" are
+     * never confused.
+     */
+    private func answer(_ method: String, _ path: String, body: JSON? = nil, timeout: TimeInterval = 20) async -> (code: Int, body: JSON)? {
+        var req = request(Self.base + path, method: method, timeout: timeout)
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        if let body {
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = JSONText.data(body)
+        }
+        do {
+            let (data, resp) = try await http.data(for: req)
+            checkRejected(req, resp)
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            // Never the body: the YouTube Music session's answers carry cookies.
+            if !(200..<300).contains(code) && code != 404 {
+                ConsoleLog.shared.log("MaroClient", "\(method) \(path.split(separator: "?").first ?? "") HTTP \(code)")
+            }
+            return (code, JSONText.parse(data) as? JSON ?? [:])
+        } catch {
+            ConsoleLog.shared.log("MaroClient", "\(method) \(path.split(separator: "?").first ?? "") failed: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    /** A playlist's stored song list ({tracks, savedAt, snapshotId}) by "source:id", or nil. */
+    func savedPlaylist(_ key: String) async -> JSON? {
+        guard let got = await answer("GET", "/playlists/" + Self.escape(key)), (200..<300).contains(got.code) else { return nil }
+        let entry = got.body.obj("playlist") ?? got.body
+        return entry.arr("tracks") == nil ? nil : entry
+    }
+
+    /** Store a song list read on this phone, for every device. */
+    func putSavedPlaylist(_ key: String, _ entry: JSON) async -> Bool {
+        guard let got = await answer("PUT", "/playlists/" + Self.escape(key), body: entry, timeout: 30) else { return false }
+        return (200..<300).contains(got.code)
+    }
+
+    // -- the YouTube Music session kept alive on the droplet (round 2 C) --
+
+    /**
+     * The account's YouTube Music session as the droplet keeps it:
+     * {ok, state, account, at, cookies, headers}. A 404 is the answer
+     * {state: "none"}; nil only when the droplet could not be asked.
+     */
+    func ytmSession(withCookies: Bool = true) async -> JSON? {
+        guard let got = await answer("GET", withCookies ? "/ytm/session" : "/ytm/session/status", timeout: 15) else { return nil }
+        if got.code == 404 { return ["ok": false, "state": "none"] }
+        guard (200..<300).contains(got.code) else { return nil }
+        return got.body
+    }
+
+    /** Seed the droplet's keeper with a fresh sign-in: {ok, state, account, at}, or nil / the error. */
+    func seedYtmSession(cookies: String, headers: JSON) async -> (ok: Bool, body: JSON)? {
+        guard let got = await answer("POST", "/ytm/session", body: ["cookies": cookies, "headers": headers], timeout: 120) else { return nil }
+        let ok = (200..<300).contains(got.code) && (got.body["ok"] as? Bool) != false
+        return (ok, got.body)
+    }
+
+    func deleteYtmSession() async -> Bool {
+        guard let got = await answer("DELETE", "/ytm/session", timeout: 30) else { return false }
+        return (200..<300).contains(got.code) || got.code == 404
+    }
+
     func setPlayback(_ device: String) async -> Bool {
         guard let resp = try? await call("POST", "/account/playback", body: ["device": device]) else { return false }
         return resp.str("playback") == device

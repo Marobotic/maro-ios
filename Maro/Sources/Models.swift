@@ -182,6 +182,11 @@ struct LibraryRow: Equatable, Hashable {
     var id = ""
     var art = ""
     var available = true
+    /**
+     * The count is still the service's own: no song list is held for this
+     * playlist yet (round 2 A/B). Shown as a quiet "syncing" until it lands.
+     */
+    var syncing = false
 }
 
 /** A sign-in the engine started for this phone: open the page, or show the code. */
@@ -298,6 +303,8 @@ struct UiState: Equatable {
     var likedKeys: Set<String> = []
     var likedIds: Set<String> = []
     var library: [LibraryRow] = []
+    /** The liked list's length once it has arrived: Liked Songs' count everywhere. */
+    var likedTotal: Int?
     var selectedPlaylist: LibraryRow?
     var playlistTracks: [Track] = []
     var playlistLoading = false
@@ -383,6 +390,42 @@ struct UiState: Equatable {
     var isCurrent: Bool { track != nil }
 
     var playlists: [LibraryRow] { library.filter { !$0.isHeader } }
+
+    /** The library's own row for a playlist (a kept copy of a row may be stale). */
+    private func liveRow(_ row: LibraryRow) -> LibraryRow? {
+        library.first { !$0.isHeader && $0.source == row.source && $0.id == row.id }
+    }
+
+    /** Whether the opened playlist is this row, with every one of its songs here. */
+    private func openInFull(_ row: LibraryRow) -> Bool {
+        guard let open = selectedPlaylist, open.source == row.source, open.id == row.id else { return false }
+        return !playlistTracks.isEmpty && !playlistHasMore && !playlistLoading
+    }
+
+    /**
+     * The one count rule (round 2 A): a playlist's count is the number of
+     * songs held for it. Every count on screen goes through here - Library
+     * rows, the playlist header, Settings, sorting by size - so they cannot
+     * drift apart. The view model keeps each library row's count at its held
+     * list's length (Liked: the liked list); an opened list that is all here
+     * wins over the row.
+     */
+    func countFor(_ row: LibraryRow) -> Int {
+        if row.source == "liked", let n = likedTotal { return n }
+        if openInFull(row) { return playlistTracks.count }
+        return liveRow(row)?.count ?? row.count
+    }
+
+    /** Whether a row's count is still the service's, its songs not held yet. */
+    func isSyncing(_ row: LibraryRow) -> Bool {
+        if openInFull(row) { return false }
+        return liveRow(row)?.syncing ?? row.syncing
+    }
+
+    /** Liked Songs' count, by the same rule. */
+    var likedCount: Int {
+        countFor(library.first { !$0.isHeader && $0.source == "liked" } ?? LibraryRow(source: "liked"))
+    }
 
     func isLiked(_ t: Track?) -> Bool {
         guard let t, !t.id.isEmpty else { return false }
@@ -513,20 +556,31 @@ enum Sync {
     static func library(_ dict: JSON?) -> [LibraryRow] {
         guard let dict else { return [] }
         var out: [LibraryRow] = []
+        // One row per playlist (round 2 A): an older writer listed YouTube's
+        // "Liked Music" twice and sent its counts as strings ("9").
+        var seen = Set<String>()
         func group(_ key: String, _ label: String) {
             guard let entries = dict.arr(key), !entries.isEmpty else { return }
-            out.append(LibraryRow(isHeader: true, source: key, label: label, count: entries.count))
+            var rows: [LibraryRow] = []
             for case let e as JSON in entries {
-                out.append(LibraryRow(
+                let row = LibraryRow(
                     source: e.str("source", key),
                     label: e.str("name", e.str("label")),
-                    count: e.int("count"),
+                    count: max(0, e.int("count", Int(e.double("count")))),
                     name: e.str("name"),
                     id: e.str("id"),
                     art: e.str("art", e.str("cover")),
                     available: e.bool("available", true)
-                ))
+                )
+                var keys = [row.source + ":" + row.id.ifEmpty(row.name.lowercased())]
+                if row.source == "ytm" && (row.id == "LM" || row.name.lowercased() == "liked music") { keys.append("ytm:liked-music") }
+                if keys.contains(where: { seen.contains($0) }) { continue }
+                for k in keys { seen.insert(k) }
+                rows.append(row)
             }
+            guard !rows.isEmpty else { return }
+            out.append(LibraryRow(isHeader: true, source: key, label: label, count: rows.count))
+            out += rows
         }
         group("liked", "Liked")
         group("spotify", "Spotify")

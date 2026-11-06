@@ -160,6 +160,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         AudioCache.client = client
         AudioCache.tier = { [weak self] in self?.state.quality ?? "max" }
         ArtLoader.shared.client = client
+        YtmVault.shared.client = client
         // Covers changed on the account (Fix artwork on another device, a
         // song's first proper cover): checked now and every two minutes.
         Task.detached(priority: .utility) {
@@ -245,6 +246,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         }
         // The library: every playlist kept on the phone, read once.
         if old.library.count != state.library.count && !NetworkWatch.expensive { prefetchLibraryArt(state.library) }
+        // And their kept song lists counted, so each row shows what we hold.
+        if old.library != state.library { loadKeptCounts(state.library) }
     }
 
     private func prefetchLibraryArt(_ rows: [LibraryRow]) {
@@ -330,7 +333,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             s.playlistTracks = likedTracks
             s.playlistTotal = likedTracks.count
         }
-        countLiked(&s)
+        applyCounts(&s)
         state = s
     }
 
@@ -338,22 +341,124 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     private var likedKnown = false
 
     /**
-     * Liked Songs' count is the liked list this phone holds: the library
-     * snapshot's own count for it lags behind (62 there, 82 in the list).
+     * Songs held per playlist ("source:id" -> how many), for lists not on the
+     * account: the phone's own complete copies (device cache, or fetched from
+     * Spotify here). The account's saved lists are counted in `savedCounts`.
      */
-    private func countLiked(_ s: inout UiState) {
-        guard likedKnown else { return }
-        let n = likedTracks.count
-        s.library = s.library.map { row in
-            guard row.source == "liked", !row.isHeader, row.count != n else { return row }
+    private var keptCounts: [String: Int] = [:]
+    /** Each saved list's songs, counted once as it arrives (the same rows heldTracks gives). */
+    private var savedCounts: [String: Int] = [:]
+
+    /** How many songs we hold for a row, or nil when no list is held yet. */
+    private func heldCount(_ row: LibraryRow) -> Int? {
+        if row.source == "liked" { return likedKnown ? likedTracks.count : nil }
+        let key = "\(row.source):\(row.id)"
+        if let n = savedCounts[key], n > 0 { return n }
+        return keptCounts[key]
+    }
+
+    /**
+     * The one count rule (round 2 A): every library row's count is the
+     * number of songs we hold for it - Liked is the liked list (the library
+     * snapshot's own count lagged: 62 there, 82 in the list), a service
+     * playlist is its stored song list. Only with no list held yet does the
+     * service's count show, marked as syncing. UiState.countFor reads these.
+     */
+    private func applyCounts(_ s: inout UiState) {
+        func fixed(_ row: LibraryRow) -> LibraryRow {
+            guard !row.isHeader else { return row }
             var r = row
-            r.count = n
+            if let n = heldCount(row) {
+                r.count = n
+                r.syncing = false
+            } else {
+                r.syncing = row.source == "spotify"
+            }
             return r
         }
-        if var open = s.selectedPlaylist, open.source == "liked", open.count != n {
-            open.count = n
-            s.selectedPlaylist = open
+        let liked: Int? = likedKnown ? likedTracks.count : nil
+        if s.likedTotal != liked { s.likedTotal = liked }
+        let rows = s.library.map(fixed)
+        if rows != s.library { s.library = rows }
+        if let open = s.selectedPlaylist {
+            let f = fixed(open)
+            if f != open { s.selectedPlaylist = f }
         }
+    }
+
+    /** applyCounts on the live state. */
+    private func recount() {
+        var s = state
+        applyCounts(&s)
+        if s != state { state = s }
+    }
+
+    /**
+     * Saved lists from the account, merged over the ones held here: the newer
+     * copy of each wins (one this phone just read from Spotify can be newer
+     * than the account's).
+     */
+    private func mergeSaved(_ incoming: [String: JSON]) {
+        for (key, entry) in incoming {
+            if let mine = savedPlaylists[key] {
+                let a = Self.savedAt(mine), b = Self.savedAt(entry)
+                // Ours is newer, or it is the same copy again: nothing to do.
+                if a > b { continue }
+                if a == b && savedCounts[key] != nil && mine.arr("tracks")?.count == entry.arr("tracks")?.count { continue }
+            }
+            savedPlaylists[key] = entry
+            savedCounts[key] = Sync.tracks(entry.arr("tracks")).count
+        }
+    }
+
+    /** A saved list's "savedAt" in seconds, whichever way its writer put it (s, ms or ISO). */
+    static func savedAt(_ entry: JSON) -> Double {
+        var v = entry.double("savedAt")
+        if v == 0, let d = ISO8601DateFormatter.flexible(entry.str("savedAt")) { v = d.timeIntervalSince1970 }
+        return v > 100_000_000_000 ? v / 1000 : v
+    }
+
+    /** The rows whose kept copies were last counted, so they are read once per change. */
+    private var keptCountKeys: Set<String> = []
+
+    /** The phone's own complete copies of the library's playlists, counted (off the main thread). */
+    private func loadKeptCounts(_ rows: [LibraryRow]) {
+        let wanted = rows.filter { !$0.isHeader && !$0.id.isEmpty && $0.source != "liked" }
+        let keys = Set(wanted.map { "\($0.source):\($0.id)" })
+        if keys == keptCountKeys { return }
+        keptCountKeys = keys
+        let items = wanted.map { ("\($0.source):\($0.id)", playlistKey($0)) }
+        let cache = deviceCache
+        Task {
+            let found = await Task.detached(priority: .utility) { () -> [String: Int] in
+                var out: [String: Int] = [:]
+                for (key, file) in items {
+                    if let kept = cache.playlist(file), !kept.hasMore, !kept.tracks.isEmpty { out[key] = kept.tracks.count }
+                }
+                return out
+            }.value
+            keptCounts.merge(found) { _, new in new }
+            recount()
+        }
+    }
+
+    /**
+     * The songs held for a playlist right now: Liked is the liked list, a
+     * service playlist its saved list, an opened one that is all here its
+     * songs. nil when none is held.
+     */
+    private func heldTracks(_ row: LibraryRow) -> [Track]? {
+        if row.source == "liked" { return likedKnown ? likedTracks : nil }
+        if let entry = savedPlaylists["\(row.source):\(row.id)"] {
+            let tracks = Sync.tracks(entry.arr("tracks")).map(giveVideoId)
+            if !tracks.isEmpty { return tracks }
+        }
+        let s = state
+        if let open = s.selectedPlaylist, open.source == row.source, open.id == row.id,
+           !s.playlistTracks.isEmpty, !s.playlistHasMore, !s.playlistLoading {
+            return s.playlistTracks
+        }
+        return nil
     }
 
     private func musicDirectory() -> URL {
@@ -786,11 +891,11 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         remote("playtracks", ["tracks": tracks.map { $0.toJSON() }, "index": start, "name": name ?? ""])
     }
 
-    private func pullSync() async {
+    private func pullSync(force: Bool = false) async {
         guard let data = await client.sync() else { return }
         markOnline(true)
         let at = data.str("at")
-        if !at.isEmpty && at == lastSyncAt { return }
+        if !force && !at.isEmpty && at == lastSyncAt { return }
         lastSyncAt = at
         guard let snap = data.obj("snapshot") else { return }
         let incoming = parseSnapshot(snap, base: state)
@@ -824,6 +929,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         if state.playbackMode == .remoteDesktop && progress.anchor == 0 {
             progress = Progress(position: snap.double("position"), duration: state.track?.duration ?? 0, playing: state.playing, anchor: uptime())
         }
+        // Spotify lists the account holds no recent copy of, read here.
+        syncSpotifyLists()
     }
 
     /** One song reaches the panel as a Spotify id; the saved copy lives under
@@ -862,10 +969,10 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             s.playlistTracks = likedTracks
             s.playlistTotal = likedTracks.count
         }
+        // The saved song lists first: the rows' counts are their lengths.
+        mergeSaved(Sync.savedPlaylists(snap.obj("savedPlaylists")))
         s.library = Sync.library(snap.obj("playlists"))
-        countLiked(&s)
-        let saved = Sync.savedPlaylists(snap.obj("savedPlaylists"))
-        if !saved.isEmpty { savedPlaylists = saved }
+        applyCounts(&s)
         // What the desktop streams and downloads at: its setting, shared.
         if let quality = snap.obj("quality") {
             s.quality = quality.str("stream", s.quality).ifEmpty(s.quality)
@@ -972,6 +1079,11 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         state.playlistError = p.bool("restricted") ? p.str("hint") : p.str("error")
         let key = playlistKey(selected), cache = deviceCache
         Task.detached { cache.savePlaylist(key, merged, total: total, hasMore: hasMore) }
+        // Every page here: the row counts the list it now holds.
+        if !hasMore && !merged.isEmpty {
+            keptCounts["\(selected.source):\(selected.id)"] = merged.count
+            recount()
+        }
         if playWhenLoaded == selected.id && !merged.isEmpty {
             playWhenLoaded = nil
             playList(merged, 0, name: selected.name)
@@ -1833,12 +1945,36 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         guard sessions.hasKey else {
             return signInAgain("Sign in once more to bring your music services to this phone.")
         }
-        state.services = await sessions.refresh(client)
+        _ = await sessions.refresh(client)
         if !sessions.hasKey {
             // The account's sessions no longer open: the password changed.
             return signInAgain("Your Jukebox password changed. Sign in again.")
         }
+        // YouTube Music: Jukebox online's copy, at start and every 10 minutes
+        // (this runs every 5), and at once whenever YouTube Music refuses it.
+        if uptime() - vaultAskedAt > 570 {
+            vaultAskedAt = uptime()
+            await YtmVault.shared.refresh()
+        }
+        state.services = currentServices()
         Spotify.shared.start()
+        syncSpotifyLists()
+    }
+
+    private var vaultAskedAt: Double = -.infinity
+
+    /**
+     * The services this phone can use: the account's sealed sessions
+     * (Spotify, SoundCloud) and YouTube Music when Jukebox online keeps a
+     * session for it (or, until it ever has, the account's older copy).
+     */
+    private func currentServices() -> [String] {
+        var out = ServiceSessions.shared.available.filter { $0 != ServiceSessions.ytm }
+        let vault = YtmVault.shared
+        if vault.seeded || (vault.mayUseLegacy && ServiceSessions.shared.session(ServiceSessions.ytm) != nil) {
+            out.append(ServiceSessions.ytm)
+        }
+        return out
     }
 
     /** Forgot password: nil when the link is on its way, else the reason. */
@@ -1882,6 +2018,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         Task {
             await client.logout()
             ServiceSessions.shared.forgetAll()
+            YtmVault.shared.forgetLocal()
             Spotify.shared.start()
             resetToSignIn(email: email, error: why)
         }
@@ -1891,6 +2028,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         Task {
             await client.logout()
             ServiceSessions.shared.forgetAll()
+            YtmVault.shared.forgetLocal()
             Spotify.shared.start()      // no login left: stops it
             resetToSignIn()
         }
@@ -1955,10 +2093,12 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         let label = key == "spotify" ? "Spotify" : key == "ytm" ? "YouTube Music" : "SoundCloud"
         if state.services.contains(slot) {
             Task {
+                // YouTube Music: Jukebox online's keeper stopped and wiped too.
+                if slot == ServiceSessions.ytm { await YtmVault.shared.signOut() }
                 await ServiceSessions.shared.signOut(slot, client: client)
                 ConsoleLog.shared.log("ServiceSignIn", "\(label) signed out")
                 if slot == ServiceSessions.librespot { Spotify.shared.start() }   // no login: stops it
-                state.services = ServiceSessions.shared.available
+                state.services = currentServices()
                 showStatus("Signed out of \(label) on every device", "ok")
             }
             return
@@ -1970,7 +2110,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     private func startSignIn(_ key: String) {
         let slot = key == "spotify" ? ServiceSessions.librespot : key == "ytm" ? ServiceSessions.ytm : ServiceSessions.soundcloud
         let label = key == "spotify" ? "Spotify" : key == "ytm" ? "YouTube Music" : "SoundCloud"
-        guard ServiceSessions.shared.hasKey else {
+        // YouTube Music goes to Jukebox online, not the sealed blob: no key needed.
+        guard key == "ytm" || ServiceSessions.shared.hasKey else {
             ConsoleLog.shared.log("ServiceSignIn", "\(label) connect blocked: Jukebox sign-in required")
             showStatus("Sign in to Jukebox again to connect music services.", "info")
             return
@@ -2000,15 +2141,36 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     }
 
     private func saveSession(_ slot: String, _ payload: JSON, label: String) async {
+        if slot == ServiceSessions.ytm { return await seedYtm(payload) }
         if let why = await ServiceSessions.shared.publish(slot, payload, client: client) {
             ConsoleLog.shared.log("ServiceSignIn", "\(label) session publish failed: \(why)")
             showStatus(why, "error")
             return
         }
         ConsoleLog.shared.log("ServiceSignIn", "\(label) signed in")
-        state.services = ServiceSessions.shared.available
+        state.services = currentServices()
         if slot == ServiceSessions.librespot { Spotify.shared.start() }
         showStatus("Signed in to \(label) - on your account, so every device has it", "ok")
+    }
+
+    /**
+     * A YouTube Music sign-in made here goes to Jukebox online, which keeps it
+     * alive for every device; nothing goes onto the sealed /service/ytm blob
+     * and the phone keeps no session of its own (the sign-in page's cookies
+     * were thrown away with it).
+     */
+    private func seedYtm(_ payload: JSON) async {
+        showStatus("Handing the sign-in to Jukebox online…", "info")
+        if let why = await YtmVault.shared.seed(payload) {
+            ConsoleLog.shared.log("ServiceSignIn", "YouTube Music seed failed: \(why)")
+            showStatus(why, "error")
+            return
+        }
+        vaultAskedAt = uptime()
+        ConsoleLog.shared.log("ServiceSignIn", "YouTube Music signed in; kept alive by Jukebox online (\(YtmVault.shared.status.state))")
+        state.services = currentServices()
+        showStatus("Signed in to YouTube Music - Jukebox online keeps it alive for every device", "ok")
+        checkHealth(force: true)
     }
 
     func artFetch(_ artKey: String) {
@@ -2405,7 +2567,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             s.playlistTotal = likedTracks.count
         }
         likedKnown = true
-        countLiked(&s)
+        applyCounts(&s)
         state = s
         // Saved on the droplet (every other device has it at once); a few
         // tries if the connection drops.
@@ -2434,35 +2596,24 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         s.playlistHasMore = true
         s.playlistTotal = row.count
         s.playlistError = ""
-        // Liked: the whole list is here already, as the account has it.
-        if row.source == "liked" {
-            s.playlistTracks = likedTracks
+        // Held already - Liked (the liked list, as the account has it) or a
+        // list saved on the account or read here: every song shows at once,
+        // whether or not a desktop is awake to fetch it from the service.
+        // Liked always shows the liked list (empty until it arrives), never a
+        // copy kept on the phone by an older build.
+        if let tracks = heldTracks(row) ?? (row.source == "liked" ? likedTracks : nil) {
+            s.playlistTracks = tracks
             s.playlistLoading = false
             s.playlistHasMore = false
-            s.playlistTotal = likedTracks.count
+            s.playlistTotal = tracks.count
             state = s
             if playWhenLoaded == row.id {
                 playWhenLoaded = nil
-                playList(likedTracks, 0, name: row.name)
+                playList(tracks, 0, name: row.name)
             }
+            // A Spotify list older than half an hour is read again behind it.
+            if listDue(row) { Task { await fetchSpotifyList(row) } }
             return
-        }
-        // Saved on the account: every track is already here, whether or not
-        // a desktop is awake to fetch it from the service.
-        if let entry = savedPlaylists["\(row.source):\(row.id)"] {
-            let tracks = Sync.tracks(entry.arr("tracks")).map(giveVideoId)
-            if !tracks.isEmpty {
-                s.playlistTracks = tracks
-                s.playlistLoading = false
-                s.playlistHasMore = false
-                s.playlistTotal = tracks.count
-                state = s
-                if playWhenLoaded == row.id {
-                    playWhenLoaded = nil
-                    playList(tracks, 0, name: row.name)
-                }
-                return
-            }
         }
         state = s
         Task {
@@ -2473,15 +2624,161 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 state.playlistTracks = cached.tracks
                 state.playlistLoading = false
                 state.playlistHasMore = cached.hasMore
-                state.playlistTotal = cached.total
+                state.playlistTotal = cached.hasMore ? cached.total : cached.tracks.count
                 if playWhenLoaded == row.id {
                     playWhenLoaded = nil
                     playList(cached.tracks, 0, name: row.name)
                 }
-            } else {
-                loadPlaylistPage(0)
+                if listDue(row) { await fetchSpotifyList(row) }
+                return
             }
+            // Nothing held: the account's stored copy, then Spotify read on
+            // this phone, then the desktop page by page.
+            if await fetchAccountList(row) != nil { return }
+            if await fetchSpotifyList(row) != nil { return }
+            if state.selectedPlaylist?.id == row.id { loadPlaylistPage(0) }
         }
+    }
+
+    // -- song lists held for every playlist (round 2 B) ----------------------
+
+    /** When each list was last read on this phone ("source:id" -> epoch seconds). */
+    private var listFetchedAt: [String: Double] = [:]
+    /** Lists being read right now, so one is never asked twice at once. */
+    private var listFetching: Set<String> = []
+    /** A list is read again at most this often (seconds), unless asked to. */
+    private static let listRefresh: Double = 1800
+    /** The background sweep over the whole library is gentler: a list held for six hours is left alone. */
+    private static let sweepAge: Double = 6 * 3600
+
+    /**
+     * Whether a Spotify playlist's held list is old enough to read again:
+     * neither the account's copy nor this phone's is newer than `maxAge`
+     * (half an hour for an opened list).
+     */
+    private func listDue(_ row: LibraryRow, maxAge: Double? = nil) -> Bool {
+        guard row.source == "spotify", Spotify.shared.hasLogin else { return false }
+        let key = "spotify:\(row.id)"
+        let last = max(listFetchedAt[key] ?? 0, savedPlaylists[key].map(Self.savedAt) ?? 0)
+        return Date().timeIntervalSince1970 - last > (maxAge ?? Self.listRefresh)
+    }
+
+    /**
+     * A Spotify playlist's whole song list (every song, not a first page),
+     * read with this phone's own Spotify session, then held like a saved
+     * one. nil when this phone has no Spotify or Spotify did not answer.
+     */
+    @discardableResult
+    private func fetchSpotifyList(_ row: LibraryRow) async -> [Track]? {
+        guard row.source == "spotify", !row.id.isEmpty, Spotify.shared.hasLogin else { return nil }
+        let key = "spotify:\(row.id)"
+        guard listFetching.insert(key).inserted else { return nil }
+        defer { listFetching.remove(key) }
+        Spotify.shared.start()
+        // Spotify Liked Songs is a row like the others ("__liked__"), read from the collection.
+        let read: [Track]?
+        if row.id == "__liked__" {
+            read = await Spotify.shared.liked()
+        } else {
+            read = await Spotify.shared.playlist(row.id)
+        }
+        guard let got = read, !got.isEmpty else {
+            log.info("spotify list \(row.id, privacy: .public) did not load on this phone")
+            return nil
+        }
+        let tracks = got.map(giveVideoId)
+        holdList(row, tracks, savedAt: Date().timeIntervalSince1970, offer: true)
+        return tracks
+    }
+
+    /** The account's stored copy of one list, when the snapshot did not carry it. */
+    @discardableResult
+    private func fetchAccountList(_ row: LibraryRow) async -> [Track]? {
+        guard row.source != "liked", row.source != "local", !row.id.isEmpty else { return nil }
+        guard let entry = await client.savedPlaylist("\(row.source):\(row.id)") else { return nil }
+        let tracks = Sync.tracks(entry.arr("tracks")).map(giveVideoId)
+        guard !tracks.isEmpty else { return nil }
+        holdList(row, tracks, savedAt: Self.savedAt(entry), offer: false)
+        return tracks
+    }
+
+    /**
+     * A list now held: kept on the phone, counted on its row, shown if it is
+     * the open one, and (when read here) stored on the account so every
+     * device has it without the desktop.
+     */
+    private func holdList(_ row: LibraryRow, _ tracks: [Track], savedAt: Double, offer: Bool) {
+        let key = "\(row.source):\(row.id)"
+        let entry: JSON = ["tracks": tracks.map { $0.toJSON() }, "savedAt": savedAt, "snapshotId": "", "name": row.name]
+        if offer { listFetchedAt[key] = savedAt }
+        savedPlaylists[key] = entry
+        savedCounts[key] = tracks.count
+        keptCounts[key] = tracks.count
+        let file = playlistKey(row), cache = deviceCache
+        Task.detached(priority: .utility) { cache.savePlaylist(file, tracks, total: tracks.count, hasMore: false) }
+        var s = state
+        if let open = s.selectedPlaylist, open.source == row.source, open.id == row.id, !s.playlistLoadingMore {
+            s.playlistTracks = tracks
+            s.playlistLoading = false
+            s.playlistHasMore = false
+            s.playlistTotal = tracks.count
+            s.playlistError = ""
+        }
+        applyCounts(&s)
+        state = s
+        if playWhenLoaded == row.id {
+            playWhenLoaded = nil
+            playList(tracks, 0, name: row.name)
+        }
+        if offer {
+            let client = client
+            Task.detached(priority: .utility) { _ = await client.putSavedPlaylist(key, entry) }
+        }
+    }
+
+    /** Pull to refresh on an open playlist: its songs read again now. */
+    func refreshOpenPlaylist() async {
+        guard let row = state.selectedPlaylist, row.source != "liked" else { return }
+        if await fetchSpotifyList(row) != nil { return }
+        if await fetchAccountList(row) != nil { return }
+        if row.source != "local" {
+            state.playlistLoadingMore = false
+            state.playlistHasMore = true
+            loadPlaylistPage(0)
+        }
+    }
+
+    private var listSyncRunning = false
+
+    /**
+     * Every Spotify playlist in the library read in full on this phone when
+     * its held list is older than half an hour (all of them on a pull to
+     * refresh), one at a time, so no row sits at a first page or at 0.
+     * Off on a metered connection unless asked.
+     */
+    func syncSpotifyLists(force: Bool = false) {
+        guard state.signedIn, !listSyncRunning, Spotify.shared.hasLogin, force || !NetworkWatch.expensive else { return }
+        let now = Date().timeIntervalSince1970
+        let due = state.playlists.filter { row in
+            guard row.source == "spotify", !row.id.isEmpty else { return false }
+            return force ? now - (listFetchedAt["spotify:\(row.id)"] ?? 0) > 60 : listDue(row, maxAge: Self.sweepAge)
+        }
+        guard !due.isEmpty else { return }
+        listSyncRunning = true
+        log.info("reading \(due.count) spotify lists on this phone")
+        Task {
+            for row in due {
+                guard state.signedIn else { break }
+                await fetchSpotifyList(row)
+            }
+            listSyncRunning = false
+        }
+    }
+
+    /** Pull to refresh on the library: the account's snapshot and every Spotify list, now. */
+    func refreshLibrary() async {
+        await pullSync(force: true)
+        syncSpotifyLists(force: true)
     }
 
     private func loadPlaylistPage(_ offset: Int) {
@@ -2533,8 +2830,14 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
 
     func deletePlaylist(_ id: String) { send("playlist.delete", ["id": id]) }
 
+    /** Save offline on the desktop; the count said is the songs we hold for it. */
     func savePlaylistOffline(_ row: LibraryRow) {
-        send("playlist.download", ["source": row.source, "id": row.id, "name": row.name])
+        var payload: JSON = ["source": row.source, "id": row.id, "name": row.name]
+        if let n = heldTracks(row)?.count {
+            payload["count"] = n
+            showStatus("Saving \(n) \(n == 1 ? "song" : "songs") offline", "info")
+        }
+        send("playlist.download", payload)
     }
 
     // -- Discover -----------------------------------------------------------
@@ -2704,19 +3007,24 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         if state.downloads[key]?.running == true { return }
         setDownload(key, DownloadJob(running: true))
         Task {
-            await ensurePlaylistFull(row)
-            if state.selectedPlaylist?.id != row.id {
-                setDownload(key, DownloadJob(failed: 1))
-                return
+            // The songs we hold for it (Liked: the liked list itself, never a
+            // copy kept from an older build's first pages), else read in full.
+            var tracks = heldTracks(row) ?? []
+            if tracks.isEmpty { tracks = await fetchAccountList(row) ?? [] }
+            if tracks.isEmpty { tracks = await fetchSpotifyList(row) ?? [] }
+            if tracks.isEmpty && row.source != "liked" {
+                await ensurePlaylistFull(row)
+                if state.selectedPlaylist?.id == row.id { tracks = state.playlistTracks }
             }
-            let tracks = state.playlistTracks
             if tracks.isEmpty {
                 setDownload(key, DownloadJob(failed: 1))
                 showStatus("Could not load \(row.name) - is this phone online?", "error")
                 return
             }
-            let total = state.playlistTotal > 0 ? state.playlistTotal : tracks.count
+            // The count is the list's real songs, never a stored number.
+            let total = tracks.count
             setDownload(key, DownloadJob(total: total, running: true))
+            showStatus("Downloading \(total) \(total == 1 ? "song" : "songs") to this phone", "info")
             await downloadTracks(key, total: total, tracks)
         }
     }
@@ -2832,14 +3140,17 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     func checkHealth(force: Bool = false) {
         if !force && uptime() - healthAt < 60 { return }
         healthAt = uptime()
-        let ytmCookie = ServiceSessions.shared.session(ServiceSessions.ytm)?.obj("headers")?.str("cookie") ?? ""
         let scToken = ServiceSessions.shared.session(ServiceSessions.soundcloud)?.str("token") ?? ""
-        let signed: [String: Bool] = ["maro": state.signedIn, "spotify": Spotify.shared.hasLogin, "ytm": !ytmCookie.isEmpty, "sc": !scToken.isEmpty]
+        let ytmOn = state.services.contains(ServiceSessions.ytm) || YtmVault.shared.seeded
+        let signed: [String: Bool] = ["maro": state.signedIn, "spotify": Spotify.shared.hasLogin, "ytm": ytmOn, "sc": !scToken.isEmpty]
         let online = state.online
         var health: [String: HealthState] = [:]
         for (key, on) in signed {
             if !on {
                 health[key] = HealthState(state: "off")
+            } else if key == "ytm" {
+                // The kept copy's state at once; the droplet's own below.
+                health[key] = ytmHealth()
             } else if !online {
                 health[key] = HealthState(state: "offline", why: "No internet connection")
             } else {
@@ -2865,8 +3176,9 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         }
         if signed["ytm"] == true {
             Task {
-                let name = await YouTubeMusic.shared.accountName()
-                state.health["ytm"] = !name.isEmpty ? HealthState(state: "yes") : HealthState(state: "no", why: "Google signed this session out")
+                await YtmVault.shared.refreshStatus()
+                state.health["ytm"] = ytmHealth()
+                state.services = currentServices()
             }
         }
         if signed["sc"] == true {
@@ -2874,6 +3186,30 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 let me = await SoundCloud.shared.me(token: scToken)
                 state.health["sc"] = me != nil ? HealthState(state: "yes") : HealthState(state: "no", why: "SoundCloud refused the sign-in")
             }
+        }
+    }
+
+    /**
+     * YouTube Music's health is Jukebox online's keeper: Working, kept alive
+     * and when it last refreshed; Expired asks for a sign-in, which re-seeds
+     * it. Unreachable, the last copy fetched still plays (said so).
+     */
+    private func ytmHealth() -> HealthState {
+        let v = YtmVault.shared.status
+        let ago = YtmVault.ago(v.at)
+        let offline = v.reached ? "" : " (last copy - Jukebox online not reachable)"
+        switch v.state {
+        case "ok":
+            let kept = "Kept alive by Jukebox online" + (ago.isEmpty ? "" : ", last refreshed \(ago)")
+            return HealthState(state: "yes", why: kept + offline)
+        case "expired":
+            return HealthState(state: "no", why: "Expired - sign in again" + offline)
+        case "error":
+            return HealthState(state: "no", why: "Jukebox online could not refresh it" + (ago.isEmpty ? "" : " (last good \(ago))") + offline)
+        default:
+            // Never seeded: the account's older copy may still play, but
+            // nothing keeps it alive until one sign-in hands it over.
+            return HealthState(state: "no", why: "Not kept alive by Jukebox online yet - sign in once to hand it over")
         }
     }
 

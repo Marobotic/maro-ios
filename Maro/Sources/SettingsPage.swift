@@ -97,8 +97,8 @@ struct SettingsPage: View {
                     onNote: "Playback, search and playlists.", offNote: "Full quality with a subscription.", state: state) {
             vm.connectService("spotify")
         }
-        ServiceCard(label: "YouTube Music", tint: Omp.ytm, slot: ServiceSessions.ytm, name: "",
-                    onNote: "Your library and uploads.", offNote: "Sign in with Google in a window.", state: state) {
+        ServiceCard(label: "YouTube Music", tint: Omp.ytm, slot: ServiceSessions.ytm, name: YtmVault.shared.status.account,
+                    onNote: "Your library and uploads. Kept signed in by Jukebox online.", offNote: "Sign in with Google once; Jukebox online keeps it signed in.", state: state) {
             vm.connectService("ytm")
         }
         ServiceCard(label: "SoundCloud", tint: Omp.sc, slot: ServiceSessions.soundcloud,
@@ -133,9 +133,8 @@ struct SettingsPage: View {
         SettingsNote("Streaming at Spotify 320 kbps plays from Spotify, falling back to YouTube's best. Downloads only ever come from YouTube; offline, saved songs play.")
     }
 
-    private var likedCount: Int {
-        state.playlists.first { $0.source == "liked" }?.count ?? state.likedKeys.count
-    }
+    /** The same count the Library row and the playlist header show (UiState.countFor). */
+    private var likedCount: Int { state.likedCount }
 
     private var songsOnDisk: Int { state.phoneMusicCount + state.phoneKeptCount }
 
@@ -143,7 +142,7 @@ struct SettingsPage: View {
 
     @ViewBuilder private var library: some View {
         let lists = state.playlists.filter { $0.source != "liked" }
-        let listTracks = lists.reduce(0) { $0 + $1.count }
+        let listTracks = lists.reduce(0) { $0 + state.countFor($1) }
         SettingsHead(label: "Library").id("library")
         SettingsStat(label: "Queue", value: "\(state.displayState().queue.count) tracks")
         SettingsStat(label: "Liked", value: "\(likedCount) tracks")
@@ -507,7 +506,8 @@ private struct HealthRow: View {
             Icon(glyph, size: 15, color: tint)
             VStack(alignment: .leading, spacing: 2) {
                 OmpText(label, size: 12, color: Omp.foreground)
-                if !h.why.isEmpty && h.state != "yes" { OmpText(h.why, size: 10.5, color: Omp.t3) }
+                // Working rows may say more too (YouTube Music: kept alive, and when).
+                if !h.why.isEmpty { OmpText(h.why, size: 10.5, color: Omp.t3) }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             HStack(spacing: 6) {

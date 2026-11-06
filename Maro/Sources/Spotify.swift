@@ -160,6 +160,11 @@ final class Spotify {
         ((await ask("playlist", ["id": id], wait: 100)) as? [JSON])?.map(Self.track)
     }
 
+    /** Spotify Liked Songs, every page of it (the desktop lists it as the playlist "__liked__"). */
+    func liked() async -> [Track]? {
+        ((await ask("liked", wait: 100)) as? [JSON])?.map(Self.track)
+    }
+
     /** A song's radio: Spotify's "<song> Radio" playlist, and its songs. */
     func radio(_ trackId: String) async -> (id: String, tracks: [Track])? {
         guard let data = await ask("radio", ["uri": "spotify:track:" + trackId], wait: 100) as? JSON else { return nil }

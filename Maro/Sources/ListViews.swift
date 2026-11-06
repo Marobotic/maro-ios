@@ -334,7 +334,7 @@ private struct PlaylistsView: View {
         if sort == "az" {
             rest.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         } else if sort == "size" {
-            rest.sort { $0.count > $1.count }
+            rest.sort { state.countFor($0) > state.countFor($1) }
         }
         return pinned + rest
     }
@@ -378,6 +378,8 @@ private struct PlaylistsView: View {
                         .padding(.vertical, 8)
                     }
                     .scrollIndicators(.hidden)
+                    // Pull down: the account's library again, and every Spotify list read in full.
+                    .refreshable { await vm.refreshLibrary() }
                 }
             }
         }
@@ -460,10 +462,15 @@ private struct LibraryRowView: View {
                             : job.finished ? "Saved \(job.done) · \(job.failed) skipped" : "Preparing download…",
                             size: 11.5, color: Omp.soft)
                 } else {
+                    let count = state.countFor(row)
                     HStack(spacing: 6) {
-                        OmpText("\(row.count) \(row.count == 1 ? "track" : "tracks")", size: 11.5, color: Omp.t3)
+                        OmpText("\(count) \(count == 1 ? "track" : "tracks")", size: 11.5, color: Omp.t3)
                         OmpText("·", size: 11.5, color: Color(hex: 0x666666))
                         OmpText(label.0, size: 11.5, color: label.1)
+                        // The service's own count until its song list lands.
+                        if state.isSyncing(row) {
+                            OmpText("· syncing", size: 11.5, color: Color(hex: 0x666666))
+                        }
                     }
                 }
             }
@@ -541,7 +548,7 @@ private struct PlaylistDetail: View {
     var body: some View {
         let tracks = state.playlistTracks
         let shown = state.displayState()
-        let count = state.playlistTotal > 0 ? state.playlistTotal : max(row.count, tracks.count)
+        let count = state.countFor(row)
         let service = libraryServiceLabel(row.source).0
         VStack(spacing: 0) {
             PageHeader(
@@ -596,6 +603,8 @@ private struct PlaylistDetail: View {
                     .padding(.bottom, 8)
                 }
                 .scrollIndicators(.hidden)
+                // Pull down: this playlist's songs read again now.
+                .refreshable { await vm.refreshOpenPlaylist() }
             }
         }
     }
