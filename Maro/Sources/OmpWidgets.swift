@@ -1,17 +1,16 @@
 import SwiftUI
 import UIKit
 
-/** Monospace text in the plugin's palette. */
+/** Monospace text in the redesign's palette. */
 struct OmpText: View {
-    @Environment(\.omp) private var m
     let text: String
-    var size: CGFloat = Omp.TypeSize.body
+    var size: CGFloat = 12
     var color: Color = Omp.foreground
     var bold = false
     var maxLines = 1
     var align: TextAlignment = .leading
 
-    init(_ text: String, size: CGFloat = Omp.TypeSize.body, color: Color = Omp.foreground, bold: Bool = false, maxLines: Int = 1, align: TextAlignment = .leading) {
+    init(_ text: String, size: CGFloat = 12, color: Color = Omp.foreground, bold: Bool = false, maxLines: Int = 1, align: TextAlignment = .leading) {
         self.text = text
         self.size = size
         self.color = color
@@ -22,7 +21,7 @@ struct OmpText: View {
 
     var body: some View {
         Text(text)
-            .font(Omp.font(m.pt(size), bold: bold))
+            .font(Omp.font(size, bold: bold))
             .foregroundColor(color)
             .lineLimit(maxLines)
             .truncationMode(.tail)
@@ -30,144 +29,191 @@ struct OmpText: View {
     }
 }
 
-/** A Nerd Font glyph (play, heart, spotify logo, ...). */
-struct OmpIcon: View {
-    @Environment(\.omp) private var m
-    let icon: String
-    var size: CGFloat = Omp.TypeSize.body
-    var color: Color = Omp.foreground
-
-    init(_ icon: String, size: CGFloat = Omp.TypeSize.body, color: Color = Omp.foreground) {
-        self.icon = icon
-        self.size = size
-        self.color = color
-    }
-
-    /** Nerd Font icons live in the private-use planes; digits and "⋮" do not. */
-    private var isGlyph: Bool {
-        icon.unicodeScalars.contains { (0xE000...0xF8FF).contains($0.value) || $0.value >= 0xF0000 }
-    }
-
-    var body: some View {
-        // A Nerd Font icon draws about two cells wide on a one-cell advance,
-        // and iOS clips text to its advance: the logos came out cut in half.
-        // A trailing space in the same font widens the text to the glyph.
-        if icon == Omp.Icons.gear {
-            // The same SF Symbol and size used by Hourglass on iPhone.
-            Image(systemName: "gearshape")
-                .font(.system(size: 19))
-                .foregroundColor(color)
-                .accessibilityLabel("Settings")
-        } else {
-            Text(isGlyph ? icon + " " : icon)
-                .font(Omp.font(m.pt(size)))
-                .foregroundColor(color)
-                .lineLimit(1)
-                .fixedSize()
-                .frame(minWidth: m.pt(size) * 1.3)
-        }
-    }
-}
-
-/** Rotating refresh glyph - the plugin's "waiting" spinner. */
+/** The desktop's spinner: a ring with one quarter open, turning. */
 struct OmpSpinner: View {
-    @Environment(\.omp) private var m
-    var size: CGFloat = Omp.TypeSize.caption
-    var color: Color = Omp.accent
+    var size: CGFloat = 10
+    var color: Color = Omp.themeAccent
     @State private var spinning = false
 
-    // Drawn rather than taken from the font. The refresh glyph sits off-centre
-    // in its text box (padded with a space so iOS does not clip it), so
-    // rotating the box swung the arrows round a point beside them, in an oval.
-    // Drawn in a square, the centre of the circle is the centre of the turn.
     var body: some View {
-        let side = m.pt(size)
-        SpinnerArrow(color: color)
-            .frame(width: side, height: side)
+        Circle()
+            .trim(from: 0, to: 0.75)
+            .stroke(color, style: StrokeStyle(lineWidth: max(1.5, size * 0.15)))
+            .frame(width: size, height: size)
             .rotationEffect(.degrees(spinning ? 360 : 0))
-            .animation(.linear(duration: 1.1).repeatForever(autoreverses: false), value: spinning)
+            .animation(.linear(duration: 0.8).repeatForever(autoreverses: false), value: spinning)
             .onAppear { spinning = true }
     }
 }
 
-/** An open circle with an arrowhead at the end of its sweep. */
-private struct SpinnerArrow: View {
-    var color: Color
+/** Presses shrink a little and spring back, as the desktop's buttons do. */
+struct PressStyle: ButtonStyle {
+    var scale: CGFloat = 0.94
 
-    var body: some View {
-        GeometryReader { geo in
-            let d = min(geo.size.width, geo.size.height)
-            let stroke = d * 0.12
-            let r = d / 2 - stroke / 2 - d * 0.1
-            let c = CGPoint(x: geo.size.width / 2, y: geo.size.height / 2)
-            let a = 290.0 * Double.pi / 180
-            let tip = CGPoint(x: c.x + r * CGFloat(cos(a)), y: c.y + r * CGFloat(sin(a)))
-            let t = CGPoint(x: -CGFloat(sin(a)), y: CGFloat(cos(a)))
-            let n = CGPoint(x: CGFloat(cos(a)), y: CGFloat(sin(a)))
-            let h = stroke * 1.9
-            ZStack {
-                Path { p in
-                    p.addArc(center: c, radius: r, startAngle: .degrees(0), endAngle: .degrees(290), clockwise: false)
-                }
-                .stroke(color, style: StrokeStyle(lineWidth: stroke, lineCap: .round))
-                Path { p in
-                    p.move(to: CGPoint(x: tip.x + t.x * h, y: tip.y + t.y * h))
-                    p.addLine(to: CGPoint(x: tip.x + n.x * h, y: tip.y + n.y * h))
-                    p.addLine(to: CGPoint(x: tip.x - n.x * h, y: tip.y - n.y * h))
-                    p.closeSubpath()
-                }
-                .fill(color)
-            }
-        }
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? scale : 1)
+            .animation(.spring(response: 0.22, dampingFraction: 0.55), value: configuration.isPressed)
     }
 }
 
-/** The shared in-panel button: glyph + label, selected state, optional border. */
+/** A #121212 tile with the #242424 hairline: the redesign's one surface. */
+struct TileBackground: ViewModifier {
+    var color: Color = Omp.tile
+    var border: Color = Omp.line
+
+    func body(content: Content) -> some View {
+        content
+            .background(color)
+            .overlay(Rectangle().strokeBorder(border, lineWidth: 1))
+    }
+}
+
+extension View {
+    func tile(_ color: Color = Omp.tile, border: Color = Omp.line) -> some View {
+        modifier(TileBackground(color: color, border: border))
+    }
+}
+
+/** The desktop's labelled button (.m-btn): normal, primary, danger, ghost or selected; 36 or 32 pt high. */
+struct MButton: View {
+    enum Kind { case normal, primary, danger, ghost, selected, dark }
+    let label: String
+    var icon: Glyph? = nil
+    var iconSize: CGFloat = 14
+    var iconColor: Color? = nil
+    var kind: Kind = .normal
+    var small = true
+    var enabled = true
+    var expand = false
+    var height: CGFloat? = nil
+    let action: () -> Void
+
+    init(_ label: String, icon: Glyph? = nil, iconSize: CGFloat = 14, iconColor: Color? = nil, kind: Kind = .normal,
+         small: Bool = true, enabled: Bool = true, expand: Bool = false, height: CGFloat? = nil, action: @escaping () -> Void) {
+        self.label = label
+        self.icon = icon
+        self.iconSize = iconSize
+        self.iconColor = iconColor
+        self.kind = kind
+        self.small = small
+        self.enabled = enabled
+        self.expand = expand
+        self.height = height
+        self.action = action
+    }
+
+    private var bg: Color {
+        switch kind {
+        case .normal, .selected: return Omp.raise
+        case .primary: return Omp.themeAccent
+        case .danger, .ghost: return .clear
+        case .dark: return Color.black.opacity(0.5)
+        }
+    }
+
+    private var border: Color {
+        switch kind {
+        case .normal, .selected, .dark: return Omp.edge
+        case .primary: return Omp.themeAccent
+        case .danger: return Omp.themeAccent.opacity(0.55)
+        case .ghost: return .clear
+        }
+    }
+
+    private var fg: Color {
+        switch kind {
+        case .normal, .ghost, .dark: return Omp.foreground
+        case .primary, .selected: return .white
+        case .danger: return Omp.danger
+        }
+    }
+
+    var body: some View {
+        let side: CGFloat = small ? 32 : 36
+        let minW: CGFloat? = label.isEmpty ? side : nil
+        let maxW: CGFloat? = expand ? CGFloat.infinity : nil
+        let pad: CGFloat = label.isEmpty ? 0 : (small ? 14 : 16)
+        Button(action: action) {
+            HStack(spacing: 8) {
+                if let icon { Icon(icon, size: iconSize, color: iconColor ?? fg) }
+                if !label.isEmpty { OmpText(label, size: small ? 11.5 : 12, color: fg, bold: true) }
+            }
+            .padding(.horizontal, pad)
+            .frame(minWidth: minW)
+            .frame(maxWidth: maxW)
+            .frame(height: height ?? side)
+            .background(bg)
+            .overlay(Rectangle().strokeBorder(border, lineWidth: 1))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressStyle(scale: 0.96))
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.4)
+    }
+}
+
+/** The desktop's icon button (.t-btn): a 36 pt square, #B3B3B3, accent-soft when on. */
+struct TButton: View {
+    let glyph: Glyph
+    var size: CGFloat = 16
+    var box: CGFloat = 36
+    var color: Color = Omp.iconTint
+    var on = false
+    var enabled = true
+    var weight: CGFloat? = nil
+    let action: () -> Void
+
+    init(_ glyph: Glyph, size: CGFloat = 16, box: CGFloat = 36, color: Color = Omp.iconTint, on: Bool = false,
+         enabled: Bool = true, weight: CGFloat? = nil, action: @escaping () -> Void) {
+        self.glyph = glyph
+        self.size = size
+        self.box = box
+        self.color = color
+        self.on = on
+        self.enabled = enabled
+        self.weight = weight
+        self.action = action
+    }
+
+    var body: some View {
+        Button(action: action) {
+            Icon(glyph, size: size, color: on ? Omp.soft : color, weight: weight)
+                .frame(width: box, height: box)
+                .background(on ? Omp.pill : Color.clear)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(PressStyle(scale: 0.88))
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.4)
+    }
+}
+
+/** The old in-panel button, kept for the sign-in sheet: now the desktop's small .m-btn. */
 struct OmpButton: View {
-    @Environment(\.omp) private var m
-    var icon = ""
     var text = ""
     var selected = false
     var enabled = true
     var foreground: Color = Omp.foreground
-    var fontSize: CGFloat = Omp.TypeSize.body
-    var vertical: CGFloat = 4
-    var horizontal: CGFloat = 8
-    var bordered = false
     let action: () -> Void
 
     var body: some View {
-        let tint = enabled ? foreground : foreground.opacity(0.35)
-        let shape = RoundedRectangle(cornerRadius: m.pt(Omp.labelGap))
-        Button(action: action) {
-            HStack(spacing: m.pt(7)) {
-                if !icon.isEmpty { OmpIcon(icon, size: fontSize, color: tint) }
-                if !text.isEmpty { OmpText(text, size: fontSize, color: tint) }
-            }
-            .padding(.horizontal, m.pt(horizontal))
-            .padding(.vertical, m.pt(vertical))
-            .background(selected ? Omp.selectedFill : Color.clear, in: shape)
-            .overlay { if bordered { shape.stroke(tint.opacity(0.40), lineWidth: 1) } }
-            .contentShape(shape)
-        }
-        .buttonStyle(.plain)
-        .disabled(!enabled)
+        MButton(text, kind: selected ? .selected : .normal, enabled: enabled, action: action)
     }
 }
 
-/** Single-line text input matching the panel's TextField. */
+/** A single-line field: square, #0D0D0D, #333 border (the desktop's .field). */
 struct OmpTextField: View {
-    @Environment(\.omp) private var m
     @Binding var text: String
     var placeholder = ""
     var password = false
     var keyboard: UIKeyboardType = .default
+    var height: CGFloat = 42
     var onSubmit: (() -> Void)?
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: m.pt(Omp.labelGap))
         ZStack(alignment: .leading) {
-            if text.isEmpty { OmpText(placeholder, color: Omp.muted) }
+            if text.isEmpty { OmpText(placeholder, size: 12, color: Omp.t3) }
             Group {
                 if password {
                     SecureField("", text: $text)
@@ -175,64 +221,58 @@ struct OmpTextField: View {
                     TextField("", text: $text).keyboardType(keyboard)
                 }
             }
-            .font(Omp.font(m.pt(Omp.TypeSize.body)))
+            .font(Omp.font(12))
             .foregroundColor(Omp.foreground)
-            .tint(Omp.accent)
+            .tint(Omp.themeAccent)
             .textInputAutocapitalization(.never)
             .autocorrectionDisabled(true)
             .submitLabel(onSubmit != nil ? .go : .next)
             .onSubmit { onSubmit?() }
         }
-        .padding(.horizontal, m.pt(8))
-        .frame(height: m.pt(34))
-        .background(Omp.cardRaised, in: shape)
-        .overlay(shape.stroke(Omp.borderColor, lineWidth: 1))
+        .padding(.horizontal, 14)
+        .frame(height: height)
+        .background(Omp.page)
+        .overlay(Rectangle().strokeBorder(Omp.edge, lineWidth: 1))
     }
 }
 
-/**
- * The panel's slim slider: a 3pt track, accent fill, small knob. Tap or drag;
- * the value is only reported when the finger lifts, like the panel's.
- */
-struct OmpSlider: View {
-    @Environment(\.omp) private var m
-    let fraction: Double
-    var enabled = true
-    var glow: Double = 1
-    let onDone: (Double) -> Void
-    @State private var drag: Double? = nil
+/** The playing row's bars: four 2.5 pt bars in accent-soft, bouncing while it plays. */
+struct EqBars: View {
+    var color: Color = Omp.soft
+    var size: CGFloat = 14
+
+    private static let speeds: [Double] = [0.52, 0.82, 0.62, 0.72]
+    private static let delays: [Double] = [0.08, 0.22, 0.04, 0.18]
 
     var body: some View {
-        GeometryReader { geo in
-            let w = max(geo.size.width, 1)
-            let f = min(max(drag ?? fraction, 0), 1)
-            let thin = m.pt(3), knob = m.pt(6)
-            let fill = Omp.accent.opacity(min(max(glow, 0), 1))
-            ZStack(alignment: .leading) {
-                Capsule().fill(Omp.sliderTrack).frame(height: thin)
-                Capsule().fill(fill).frame(width: w * f, height: thin)
-                Circle().fill(fill).frame(width: knob, height: knob)
-                    .offset(x: min(max(w * f - knob / 2, 0), w - knob))
+        TimelineView(.animation) { ctx in
+            let t = ctx.date.timeIntervalSinceReferenceDate
+            HStack(alignment: .bottom, spacing: 2) {
+                ForEach(0..<4, id: \.self) { i in
+                    // The desktop's eqB keyframes: .2 → .95 → .35 of the height, alternating.
+                    let period = Self.speeds[i] * 2
+                    let phase = ((t + Self.delays[i]).truncatingRemainder(dividingBy: period)) / period
+                    let tri = phase < 0.5 ? phase * 2 : 2 - phase * 2
+                    let k = tri < 0.5 ? 0.2 + (0.95 - 0.2) * (tri * 2) : 0.95 - (0.95 - 0.35) * ((tri - 0.5) * 2)
+                    Rectangle().fill(color).frame(width: 2.5, height: size * k)
+                }
             }
-            .frame(maxHeight: .infinity)
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { v in if enabled { drag = min(max(v.location.x / w, 0), 1) } }
-                    .onEnded { v in
-                        guard enabled else { return }
-                        drag = nil
-                        onDone(min(max(v.location.x / w, 0), 1))
-                    }
-            )
+            .frame(width: size, height: size, alignment: .bottom)
         }
-        .frame(height: m.pt(22))
     }
 }
 
-/** A cover from the droplet or the provider CDN, falling back to a source glyph. */
+/** The saved-offline mark: a check in the song's service colour. */
+struct SavedCheck: View {
+    let color: Color
+
+    var body: some View {
+        Icon(.check, size: 11, color: color)
+    }
+}
+
+/** A cover from the droplet or the provider CDN, falling back to the service's icon. Square. */
 struct CoverArt: View {
-    @Environment(\.omp) private var m
     @Environment(\.displayScale) private var displayScale
     @ObservedObject private var loader = ArtLoader.shared
     /** A song: its one picture from the droplet, scaled to exactly this box. */
@@ -240,14 +280,13 @@ struct CoverArt: View {
     /** A playlist tile: its sleeve, by the droplet's key or a CDN URL. */
     var artKey: String = ""
     var artUrl: String = ""
-    let icon: String
+    let icon: Glyph
     let size: CGFloat
-    var radius: CGFloat = Omp.labelGap
     var busy = false
     @State private var image: UIImage? = nil
 
     var body: some View {
-        let side = m.pt(size)
+        let side = size
         let px = Int((side * displayScale).rounded())
         let key = track.map { loader.songKey($0, px: px) } ?? loader.key(artKey: artKey, artUrl: artUrl, px: px)
         // What memory holds is drawn in this very frame: the lists' covers are
@@ -256,17 +295,17 @@ struct CoverArt: View {
         let quickKey = track.map { loader.key(artKey: "", artUrl: $0.artUrl, px: px) } ?? ""
         let shown = loader.cached(key) ?? (quickKey.isEmpty ? nil : loader.cached(quickKey)) ?? image
         ZStack {
-            Omp.normalFill
+            Color(hex: 0x171717)
             if let image = shown {
                 Image(uiImage: image).resizable().scaledToFill()
             } else if busy {
-                OmpSpinner(size: Omp.TypeSize.bodySmall, color: Omp.muted)
+                OmpSpinner(size: 12, color: Omp.t2)
             } else {
-                OmpIcon(icon, size: Omp.TypeSize.bodySmall)
+                Icon(icon, size: max(12, min(28, side * 0.32)), color: Omp.t2)
             }
         }
         .frame(width: side, height: side)
-        .clipShape(RoundedRectangle(cornerRadius: m.pt(radius)))
+        .clipped()
         .task(id: "\(key)#\(loader.epoch)#\(track?.artUrl ?? "")") {
             let quickKey = track.map { loader.key(artKey: "", artUrl: $0.artUrl, px: px) } ?? ""
             image = loader.cached(key) ?? (quickKey.isEmpty ? nil : loader.cached(quickKey))
@@ -286,9 +325,9 @@ struct CoverArt: View {
                 }
                 // A row is done once it shows that. The droplet's chosen
                 // cover is a 1200 px picture: fetched for every row on 4G it
-                // crowded out the rows and the music, so only a big box (now
-                // playing, a card) asks for it, or a row whose copy is on the
-                // phone already.
+                // crowded out the rows and the music, so only a big box (the
+                // full-screen cover, a card) asks for it, or a row whose copy
+                // is on the phone already.
                 if image != nil && !big && !have { return }
                 guard !key.isEmpty, loader.cached(key) == nil else { return }
                 for attempt in 0..<3 {
@@ -316,21 +355,191 @@ struct CoverArt: View {
     }
 }
 
-/** The heart: outline when unliked, accent when liked. */
+/**
+ * The heart, one for every list and the player: an outline in #A0A0A0, filled
+ * #E05263 when liked, with the desktop's pop (1 → 1.45 → .86 → 1) and six
+ * small squares flying out, only when liking.
+ */
 struct HeartButton: View {
-    @Environment(\.omp) private var m
     let liked: Bool
-    var size: CGFloat = Omp.rowButton
+    var size: CGFloat = 15
+    var box: CGFloat = 34
+    var color: Color = Omp.t2
     var enabled = true
     let action: () -> Void
+    @State private var pop: CGFloat = 1
+    @State private var burst = false
 
     var body: some View {
-        Button(action: action) {
-            OmpIcon(liked ? Omp.Icons.likeFull : Omp.Icons.like, size: Omp.TypeSize.body, color: liked ? Omp.like : Omp.foreground)
-                .frame(width: m.pt(size), height: m.pt(size))
-                .contentShape(Rectangle())
+        Button {
+            if !liked { celebrate() }
+            action()
+        } label: {
+            ZStack {
+                if burst { HeartBurst() }
+                Icon(.heart, size: size, color: liked ? Omp.like : color, filled: liked)
+                    .scaleEffect(pop)
+            }
+            .frame(width: box, height: box)
+            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressStyle(scale: 0.88))
         .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.35)
+    }
+
+    private func celebrate() {
+        withAnimation(.easeOut(duration: 0.12)) { pop = 1.45 }
+        withAnimation(.easeInOut(duration: 0.13).delay(0.12)) { pop = 0.86 }
+        withAnimation(.spring(response: 0.2, dampingFraction: 0.5).delay(0.25)) { pop = 1 }
+        burst = true
+        Task {
+            await sleep(seconds: 0.6)
+            burst = false
+        }
+    }
+}
+
+/** Six 4 pt squares flying out of the heart. */
+private struct HeartBurst: View {
+    @State private var out = false
+    private static let dirs: [CGSize] = [
+        CGSize(width: 0, height: -18), CGSize(width: 15, height: -9), CGSize(width: 15, height: 9),
+        CGSize(width: 0, height: 18), CGSize(width: -15, height: 9), CGSize(width: -15, height: -9),
+    ]
+
+    var body: some View {
+        ZStack {
+            ForEach(0..<6, id: \.self) { i in
+                Rectangle().fill(Omp.like)
+                    .frame(width: 4, height: 4)
+                    .scaleEffect(out ? 0.4 : 1)
+                    .offset(out ? Self.dirs[i] : .zero)
+                    .opacity(out ? 0 : 1)
+            }
+        }
+        .onAppear { withAnimation(.timingCurve(0.2, 0.7, 0.3, 1, duration: 0.55)) { out = true } }
+        .allowsHitTesting(false)
+    }
+}
+
+/**
+ * The volume slider: a 3 pt #333 track, #F5F5F5 fill, a 10 pt round knob.
+ * Tap or drag; the value is reported when the finger lifts.
+ */
+struct VolumeSlider: View {
+    let fraction: Double
+    let onDone: (Double) -> Void
+    @State private var drag: Double? = nil
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = max(geo.size.width, 1)
+            let f = min(max(drag ?? fraction, 0), 1)
+            ZStack(alignment: .leading) {
+                Rectangle().fill(Omp.edge).frame(height: 3)
+                Rectangle().fill(Omp.foreground).frame(width: w * f, height: 3)
+                Circle().fill(Omp.foreground).frame(width: 10, height: 10)
+                    .scaleEffect(drag != nil ? 1.15 : 1)
+                    .offset(x: min(max(w * f - 5, 0), w - 10))
+            }
+            .frame(maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { v in drag = min(max(v.location.x / w, 0), 1) }
+                    .onEnded { v in
+                        drag = nil
+                        onDone(min(max(v.location.x / w, 0), 1))
+                    }
+            )
+        }
+        .frame(height: 24)
+    }
+}
+
+/**
+ * The seek bar as the desktop draws it: forty bars whose heights come from the
+ * song's ids (the same seed and envelope as ui/main.ts drawWaveform), white up
+ * to the playhead, #333 after it, and a 2 pt white playhead line.
+ */
+struct WaveSeek: View {
+    let key: String
+    let fraction: Double
+    var enabled = true
+    var loading = false
+    let onSeek: (Double) -> Void
+    @State private var drag: Double? = nil
+
+    static func heights(_ key: String, count: Int = 40) -> [Double] {
+        var seed: UInt32 = 2166136261
+        for unit in key.utf16 { seed = (seed ^ UInt32(unit)) &* 16777619 }
+        var out: [Double] = []
+        for i in 0..<count {
+            seed = seed &* 1664525 &+ 1013904223
+            let envelope = 0.42 + 0.58 * sin(Double(i) / Double(max(1, count - 1)) * Double.pi)
+            let h = ((18 + Double(seed) / Double(UInt32.max) * 82) * envelope).rounded()
+            out.append(h / 100)
+        }
+        return out
+    }
+
+    var body: some View {
+        let bars = Self.heights(key)
+        GeometryReader { geo in
+            let w = max(geo.size.width, 1)
+            let f = min(max(drag ?? fraction, 0), 1)
+            let count = bars.count
+            let gap: CGFloat = 2
+            let barW = max(1, min(4, (w - gap * CGFloat(count - 1)) / CGFloat(count)))
+            let used = barW * CGFloat(count) + gap * CGFloat(count - 1)
+            ZStack(alignment: .leading) {
+                HStack(alignment: .center, spacing: gap) {
+                    ForEach(0..<count, id: \.self) { i in
+                        let done = (Double(i) + 0.5) / Double(count) <= f
+                        Rectangle()
+                            .fill(done ? Omp.foreground : Omp.edge)
+                            .frame(width: barW, height: max(2, geo.size.height * bars[i]))
+                    }
+                }
+                .frame(width: used, height: geo.size.height)
+                .frame(maxWidth: .infinity)
+                Rectangle().fill(Omp.foreground)
+                    .frame(width: 2, height: geo.size.height)
+                    .offset(x: (w - used) / 2 + min(max(used * f - 1, 0), used - 2))
+            }
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { v in if enabled { drag = progress(v.location.x, w, used) } }
+                    .onEnded { v in
+                        guard enabled else { return }
+                        drag = nil
+                        onSeek(progress(v.location.x, w, used))
+                    }
+            )
+        }
+        .frame(height: 26)
+        .opacity(loading ? 0.55 : 1)
+    }
+
+    private func progress(_ x: CGFloat, _ w: CGFloat, _ used: CGFloat) -> Double {
+        let left = (w - used) / 2
+        return Double(min(max((x - left) / max(used, 1), 0), 1))
+    }
+}
+
+/** The desktop's settings switch: a 42 x 24 square track, a 14 pt square knob. */
+struct SquareSwitch: View {
+    let on: Bool
+
+    var body: some View {
+        ZStack(alignment: on ? .trailing : .leading) {
+            Rectangle().fill(on ? Omp.themeAccent : Color(hex: 0x2D2D2D))
+            Rectangle().fill(Color(hex: 0xE6E6E6)).frame(width: 14, height: 14).padding(4)
+        }
+        .frame(width: 42, height: 24)
+        .overlay(Rectangle().strokeBorder(on ? Omp.themeAccent : Color(hex: 0x3A3A3A), lineWidth: 1))
+        .animation(.timingCurve(0.33, 1, 0.68, 1, duration: 0.16), value: on)
     }
 }

@@ -2,22 +2,38 @@ import SwiftUI
 import UIKit
 
 /**
- * One-to-one translation of Jukebox's design tokens, the
- * same ones the Android app uses.
- *
- * Colour values come from the plugin's Color.qml defaults and Panel.qml:
- *   foreground #cacccc, background #101315, urgent #a55555, muted #707880,
- *   spotify #1DB954, ytm #FF0033, maro #8A63D2.
- * Sizes mirror Style.space(n) at scale 1.0 and Style.font sizes
- * (caption 10, bodySmall 11, body 12, subtitle 13).
+ * The design tokens of the Windows app's redesign (ui/app.css :root): a
+ * near-black page, #121212 tiles with a #242424 hairline, #A0A0A0 / #8C8C8C
+ * secondary text and the red accent #B14242. Square corners everywhere;
+ * menus and popovers 4 pt. Sizes are the desktop's px at phone width, 1:1.
  */
 enum Omp {
-    static let background = Color(hex: 0x101315)
-    static let foreground = Color(hex: 0xCACCCC)
-    static let accent = Color(hex: 0xCACCCC)
+    // Surfaces
+    static let page = Color(hex: 0x0D0D0D)
+    static let tile = Color(hex: 0x121212)
+    static let line = Color(hex: 0x242424)
+    static let raise = Color(hex: 0x1A1A1A)
+    static let hover = Color(hex: 0x1F1F1F)
+    static let pill = Color(hex: 0x262626)
+    static let row = Color(hex: 0x161616)
+    static let popup = Color(hex: 0x141414)
+    static let edge = Color(hex: 0x333333)
+    // Text
+    static let t2 = Color(hex: 0xA0A0A0)
+    static let t3 = Color(hex: 0x8C8C8C)
+    static let iconTint = Color(hex: 0xB3B3B3)
+    static let soft = Color(hex: 0xFF9494)
+    static let danger = Color(hex: 0xFF8A8A)
+    static let headRed = Color(hex: 0xE06C6C)
+    static let ok = Color(hex: 0x4A8B8B)
+
+    static let background = page
+    static let foreground = Color(hex: 0xF5F5F5)
+    /** The neutral highlight (spinners, selected text); the red accent is `themeAccent`. */
+    static let accent = Color(hex: 0xF5F5F5)
     static let like = Color(hex: 0xE05263)
-    static let urgent = Color(hex: 0xA55555)
-    static let muted = Color(hex: 0x707880)
+    static let urgent = Color(hex: 0xE06C6C)
+    static let muted = Color(hex: 0x949494)
     static let spotify = Color(hex: 0x1DB954)
     static let ytm = Color(hex: 0xFF0033)
     static let sc = Color(hex: 0xFF5500)
@@ -44,19 +60,16 @@ enum Omp {
         kbpsScale.first { kbps >= $0.0 }?.1 ?? muted
     }
 
-    /** Accent of the running Omarchy theme (Dotrb). */
+    /** The redesign's red accent. */
     static let themeAccent = Color(hex: 0xB14242)
 
-    static let card = Color(hex: 0x16191D)
-    static let cardRaised = foreground.opacity(0.06)
-    static let softDk = Color(hex: 0x2A2F35)
-
-    /** Qt.darker(foreground, 2.6): the slider track. */
-    static let sliderTrack = Color(hex: 0x4E4E4E)
-
-    static let borderColor = foreground.opacity(0.40)
+    static let card = row
+    static let cardRaised = raise
+    static let softDk = edge
+    static let sliderTrack = edge
+    static let borderColor = edge
     static let normalFill = foreground.opacity(0.04)
-    static let selectedFill = foreground.opacity(0.18)
+    static let selectedFill = pill
 
     static let labelGap: CGFloat = 6
     static let spacing: CGFloat = 8
@@ -64,8 +77,8 @@ enum Omp {
     static let gatesGap: CGFloat = 24
     static let rowButton: CGFloat = 26
     static let queueMarkWidth: CGFloat = 18
-    static let rowArt: CGFloat = 30
-    static let nowArt: CGFloat = 68
+    static let rowArt: CGFloat = 44
+    static let nowArt: CGFloat = 56
     static let panelWidth: CGFloat = 420
 
     enum TypeSize {
@@ -77,51 +90,9 @@ enum Omp {
         static let display: CGFloat = 18
     }
 
-    /** The bar's monospace font, bundled so the Nerd Font glyphs actually render. */
+    /** JetBrains Mono, bundled: the desktop's "JB" face. */
     static func font(_ size: CGFloat, bold: Bool = false) -> Font {
         .custom(bold ? "JetBrainsMonoNF-Bold" : "JetBrainsMonoNF-Regular", fixedSize: size)
-    }
-
-    enum Icons {
-        static let play = "\u{F04B}"
-        static let pause = "\u{F04C}"
-        static let prev = "\u{F04A}"
-        static let next = "\u{F04E}"
-        static let restart = "\u{F048}"
-        static let clear = "\u{F014}"
-        static let refresh = "\u{F021}"
-        static let back = "\u{F177}"
-        static let close = "\u{F00D}"
-        static let note = "\u{F001}"
-        static let list = "\u{F03A}"
-        static let add = "\u{F067}"
-        static let like = "\u{F08A}"
-        static let likeFull = "\u{F004}"
-        static let check = "\u{F00C}"
-        static let volHigh = "\u{F028}"
-        static let volLow = "\u{F027}"
-        static let volMute = "\u{F026}"
-        static let more = "\u{22EE}"
-        static let signin = "\u{F090}"
-        static let spotify = "\u{F1BC}"
-        static let ytm = "\u{F16A}"
-        static let sc = "\u{F1BE}"
-        static let gear = "\u{F013}"
-        static let bell = "\u{F0F3}"
-        static let cloud = "\u{F0C2}"
-        static let link = "\u{F0C1}"
-        static let shuffle = "\u{F074}"
-        static let `repeat` = "\u{F01E}"
-        static let repeat1 = "\u{F0E2}"
-        static let grid = "\u{F0C7}"
-        static let wifi = "\u{F012}"
-        static let warning = "\u{F071}"
-        static let trash = "\u{F1F8}"
-        static let edit = "\u{F044}"
-        static let paintbrush = "\u{F1FC}"
-        static let broadcast = "\u{F1EB}"
-        static let question = "\u{F059}"
-        static let radio = "\u{F2CE}"
     }
 
     /** The name picked under Settings > Device name; blank means the default. */
@@ -176,16 +147,16 @@ enum Omp {
         case "spotify": return spotify
         case "ytm": return ytm
         case "sc": return sc
-        default: return accent
+        default: return themeAccent
         }
     }
 
-    static func sourceIcon(_ src: String) -> String {
+    static func sourceGlyph(_ src: String) -> Glyph {
         switch src {
-        case "spotify": return Icons.spotify
-        case "ytm": return Icons.ytm
-        case "sc": return Icons.sc
-        default: return Icons.note
+        case "spotify": return .spotify
+        case "ytm": return .ytm
+        case "sc": return .sc
+        default: return .note
         }
     }
 
@@ -273,6 +244,17 @@ extension EnvironmentValues {
 }
 
 extension Color {
+    /** CSS color-mix(in srgb, a t, b): a share t of a, the rest b. */
+    static func mix(_ a: Color, _ b: Color, _ t: Double) -> Color {
+        var ar: CGFloat = 0, ag: CGFloat = 0, ab: CGFloat = 0, aa: CGFloat = 0
+        var br: CGFloat = 0, bg: CGFloat = 0, bb: CGFloat = 0, ba: CGFloat = 0
+        UIColor(a).getRed(&ar, green: &ag, blue: &ab, alpha: &aa)
+        UIColor(b).getRed(&br, green: &bg, blue: &bb, alpha: &ba)
+        let k = CGFloat(t)
+        return Color(.sRGB, red: Double(ar * k + br * (1 - k)), green: Double(ag * k + bg * (1 - k)),
+                     blue: Double(ab * k + bb * (1 - k)), opacity: Double(aa * k + ba * (1 - k)))
+    }
+
     init(hex: UInt32) {
         self.init(
             .sRGB,

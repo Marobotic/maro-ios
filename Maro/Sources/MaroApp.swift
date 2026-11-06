@@ -15,7 +15,7 @@ struct MaroApp: App {
                 }
             }
             .preferredColorScheme(.dark)
-            .tint(Omp.accent)
+            .tint(Omp.themeAccent)
         }
     }
 }
@@ -98,7 +98,7 @@ struct LoginScreen: View {
                     }
                     .frame(maxWidth: .infinity)
                     .frame(height: 52)
-                    .background(Omp.themeAccent.opacity(state.busy || sending ? 0.45 : 1), in: RoundedRectangle(cornerRadius: 10))
+                    .background(Omp.themeAccent.opacity(state.busy || sending ? 0.45 : 1), in: Rectangle())
                 }
                 .buttonStyle(.plain)
                 .disabled(state.busy || sending)
@@ -183,7 +183,7 @@ struct LoginScreen: View {
                 } label: {
                     text(label, 14, on ? Omp.foreground : Omp.muted, bold: on)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .background(on ? Omp.selectedFill : Color.clear, in: RoundedRectangle(cornerRadius: 7))
+                        .background(on ? Omp.foreground.opacity(0.10) : Color.clear, in: Rectangle())
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -191,14 +191,14 @@ struct LoginScreen: View {
         }
         .padding(4)
         .frame(height: 44)
-        .background(Omp.card, in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Omp.softDk, lineWidth: 1))
+        .background(Omp.page, in: Rectangle())
+        .overlay(Rectangle().strokeBorder(Omp.line, lineWidth: 1))
     }
 
     private func field(_ label: String, _ value: Binding<String>, secure: Bool, keyboard: UIKeyboardType = .default,
                        trailing: String? = nil, onTrailing: @escaping () -> Void = {}, submitsForm: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            text(label, 13, Omp.foreground).padding(.leading, 2)
+            text(label.uppercased(), 10, Omp.t2).padding(.leading, 2)
             HStack(spacing: 10) {
                 Group {
                     if secure {
@@ -221,8 +221,8 @@ struct LoginScreen: View {
             }
             .padding(.horizontal, 14)
             .frame(height: 52)
-            .background(Omp.card, in: RoundedRectangle(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(Omp.borderColor, lineWidth: 1))
+            .background(Omp.page, in: Rectangle())
+            .overlay(Rectangle().strokeBorder(Omp.edge, lineWidth: 1))
         }
     }
 }

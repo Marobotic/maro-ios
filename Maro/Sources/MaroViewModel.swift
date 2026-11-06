@@ -2211,6 +2211,20 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         showStatus("Added to queue: \(t.title)", "ok")
     }
 
+    /** A whole list after the queue (the desktop's "Add to queue" on a playlist): one command, not one per song. */
+    func addAllToQueue(_ tracks: [Track]) {
+        let list = tracks.filter { !$0.id.isEmpty }
+        if list.isEmpty { return }
+        if isPhone {
+            var queue = state.localQueue
+            for t in list where !queue.contains(where: { $0.id == t.id }) { queue.append(giveVideoId(t)) }
+            state.localQueue = queue
+        } else {
+            remote("queue.add", ["tracks": list.map { $0.toJSON() }])
+        }
+        showStatus("Added \(list.count) \(list.count == 1 ? "track" : "tracks") to queue", "ok")
+    }
+
     func removeQueueIndex(_ i: Int) {
         if !isPhone { return remote("queue.remove", ["index": i]) }
         guard state.localQueue.indices.contains(i) else { return }

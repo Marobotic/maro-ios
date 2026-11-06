@@ -1,13 +1,14 @@
 import SwiftUI
 
+/** The tab row: the desktop's order, then the phone's own list of saved songs. */
 private let tabs: [(key: String, label: String)] = [
     (Sync.viewQueue, "Queue"),
     (Sync.viewLyrics, "Lyrics"),
-    (Sync.viewPlaylists, "Playlists"),
-    (Sync.viewDiscover, "Discover"),
-    (Sync.viewSongs, "Songs"),
+    (Sync.viewPlaylists, "Library"),
     (Sync.viewRecent, "Recent"),
+    (Sync.viewDiscover, "Discover"),
     (Sync.viewSearch, "Search"),
+    (Sync.viewSongs, "Songs"),
 ]
 
 private func deviceLabel(_ device: Device) -> String {
@@ -15,24 +16,24 @@ private func deviceLabel(_ device: Device) -> String {
     return device.kind == "phone" ? "Phone" : "Desktop"
 }
 
-/** Every connected device; the one playing now in the accent colour, the rest white. */
+/** Every connected device; the one playing now in accent-soft, the rest grey. */
 @MainActor
 func devicePicker(_ state: UiState, _ vm: MaroViewModel) -> OmpDialog {
     .menu(title: "Play on", items: state.pickerDevices().map { device in
         OmpDialog.Item(
-            icon: Omp.Icons.broadcast,
+            icon: .wifi,
             label: deviceLabel(device),
-            tint: device.isPlayback ? Omp.themeAccent : Omp.foreground,
+            tint: device.isPlayback ? Omp.soft : Omp.t2,
             detail: device.id == state.myDeviceId ? "This phone" : "",
             bold: device.isPlayback
         ) { if !device.isPlayback { vm.selectDevice(device) } }
     })
 }
 
-/** The Omp-styled popups (menus, name prompts, confirmations) share one host. */
+/** The app's popups (menus, name prompts, confirmations) share one host. */
 enum OmpDialog: Identifiable {
     struct Item {
-        let icon: String
+        let icon: Glyph?
         let label: String
         var closes = true
         var tint: Color = Omp.foreground
@@ -42,6 +43,8 @@ enum OmpDialog: Identifiable {
     }
 
     case menu(title: String, items: [Item])
+    /** A song's menu: its cover, title and artist on top. */
+    case songMenu(track: Track, items: [Item])
     case name(title: String, placeholder: String, confirm: String, initial: String, onConfirm: (String) -> Void)
     case confirm(message: String, confirm: String, onConfirm: () -> Void)
     case password(title: String, confirm: String, onConfirm: (String) -> Void)
@@ -49,6 +52,7 @@ enum OmpDialog: Identifiable {
     var id: String {
         switch self {
         case .menu(let t, _): return "menu:" + t
+        case .songMenu(let t, _): return "song:" + t.source + ":" + t.id
         case .name(let t, _, _, _, _): return "name:" + t
         case .confirm(let m, _, _): return "confirm:" + m
         case .password(let t, _, _): return "password:" + t
@@ -60,91 +64,164 @@ private struct PresentDialogKey: EnvironmentKey {
     static let defaultValue: (OmpDialog?) -> Void = { _ in }
 }
 
+private struct OpenJamKey: EnvironmentKey {
+    static let defaultValue: () -> Void = {}
+}
+
 extension EnvironmentValues {
     var presentDialog: (OmpDialog?) -> Void {
         get { self[PresentDialogKey.self] }
         set { self[PresentDialogKey.self] = newValue }
     }
-}
 
-struct HomeScreen: View {
-    @ObservedObject var vm: MaroViewModel
-    @State private var dialog: OmpDialog?
-    @State private var queueJump = 0
-
-    var body: some View {
-        GeometryReader { geo in
-            let landscape = geo.size.width > geo.size.height && geo.size.width >= 560
-            // Sized for the column the player sits in, not the whole screen.
-            let pane = landscape ? min(max(geo.size.width * 0.42, 300), 440) : geo.size.width
-            let metrics = OmpMetrics(scale: min(max(pane / Omp.panelWidth + 0.25, 0.95), 1.18))
-            let state = vm.state
-            let shown = state.displayState()
-            Group {
-                if state.settingsOpen {
-                    SettingsPage(state: state, vm: vm).frame(maxWidth: 640).frame(maxWidth: .infinity)
-                } else if landscape {
-                    HStack(alignment: .top, spacing: metrics.pt(14)) {
-                        ScrollView {
-                            VStack(spacing: metrics.pt(8)) {
-                                playerColumn(shown)
-                                StatusFooter(state: state, vm: vm)
-                            }
-                        }
-                        .frame(width: pane)
-                        VStack(spacing: metrics.pt(8)) {
-                            TabsRow(state: shown, vm: vm, queueJump: $queueJump)
-                            ViewArea(state: shown, vm: vm, queueJump: queueJump).frame(maxHeight: .infinity)
-                        }
-                    }
-                    .padding(.horizontal, metrics.pt(6))
-                } else {
-                    VStack(spacing: metrics.pt(8)) {
-                        playerColumn(shown)
-                        TabsRow(state: shown, vm: vm, queueJump: $queueJump)
-                        ViewArea(state: shown, vm: vm, queueJump: queueJump).frame(maxHeight: .infinity)
-                        StatusFooter(state: state, vm: vm)
-                    }
-                    .padding(.horizontal, metrics.pt(4))
-                }
-            }
-            // "?": over everything, under the top bar. Not modal - taps
-            // outside go through - so only its button opens and closes it.
-            .overlay(alignment: .topTrailing) {
-                if state.statsOpen && !state.settingsOpen {
-                    StatsPanel(state: shown, vm: vm)
-                        .frame(maxWidth: min(pane, metrics.pt(340)))
-                        .padding(.top, metrics.pt(44))
-                        .padding(.horizontal, metrics.pt(8))
-                        .frame(width: landscape ? pane : nil, alignment: .trailing)
-                        .frame(maxWidth: .infinity, alignment: landscape ? .leading : .trailing)
-                }
-            }
-            .environment(\.omp, metrics)
-        }
-        .environment(\.presentDialog, { dialog = $0 })
-        .background(Omp.background.ignoresSafeArea())
-        .overlay { if let dialog { DialogView(dialog: dialog) { self.dialog = nil }.id(dialog.id) } }
-        .overlay { if let prompt = vm.state.loginPrompt { LoginPromptView(prompt: prompt, vm: vm) } }
-    }
-
-    @ViewBuilder
-    private func playerColumn(_ shown: UiState) -> some View {
-        AccountStrip(state: shown, vm: vm)
-        if !shown.gateText.isEmpty { GateBanner(message: shown.gateText) }
-        if !shown.online { OfflineLine() }
-        NowPlayingRow(state: shown, vm: vm)
-        SeekRow(state: shown, vm: vm)
-        TransportRow(state: shown, vm: vm)
+    /** Opens the full-screen view (lyrics and cover). */
+    var openJam: () -> Void {
+        get { self[OpenJamKey.self] }
+        set { self[OpenJamKey.self] = newValue }
     }
 }
 
 /**
- * The top bar: whose library this is, and settings. Where the music plays
- * is the wifi icon beside the gear, as in Spotify.
+ * The redesign's frame. Phone: the top strip, the main tile (tab row and the
+ * open tab), and the player tile at the bottom. Wide (landscape): the queue
+ * tile above the full player on the left and the main tile on the right, as
+ * the Windows app lays it out.
  */
-private struct AccountStrip: View {
-    @Environment(\.omp) private var m
+struct HomeScreen: View {
+    @ObservedObject var vm: MaroViewModel
+    @State private var dialog: OmpDialog?
+    @State private var queueJump = 0
+    @State private var jamOpen = false
+    @AppStorage("jb.playerMini") private var playerMini = true
+
+    var body: some View {
+        GeometryReader { geo in
+            let wide = geo.size.width > geo.size.height && geo.size.width >= 560
+            let state = vm.state
+            let shown = state.displayState()
+            Group {
+                if state.settingsOpen {
+                    SettingsPage(state: state, vm: vm).frame(maxWidth: 860).frame(maxWidth: .infinity)
+                } else if wide {
+                    VStack(spacing: 8) {
+                        Strip(state: shown, vm: vm)
+                        HStack(spacing: 8) {
+                            VStack(spacing: 8) {
+                                ViewArea(state: shown, vm: vm, queueJump: queueJump)
+                                    .environment(\.queueOnly, true)
+                                    .padding(.horizontal, 8)
+                                    .padding(.top, 2)
+                                    .padding(.bottom, 8)
+                                    .frame(maxHeight: .infinity)
+                                    .tile()
+                                PlayerTile(state: shown, vm: vm, mini: false)
+                            }
+                            .frame(width: min(max(geo.size.width * 0.38, 320), 460))
+                            MainTile(state: shown, vm: vm, queueJump: $queueJump, wide: true)
+                        }
+                    }
+                    .padding(8)
+                } else {
+                    VStack(spacing: 6) {
+                        Strip(state: shown, vm: vm)
+                        MainTile(state: shown, vm: vm, queueJump: $queueJump, wide: false)
+                        PlayerTile(state: shown, vm: vm, mini: playerMini) {
+                            withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) { playerMini.toggle() }
+                        }
+                    }
+                    .padding(6)
+                }
+            }
+            // The "i" panel: over everything, under the strip. Not modal - taps
+            // outside go through - so only its button opens and closes it.
+            .overlay(alignment: .topTrailing) {
+                if state.statsOpen && !state.settingsOpen {
+                    StatsPanel(state: shown, vm: vm)
+                        .frame(maxWidth: min(geo.size.width - 24, 340))
+                        .padding(.top, wide ? 66 : 62)
+                        .padding(.horizontal, 12)
+                        .transition(.opacity.combined(with: .offset(y: -6)))
+                }
+            }
+            .animation(.easeOut(duration: 0.2), value: state.statsOpen)
+        }
+        .environment(\.presentDialog, { dialog = $0 })
+        .environment(\.openJam, { withAnimation(.timingCurve(0.16, 1, 0.3, 1, duration: 0.5)) { jamOpen = true } })
+        .background(Omp.page.ignoresSafeArea())
+        .overlay {
+            if jamOpen {
+                JamView(state: vm.state.displayState(), vm: vm) {
+                    withAnimation(.easeOut(duration: 0.25)) { jamOpen = false }
+                }
+                .transition(.opacity.combined(with: .scale(scale: 1.03)))
+            }
+        }
+        .overlay { if let dialog { DialogView(dialog: dialog) { self.dialog = nil }.id(dialog.id) } }
+        .overlay { if let prompt = vm.state.loginPrompt { LoginPromptView(prompt: prompt, vm: vm) } }
+    }
+}
+
+private struct QueueOnlyKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    /** The wide layout's queue tile: the view area shows the queue whatever tab is open. */
+    var queueOnly: Bool {
+        get { self[QueueOnlyKey.self] }
+        set { self[QueueOnlyKey.self] = newValue }
+    }
+}
+
+/** The main tile: the tab row, any notices, then the open tab; status messages float at its foot. */
+private struct MainTile: View {
+    let state: UiState
+    @ObservedObject var vm: MaroViewModel
+    @Binding var queueJump: Int
+    let wide: Bool
+
+    var body: some View {
+        VStack(spacing: 0) {
+            TabsRow(state: state, vm: vm, queueJump: $queueJump, wide: wide)
+                .padding(.horizontal, wide ? 20 : 10)
+                .padding(.top, wide ? 14 : 10)
+            if !state.gateText.isEmpty { Notice(glyph: .warning, text: state.gateText, color: Omp.urgent) }
+            if !state.online { Notice(glyph: .wifi, text: "Offline · showing what is saved on this phone", color: Omp.t3) }
+            ViewArea(state: state, vm: vm, queueJump: queueJump, wide: wide)
+                .padding(.horizontal, wide ? 20 : 10)
+                .padding(.top, wide ? 12 : 10)
+                .padding(.bottom, wide ? 16 : 12)
+                .frame(maxHeight: .infinity)
+                .clipped()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .tile()
+        .overlay(alignment: .bottom) { Toast(state: state, vm: vm) }
+    }
+}
+
+/** A line under the tabs: why a song could not play, or that the phone is offline. */
+private struct Notice: View {
+    let glyph: Glyph
+    let text: String
+    let color: Color
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Icon(glyph, size: 12, color: color)
+            OmpText(text, size: 11, color: color, maxLines: 2)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 8)
+    }
+}
+
+/**
+ * The top strip: the logo and whose library this is (a tap picks the account),
+ * then playback stats, where the music plays, and settings.
+ */
+private struct Strip: View {
     @Environment(\.presentDialog) private var present
     let state: UiState
     @ObservedObject var vm: MaroViewModel
@@ -159,69 +236,143 @@ private struct AccountStrip: View {
             default: return state.email.ifBlank("Jukebox")
             }
         }()
-        HStack(spacing: m.pt(6)) {
-            // The app's own popup, not the system Menu: a Menu label is drawn
-            // by UIKit, which clipped the Nerd Font cloud in half.
-            OmpButton(
-                icon: state.selectedAccount == "spotify" ? Omp.Icons.spotify : state.selectedAccount == "ytm" ? Omp.Icons.ytm : Omp.Icons.cloud,
-                text: accountText,
-                vertical: 6
-            ) {
+        HStack(spacing: 12) {
+            Button {
                 present(.menu(title: "Account", items: [
-                    .init(icon: Omp.Icons.cloud, label: state.email.ifBlank("Jukebox")) { vm.selectAccount("maro") },
-                    .init(icon: Omp.Icons.spotify, label: state.spotifyConnected ? spotifyName : "Spotify not connected") { vm.selectAccount("spotify") },
-                    .init(icon: Omp.Icons.ytm, label: state.ytmConnected ? ytmName : "YouTube Music not connected") { vm.selectAccount("ytm") },
+                    .init(icon: .cloud, label: state.email.ifBlank("Jukebox"), tint: state.selectedAccount == "maro" ? Omp.soft : Omp.foreground) { vm.selectAccount("maro") },
+                    .init(icon: .spotify, label: state.spotifyConnected ? spotifyName : "Spotify not connected",
+                          tint: state.selectedAccount == "spotify" ? Omp.soft : Omp.foreground) { vm.selectAccount("spotify") },
+                    .init(icon: .ytm, label: state.ytmConnected ? ytmName : "YouTube Music not connected",
+                          tint: state.selectedAccount == "ytm" ? Omp.soft : Omp.foreground) { vm.selectAccount("ytm") },
                 ]))
+            } label: {
+                HStack(spacing: 12) {
+                    Image("LaunchNote").resizable().scaledToFit().frame(width: 24, height: 24)
+                    OmpText(accountText, size: 12, color: Omp.t2)
+                }
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
             .frame(maxWidth: .infinity, alignment: .leading)
-            // "?": which service is really playing, how it got here, how well.
-            OmpButton(
-                icon: Omp.Icons.question,
-                selected: vm.state.statsOpen,
-                foreground: vm.state.statsOpen ? serviceColor(state.playingService) : Omp.foreground,
-                vertical: 6,
-                horizontal: 8
-            ) { vm.toggleStats() }
-            // Where the music plays, one tap away. Not there while this phone
-            // plays on its own.
-            if !state.solo {
-            OmpButton(
-                icon: Omp.Icons.broadcast,
-                // Accent while this phone is the one playing.
-                foreground: state.playingDeviceId == state.myDeviceId ? Omp.themeAccent : Omp.foreground,
-                vertical: 6,
-                horizontal: 8
-            ) { present(devicePicker(state, vm)) }
+            HStack(spacing: 4) {
+                StripButton(glyph: .info, on: state.statsOpen) { vm.toggleStats() }
+                // Where the music plays, one tap away. Not there while this
+                // phone plays on its own. Accent-soft while this phone plays.
+                if !state.solo {
+                    StripButton(glyph: .wifi, color: state.playingDeviceId == state.myDeviceId ? Omp.soft : Omp.t2) {
+                        present(devicePicker(state, vm))
+                    }
+                }
+                StripButton(glyph: .gear, on: state.settingsOpen) { vm.toggleSettings() }
             }
-            OmpButton(icon: Omp.Icons.gear, selected: state.settingsOpen, vertical: 6, horizontal: 8) { vm.toggleSettings() }
         }
+        .padding(.leading, 16)
+        .padding(.trailing, 8)
+        .frame(height: 52)
+        .tile()
     }
 }
 
-private struct GateBanner: View {
-    @Environment(\.omp) private var m
-    let message: String
+/** The strip's 36 pt icon button (.ibtn). */
+private struct StripButton: View {
+    let glyph: Glyph
+    var on = false
+    var color: Color = Omp.t2
+    let action: () -> Void
 
     var body: some View {
-        HStack(spacing: m.pt(6)) {
-            OmpIcon(Omp.Icons.warning, size: Omp.TypeSize.caption, color: Omp.urgent)
-            OmpText(message, size: Omp.TypeSize.caption, color: Omp.urgent, maxLines: 2)
-            Spacer(minLength: 0)
+        Button(action: action) {
+            Icon(glyph, size: 18, color: on ? Omp.foreground : color)
+                .frame(width: 36, height: 36)
+                .background(on ? Omp.hover : Color.clear)
+                .contentShape(Rectangle())
         }
-        .padding(.horizontal, m.pt(4))
+        .buttonStyle(PressStyle(scale: 0.9))
     }
 }
 
-private struct OfflineLine: View {
-    @Environment(\.omp) private var m
+/**
+ * The tabs, bold: the open one white on the #262626 pill that slides to it,
+ * the rest grey. The row scrolls sideways when it does not fit; tapping Queue
+ * again goes back to the song playing.
+ */
+private struct TabsRow: View {
+    let state: UiState
+    @ObservedObject var vm: MaroViewModel
+    @Binding var queueJump: Int
+    let wide: Bool
+    @Namespace private var pill
 
     var body: some View {
-        HStack(spacing: m.pt(6)) {
-            OmpIcon(Omp.Icons.wifi, size: Omp.TypeSize.caption, color: Omp.muted)
-            OmpText("Offline  ·  showing what is saved on this phone", size: Omp.TypeSize.caption, color: Omp.muted)
-            Spacer(minLength: 0)
+        let shownTabs = wide ? tabs.filter { $0.key != Sync.viewQueue } : tabs
+        let selected = wide && state.view == Sync.viewQueue ? Sync.viewLyrics : state.view
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: wide ? 4 : 2) {
+                    ForEach(shownTabs, id: \.key) { tab in
+                        let on = selected == tab.key
+                        Button {
+                            if tab.key == Sync.viewQueue && state.view == Sync.viewQueue {
+                                queueJump += 1
+                            } else {
+                                withAnimation(.timingCurve(0.16, 1, 0.3, 1, duration: 0.36)) { vm.selectTab(tab.key) }
+                            }
+                        } label: {
+                            OmpText(tab.label, size: wide ? 12.5 : 11.5, color: on ? .white : Omp.t2, bold: true)
+                                .padding(.horizontal, wide ? 14 : 4)
+                                .frame(height: 32)
+                                .background {
+                                    if on { Omp.pill.matchedGeometryEffect(id: "pill", in: pill) }
+                                }
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .id(tab.key)
+                    }
+                }
+            }
+            .onAppear { proxy.scrollTo(selected) }
+            .onChange(of: selected) { withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo(selected) } }
         }
-        .padding(.horizontal, m.pt(4))
+        .frame(height: 32)
+    }
+}
+
+/**
+ * Status messages as the desktop's toast: a #1C1C1C box with the accent
+ * border and a small accent square, at the foot of the main tile. A tap or a
+ * few seconds put it away.
+ */
+private struct Toast: View {
+    let state: UiState
+    @ObservedObject var vm: MaroViewModel
+
+    var body: some View {
+        let msg = vm.state.statusMsg
+        let error = vm.state.statusKind == "error"
+        ZStack {
+            if !msg.isEmpty {
+                HStack(spacing: 11) {
+                    Rectangle().fill(error ? Color(hex: 0xD66E36) : Omp.themeAccent).frame(width: 7, height: 7)
+                    OmpText(msg, size: 11.5, color: error ? Color(hex: 0xFFB07A) : Color(hex: 0xE8E8E8), maxLines: 3)
+                }
+                .padding(.vertical, 11)
+                .padding(.leading, 14)
+                .padding(.trailing, 18)
+                .background(Color(hex: 0x1C1C1C))
+                .overlay(Rectangle().strokeBorder(error ? Color(hex: 0xD66E36) : Omp.themeAccent, lineWidth: 1))
+                .shadow(color: .black.opacity(0.5), radius: 15, y: 12)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 16)
+                .onTapGesture { vm.clearStatus() }
+                .task(id: msg) {
+                    await sleep(seconds: error ? 8 : 4)
+                    if !Task.isCancelled { withAnimation(.easeOut(duration: 0.2)) { vm.clearStatus() } }
+                }
+                .transition(.opacity.combined(with: .offset(y: 16)))
+            }
+        }
+        .animation(.timingCurve(0.16, 1, 0.3, 1, duration: 0.3), value: msg)
     }
 }
 
@@ -235,12 +386,11 @@ func serviceColor(_ service: String) -> Color {
 }
 
 /**
- * The "?" panel: the service really playing, the hop when the song is from
+ * The "i" panel: the service really playing, the hop when the song is from
  * another one, how the audio arrives, the copy's per-second bitrate as a graph
  * with the playhead, and the numbers behind it.
  */
 private struct StatsPanel: View {
-    @Environment(\.omp) private var m
     let state: UiState
     @ObservedObject var vm: MaroViewModel
 
@@ -310,45 +460,49 @@ private struct StatsPanel: View {
         let progress = vm.progress
         let service = state.playingService
         let tint = serviceColor(service)
-        let shape = RoundedRectangle(cornerRadius: m.pt(Omp.labelGap))
+        let shape = RoundedRectangle(cornerRadius: 4)
         TimelineView(.periodic(from: .now, by: progress.playing ? 0.5 : 3600)) { _ in
             let second = Int(progress.at(uptime()))
             let duration = progress.duration > 0 ? progress.duration : (state.track?.duration ?? 0)
-            VStack(alignment: .leading, spacing: m.pt(6)) {
-                HStack(spacing: m.pt(8)) {
-                    Circle().fill(tint).frame(width: m.pt(10), height: m.pt(10))
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 10) {
+                    Rectangle().fill(tint).frame(width: 8, height: 8)
                     OmpText(service == "youtube" ? "YouTube Music" : service == "spotify" ? "Spotify"
                             : service == "soundcloud" ? "SoundCloud" : "Nothing playing",
-                            size: Omp.TypeSize.body, color: tint, bold: true)
+                            size: 12, color: Omp.foreground, bold: true)
                 }
                 if !state.gateText.isEmpty {
-                    OmpText("Couldn't play: " + state.gateText, size: Omp.TypeSize.caption, color: Omp.urgent, maxLines: 3)
+                    OmpText("Couldn't play: " + state.gateText, size: 11, color: Omp.urgent, maxLines: 3)
                 } else if service == "youtube" && state.track?.source == "spotify" {
-                    OmpText("This is a Spotify song, playing YouTube Music's copy of it.",
-                            size: Omp.TypeSize.caption, color: Omp.muted, maxLines: 3)
+                    OmpText("This is a Spotify song, playing YouTube Music's copy of it.", size: 11, color: Omp.t3, maxLines: 3)
                 } else if service == "soundcloud", let src = state.track?.source, src != "sc" {
                     OmpText("This is a \(src == "spotify" ? "Spotify" : "YouTube Music") song, playing SoundCloud's copy of it.",
-                            size: Omp.TypeSize.caption, color: Omp.muted, maxLines: 3)
+                            size: 11, color: Omp.t3, maxLines: 3)
                 }
                 BitrateGraph(line: state.audioTimeline, second: second, want: wantKbps, tint: tint)
-                    .frame(height: m.pt(110))
-                ForEach(Array(rows(second: second, duration: duration).enumerated()), id: \.offset) { _, row in
-                    HStack(alignment: .top, spacing: m.pt(8)) {
-                        OmpText(row.0, size: Omp.TypeSize.caption, color: Omp.muted)
-                            .frame(width: m.pt(100), alignment: .leading)
-                        OmpText(row.1, size: Omp.TypeSize.caption,
-                                // A rate row leads with its number: that number's colour.
-                                color: row.0 == "Bitrate now" || row.0 == "Avg / low / peak"
-                                    ? Omp.kbpsColor(Int(row.1.prefix(while: { $0.isNumber })) ?? 0) : Omp.foreground,
-                                maxLines: 2)
-                        Spacer(minLength: 0)
+                    .frame(height: 110)
+                VStack(spacing: 0) {
+                    ForEach(Array(rows(second: second, duration: duration).enumerated()), id: \.offset) { _, row in
+                        HStack(alignment: .top, spacing: 8) {
+                            OmpText(row.0, size: 11, color: Omp.t3)
+                                .frame(width: 108, alignment: .leading)
+                            OmpText(row.1, size: 11,
+                                    // A rate row leads with its number: that number's colour.
+                                    color: row.0 == "Bitrate now" || row.0 == "Avg / low / peak"
+                                        ? Omp.kbpsColor(Int(row.1.prefix(while: { $0.isNumber })) ?? 0) : Color(hex: 0xDDDDDD),
+                                    maxLines: 2)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.vertical, 4)
+                        .overlay(alignment: .bottom) { Rectangle().fill(Omp.line).frame(height: 1) }
                     }
                 }
             }
-            .padding(m.pt(10))
-            .background(Omp.card)
+            .padding(16)
+            .background(Omp.popup)
             .clipShape(shape)
-            .overlay(shape.stroke(tint, lineWidth: 1))
+            .overlay(shape.stroke(Omp.themeAccent, lineWidth: 1))
+            .shadow(color: .black.opacity(0.85), radius: 22, y: 18)
         }
     }
 }
@@ -427,294 +581,165 @@ private struct BitrateGraph: View {
                     color: here > 0 ? Omp.kbpsColor(here) : Omp.foreground, align: 0.5, backing: true)
             }
             if line.isEmpty {
-                OmpText("No bitrate data yet", size: Omp.TypeSize.caption, color: Omp.muted)
+                OmpText("No bitrate data yet", size: 11, color: Omp.t3)
             }
         }
     }
 }
 
 /**
- * The bitrate of what is sounding, at this second of the song, on whichever
- * device is playing it: the droplet's per-second kbps of that exact copy, read
- * at the playhead. Before the timeline arrives it is the copy's average.
- * Coloured by how high it is (Omp.kbpsColor), the same scale everywhere.
+ * The popups as the desktop draws them: menus in a #161616 box with the
+ * accent border and 4 pt corners, prompts and confirmations as #141414 cards
+ * with the accent border, over a dark backdrop. A tap outside closes them.
  */
-private struct LiveBitrate: View {
-    let state: UiState
-    @ObservedObject var vm: MaroViewModel
-    let separator: Bool
-
-    var body: some View {
-        let progress = vm.progress
-        TimelineView(.periodic(from: .now, by: progress.playing ? 0.5 : 3600)) { _ in
-            let second = Int(progress.at(uptime()))
-            let live = second >= 0 && second < state.audioTimeline.count ? state.audioTimeline[second] : 0
-            let kbps = live > 0 ? live : state.audioKbps
-            if kbps > 0 {
-                OmpText((separator ? "  ·  " : "") + "\(kbps) kbps", size: Omp.TypeSize.caption,
-                        color: Omp.kbpsColor(kbps))
-            }
-        }
-    }
-}
-
-private struct NowPlayingRow: View {
-    @Environment(\.omp) private var m
-    let state: UiState
-    @ObservedObject var vm: MaroViewModel
-
-    var body: some View {
-        let track = state.track
-        HStack(spacing: m.pt(10)) {
-            // The border is the service the sound is really from: red YouTube,
-            // green Spotify - the same colour as the playing row.
-            CoverArt(
-                track: track,
-                icon: Omp.sourceIcon(track?.source ?? ""),
-                size: Omp.nowArt,
-                busy: track.map { state.artworkProgress[$0.artKey] != nil } ?? false
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: m.pt(Omp.labelGap))
-                    .stroke(track != nil && !state.playingService.isEmpty
-                            ? serviceColor(state.playingService) : Color.clear,
-                            lineWidth: m.pt(2))
-            )
-            VStack(alignment: .leading, spacing: m.pt(2)) {
-                HStack(spacing: m.pt(6)) {
-                    OmpText(track?.title.ifBlank("Nothing playing") ?? "Nothing playing", size: Omp.TypeSize.subtitle, bold: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    HeartButton(liked: state.isLiked(track), enabled: track != nil) { if let track { vm.likeTrack(track) } }
-                }
-                if let track, !track.artist.isEmpty {
-                    OmpText(track.artist, size: Omp.TypeSize.bodySmall, color: Omp.muted)
-                }
-                if !state.loadingKey.isEmpty {
-                    HStack(spacing: m.pt(5)) {
-                        OmpSpinner(size: Omp.TypeSize.caption, color: Omp.accent)
-                        OmpText(state.loadingStage.ifBlank("Loading…"), size: Omp.TypeSize.caption, color: Omp.accent)
-                    }
-                } else if let track {
-                    // No platform word: it named where the song is from, not
-                    // where the sound is. The cover border and "?" say that.
-                    let meta = track.album
-                    HStack(spacing: 0) {
-                        if !meta.isEmpty { OmpText(meta, size: Omp.TypeSize.caption, color: Omp.muted) }
-                        LiveBitrate(state: state, vm: vm, separator: !meta.isEmpty)
-                    }
-                }
-            }
-        }
-        .frame(height: m.pt(68))
-    }
-}
-
-/**
- * The playhead. It runs off the view model's progress on its own clock via
- * TimelineView, so nothing else on screen redraws while a song plays.
- */
-private struct SeekRow: View {
-    @Environment(\.omp) private var m
-    let state: UiState
-    @ObservedObject var vm: MaroViewModel
-
-    var body: some View {
-        let progress = vm.progress
-        TimelineView(.periodic(from: .now, by: progress.playing ? 0.25 : 3600)) { _ in
-            let now = uptime()
-            let duration = progress.duration > 0 ? progress.duration : state.track?.duration ?? 0
-            let enabled = state.isCurrent && duration > 0
-            let at = progress.at(now)
-            HStack(spacing: m.pt(8)) {
-                OmpText(Omp.fmtTime(at), size: Omp.TypeSize.caption).frame(width: m.pt(38), alignment: .leading)
-                OmpSlider(fraction: duration > 0 ? at / duration : 0, enabled: enabled, glow: progress.playing ? 1 : 0.5) { f in
-                    if enabled { vm.seek(duration * f) }
-                }
-                OmpText(Omp.fmtTime(duration), size: Omp.TypeSize.caption).frame(width: m.pt(38), alignment: .leading)
-            }
-        }
-    }
-}
-
-private struct TransportRow: View {
-    @Environment(\.omp) private var m
-    let state: UiState
-    @ObservedObject var vm: MaroViewModel
-
-    var body: some View {
-        VStack(spacing: m.pt(3)) {
-            HStack {
-                Spacer()
-                OmpButton(icon: Omp.Icons.restart, enabled: state.isCurrent, vertical: 6) { vm.restart() }
-                Spacer()
-                OmpButton(icon: Omp.Icons.prev, enabled: state.isCurrent, vertical: 6) { vm.previous() }
-                Spacer()
-                OmpButton(
-                    icon: state.playing ? Omp.Icons.pause : Omp.Icons.play,
-                    enabled: state.isCurrent || !state.queue.isEmpty,
-                    fontSize: Omp.TypeSize.subtitle,
-                    vertical: 6,
-                    horizontal: 10
-                ) { vm.playPause() }
-                Spacer()
-                OmpButton(icon: Omp.Icons.next, enabled: state.isCurrent, vertical: 6) { vm.next() }
-                Spacer()
-                OmpButton(
-                    icon: Omp.Icons.shuffle,
-                    selected: state.shuffle,
-                    enabled: state.queue.count > 1,
-                    foreground: state.shuffle ? Omp.accent : Omp.muted,
-                    vertical: 6
-                ) { vm.toggleShuffle() }
-                Spacer()
-                OmpButton(
-                    icon: state.repeat == "one" ? Omp.Icons.repeat1 : Omp.Icons.repeat,
-                    text: state.repeat == "one" ? "1" : "",
-                    selected: state.repeat != "off",
-                    foreground: state.repeat == "off" ? Omp.muted : Omp.accent,
-                    vertical: 6
-                ) {
-                    vm.setRepeat(state.repeat == "off" ? "all" : state.repeat == "all" ? "one" : "off")
-                }
-                Spacer()
-            }
-            HStack(spacing: m.pt(8)) {
-                Button { vm.setVolume(state.volume > 0 ? 0 : 100) } label: {
-                    OmpIcon(state.volume <= 0 ? Omp.Icons.volMute : state.volume < 50 ? Omp.Icons.volLow : Omp.Icons.volHigh)
-                        .frame(width: m.pt(26), height: m.pt(26))
-                }
-                .buttonStyle(.plain)
-                OmpSlider(fraction: Double(state.volume) / 100) { f in vm.setVolume(Int((f * 100).rounded())) }
-                OmpText("\(state.volume)%", size: Omp.TypeSize.caption, color: Omp.muted).frame(width: m.pt(38), alignment: .leading)
-            }
-            .padding(.horizontal, m.pt(4))
-        }
-    }
-}
-
-private struct TabsRow: View {
-    @Environment(\.omp) private var m
-    let state: UiState
-    @ObservedObject var vm: MaroViewModel
-    @Binding var queueJump: Int
-
-    var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: m.pt(4)) {
-                ForEach(tabs, id: \.key) { tab in
-                    OmpButton(text: tab.label, selected: state.view == tab.key, vertical: 5, horizontal: 6) {
-                        // Queue tapped while showing: back to the current song.
-                        if tab.key == Sync.viewQueue && state.view == Sync.viewQueue { queueJump += 1 }
-                        vm.selectTab(tab.key)
-                    }
-                }
-            }
-        }
-    }
-}
-
-private struct StatusFooter: View {
-    @Environment(\.omp) private var m
-    let state: UiState
-    @ObservedObject var vm: MaroViewModel
-
-    var body: some View {
-        if !state.statusMsg.isEmpty {
-            let error = state.statusKind == "error"
-            HStack(spacing: m.pt(8)) {
-                OmpIcon(error ? Omp.Icons.warning : Omp.Icons.gear, size: Omp.TypeSize.caption, color: error ? Omp.urgent : Omp.accent)
-                OmpText(state.statusMsg, size: Omp.TypeSize.caption, color: error ? Omp.urgent : Omp.foreground, maxLines: 2)
-                Spacer(minLength: 0)
-            }
-            .padding(.vertical, m.pt(4))
-            .contentShape(Rectangle())
-            .onTapGesture { vm.clearStatus() }
-            .task(id: state.statusMsg) {
-                await sleep(seconds: error ? 8 : 4)
-                if !Task.isCancelled { vm.clearStatus() }
-            }
-        }
-    }
-}
-
-/** The Omp card popups: a dimmed backdrop, a bordered card, tap outside to close. */
 private struct DialogView: View {
-    @Environment(\.omp) private var m
     let dialog: OmpDialog
     let dismiss: () -> Void
     @State private var text = ""
+    @State private var shown = false
 
     var body: some View {
         ZStack {
-            Color.black.opacity(0.55).ignoresSafeArea().onTapGesture(perform: dismiss)
-            VStack(alignment: .leading, spacing: 0) { content }
-                .frame(maxWidth: 360)
-                .background(Omp.card, in: RoundedRectangle(cornerRadius: Omp.labelGap))
-                .overlay(RoundedRectangle(cornerRadius: Omp.labelGap).stroke(Omp.borderColor, lineWidth: 1))
-                .padding(24)
+            Color.black.opacity(0.72).ignoresSafeArea().onTapGesture(perform: dismiss)
+            content
+                .scaleEffect(shown ? 1 : 0.96)
+                .opacity(shown ? 1 : 0)
+                .padding(16)
         }
-        .onAppear { if case .name(_, _, _, let initial, _) = dialog { text = initial } }
+        .onAppear {
+            if case .name(_, _, _, let initial, _) = dialog { text = initial }
+            withAnimation(.spring(response: 0.22, dampingFraction: 0.7)) { shown = true }
+        }
     }
 
     @ViewBuilder
     private var content: some View {
         switch dialog {
         case .menu(let title, let items):
-            OmpText(title, size: Omp.TypeSize.caption, color: Omp.muted)
-                .padding(.horizontal, 12).padding(.top, 12).padding(.bottom, 4)
-            ForEach(items.indices, id: \.self) { i in
-                let item = items[i]
-                Button {
-                    item.action()
-                    if item.closes { dismiss() }
-                } label: {
-                    HStack(spacing: 12) {
-                        OmpIcon(item.icon, color: item.tint)
-                        VStack(alignment: .leading, spacing: 2) {
-                            OmpText(item.label, color: item.tint, bold: item.bold)
-                            if !item.detail.isEmpty { OmpText(item.detail, size: Omp.TypeSize.caption, color: Omp.muted) }
-                        }
-                        Spacer(minLength: 0)
+            menuBox {
+                OmpText(title, size: 12, color: Omp.foreground, bold: true)
+                    .padding(.horizontal, 8)
+                    .padding(.top, 6)
+                    .padding(.bottom, 10)
+                    .frame(minHeight: 36, alignment: .leading)
+            } items: { items }
+        case .songMenu(let track, let items):
+            menuBox {
+                HStack(spacing: 10) {
+                    CoverArt(track: track, icon: Omp.sourceGlyph(track.source), size: 36)
+                    VStack(alignment: .leading, spacing: 4) {
+                        OmpText(track.title.ifBlank(track.id), size: 12, color: Omp.foreground, bold: true)
+                        if !track.artist.isEmpty { OmpText(track.artist, size: 10.5, color: Omp.t3) }
                     }
-                    .padding(.horizontal, 12).padding(.vertical, 10)
-                    .contentShape(Rectangle())
+                    Spacer(minLength: 0)
                 }
-                .buttonStyle(.plain)
-            }
-            Spacer().frame(height: 8)
+                .padding(.horizontal, 8)
+                .padding(.top, 6)
+                .padding(.bottom, 10)
+                .frame(minHeight: 48)
+            } items: { items }
         case .name(let title, let placeholder, let confirm, _, let onConfirm):
             let submit = { if !text.isBlank { onConfirm(text.trimmingCharacters(in: .whitespaces)); dismiss() } }
-            VStack(alignment: .leading, spacing: 8) {
-                OmpText(title, size: Omp.TypeSize.caption, color: Omp.muted)
+            card {
+                OmpText(title, size: 16, color: Omp.foreground, bold: true)
                 OmpTextField(text: $text, placeholder: placeholder, onSubmit: submit)
-                HStack(spacing: 4) {
-                    OmpButton(text: confirm, enabled: !text.isBlank, foreground: Omp.accent, bordered: true, action: submit)
-                    OmpButton(text: "Cancel", action: dismiss)
+                HStack(spacing: 8) {
+                    Spacer(minLength: 0)
+                    MButton("Cancel", action: dismiss)
+                    MButton(confirm, kind: .primary, enabled: !text.isBlank, action: submit)
                 }
+                .padding(.top, 8)
             }
-            .padding(10)
         case .password(let title, let confirm, let onConfirm):
             // Not trimmed: a password's spaces are part of it.
             let submit = { if !text.isEmpty { onConfirm(text); dismiss() } }
-            VStack(alignment: .leading, spacing: 8) {
-                OmpText(title, size: Omp.TypeSize.caption, color: Omp.muted, maxLines: 3)
+            card {
+                OmpText(title, size: 12, color: Omp.t2, maxLines: 4)
                 OmpTextField(text: $text, placeholder: "Password", password: true, onSubmit: submit)
-                HStack(spacing: 4) {
-                    OmpButton(text: confirm, enabled: !text.isEmpty, foreground: Omp.accent, bordered: true, action: submit)
-                    OmpButton(text: "Cancel", action: dismiss)
+                HStack(spacing: 8) {
+                    Spacer(minLength: 0)
+                    MButton("Cancel", action: dismiss)
+                    MButton(confirm, kind: .primary, enabled: !text.isEmpty, action: submit)
                 }
+                .padding(.top, 8)
             }
-            .padding(10)
         case .confirm(let message, let confirm, let onConfirm):
-            VStack(alignment: .leading, spacing: 10) {
-                OmpText(message, maxLines: 4)
-                HStack(spacing: 4) {
-                    OmpButton(text: confirm, foreground: Omp.urgent, bordered: true) { onConfirm(); dismiss() }
-                    OmpButton(text: "Cancel", action: dismiss)
+            card(gap: 22) {
+                OmpText(message, size: 14, color: Omp.foreground, maxLines: 6)
+                    .lineSpacing(5)
+                HStack(spacing: 8) {
+                    Spacer(minLength: 0)
+                    MButton("Cancel", action: dismiss)
+                    MButton(confirm, kind: .danger) { onConfirm(); dismiss() }
                 }
             }
-            .padding(10)
         }
+    }
+
+    private func menuBox<Head: View>(@ViewBuilder head: () -> Head, items: () -> [OmpDialog.Item]) -> some View {
+        let list = items()
+        let shape = RoundedRectangle(cornerRadius: 4)
+        let rows = VStack(alignment: .leading, spacing: 2) {
+            ForEach(list.indices, id: \.self) { i in
+                menuRow(list[i])
+            }
+        }
+        return VStack(alignment: .leading, spacing: 2) {
+            head()
+            // Unscrolled when it fits (a phone held upright), scrolling when not.
+            ViewThatFits(in: .vertical) {
+                rows
+                ScrollView { rows }
+            }
+        }
+        .padding(6)
+        .frame(maxWidth: 300)
+        .background(Omp.row)
+        .clipShape(shape)
+        .overlay(shape.stroke(Omp.themeAccent, lineWidth: 1))
+        .shadow(color: .black.opacity(0.85), radius: 22, y: 18)
+    }
+
+    private func menuRow(_ item: OmpDialog.Item) -> some View {
+        Button {
+            item.action()
+            if item.closes { dismiss() }
+        } label: {
+            HStack(spacing: 12) {
+                if let icon = item.icon {
+                    Icon(icon, size: 14, color: item.tint == Omp.foreground ? Omp.t3 : item.tint)
+                } else {
+                    Color.clear.frame(width: 14, height: 14)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    OmpText(item.label, size: 12, color: item.tint, bold: item.bold)
+                    if !item.detail.isEmpty { OmpText(item.detail, size: 10.5, color: Omp.t3) }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12)
+            .frame(minHeight: 36)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(MenuItemStyle())
+    }
+
+    private func card<Content: View>(gap: CGFloat = 14, @ViewBuilder _ content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: gap) { content() }
+            .padding(24)
+            .frame(maxWidth: 420)
+            .background(Omp.popup)
+            .overlay(Rectangle().strokeBorder(Omp.themeAccent, lineWidth: 1))
+            .shadow(color: .black.opacity(0.72), radius: 25, y: 18)
+    }
+}
+
+/** A menu row lights up in the accent while pressed. */
+private struct MenuItemStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(configuration.isPressed ? Omp.themeAccent.opacity(0.28) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 3))
     }
 }
 
@@ -733,41 +758,36 @@ private struct LoginPromptView: View {
             : !prompt.code.isEmpty ? "Open Google's page, sign in with the Google account you use for YouTube Music, and enter this code:"
             : "Finish signing in on the Spotify page that just opened, then come back here."
         ZStack {
-            Color.black.opacity(0.6).ignoresSafeArea().onTapGesture { vm.dismissLogin() }
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Connect \(label)").font(Omp.font(17, bold: true)).foregroundColor(Omp.foreground)
-                Text(body).font(Omp.font(14)).foregroundColor(prompt.error.isEmpty ? Omp.muted : Omp.urgent)
+            Color.black.opacity(0.72).ignoresSafeArea().onTapGesture { vm.dismissLogin() }
+            VStack(alignment: .leading, spacing: 14) {
+                OmpText("Connect \(label)", size: 16, color: Omp.foreground, bold: true)
+                OmpText(body, size: 12, color: prompt.error.isEmpty ? Omp.t2 : Omp.urgent, maxLines: 6)
+                    .lineSpacing(5)
                 if !prompt.code.isEmpty {
                     Text(prompt.code).font(Omp.font(26, bold: true)).foregroundColor(Omp.foreground)
                         .frame(maxWidth: .infinity).textSelection(.enabled)
+                        .padding(.vertical, 6)
                 }
                 HStack(spacing: 8) {
                     if !prompt.code.isEmpty {
-                        button("Copy code", filled: false) {
+                        MButton("Copy code", small: false, expand: true) {
                             UIPasteboard.general.string = prompt.code
                             vm.showStatus("Code copied", "ok")
                         }
                     }
                     if !prompt.url.isEmpty && prompt.error.isEmpty {
-                        button(prompt.code.isEmpty ? "Open again" : "Open Google", filled: true) { vm.openUrl(prompt.url) }
+                        MButton(prompt.code.isEmpty ? "Open again" : "Open Google", kind: .primary, small: false, expand: true) {
+                            vm.openUrl(prompt.url)
+                        }
                     }
                 }
-                button(prompt.error.isEmpty ? "Done" : "Close", filled: false) { vm.dismissLogin() }
+                MButton(prompt.error.isEmpty ? "Done" : "Close", small: false, expand: true) { vm.dismissLogin() }
             }
-            .padding(20)
-            .background(Omp.card, in: RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Omp.softDk, lineWidth: 1))
             .padding(24)
+            .frame(maxWidth: 420)
+            .background(Omp.popup)
+            .overlay(Rectangle().strokeBorder(Omp.themeAccent, lineWidth: 1))
+            .padding(16)
         }
-    }
-
-    private func button(_ text: String, filled: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(text).font(Omp.font(14)).foregroundColor(filled ? .white : Omp.foreground)
-                .frame(maxWidth: .infinity).frame(height: 46)
-                .background(filled ? Omp.themeAccent : Color.clear, in: RoundedRectangle(cornerRadius: 10))
-                .overlay(RoundedRectangle(cornerRadius: 10).stroke(filled ? Omp.themeAccent : Omp.borderColor, lineWidth: 1))
-        }
-        .buttonStyle(.plain)
     }
 }
