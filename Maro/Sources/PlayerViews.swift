@@ -46,7 +46,7 @@ private struct PlayerCover: View {
         CoverArt(track: track, icon: Omp.sourceGlyph(track?.source ?? ""), size: size - 2,
                  busy: track.map { state.artworkProgress[$0.artKey] != nil } ?? false)
             .padding(1)
-            .overlay(Rectangle().strokeBorder(track == nil ? Omp.foreground.opacity(0.4) : Omp.themeAccent, lineWidth: 1))
+            .overlay(Rectangle().strokeBorder(track.map { Omp.playingColor($0.source) } ?? Omp.foreground.opacity(0.4), lineWidth: 1))
             .id(track?.id ?? "")
             .transition(.scale(scale: 0.92).combined(with: .opacity))
     }

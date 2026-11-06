@@ -47,7 +47,10 @@ struct SettingsPage: View {
             .padding(.horizontal, 12)
             .padding(.top, 16)
             .background(Omp.page.ignoresSafeArea())
-            .navigationDestination(isPresented: $showingConsole) { ConsolePage() }
+            .navigationDestination(isPresented: $showingConsole) { ConsolePage(state: state, vm: vm) }
+            // A failure toast's "Details": straight to its entry.
+            .onAppear { if state.consoleFocus != 0 { showingConsole = true } }
+            .onChange(of: state.consoleFocus) { _, id in if id != 0 { showingConsole = true } }
             .toolbar(.hidden, for: .navigationBar)
             .focusable()
             .onKeyPress(.escape) {
@@ -110,7 +113,7 @@ struct SettingsPage: View {
         SettingsAction(label: "This phone's name", value: state.deviceName, action: "Rename") {
             present(.name(title: "Device name", placeholder: Omp.defaultPhoneName, confirm: "Save", initial: state.deviceName) { vm.setDeviceName($0) })
         }
-        SettingsAction(label: "Console", value: "\(console.entries.count) lines", action: "Open") { showingConsole = true }
+        SettingsAction(label: "Console", value: "\(console.entries.count) entries", action: "Open") { showingConsole = true }
         // Off: part of the account's one shared player. On: this
         // phone plays on its own and leaves the device lists.
         SettingsSwitch(label: "Play music on this device only", on: state.solo) { vm.setSolo($0) }
@@ -220,51 +223,103 @@ extension SettingsTop where Trailing == EmptyView {
     }
 }
 
+/**
+ * The Console (round 2 M.1): the playback log with its options - level
+ * (Errors / Warnings / All), service, a search, "This song only", a time
+ * range - newest first; an entry opens to its details. Copy and Share take
+ * the filtered log as text; Clear empties it.
+ */
 private struct ConsolePage: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.presentDialog) private var present
+    let state: UiState
+    @ObservedObject var vm: MaroViewModel
     @ObservedObject private var console = ConsoleLog.shared
+    @State private var level = "all"          // errors | warnings | all
+    @State private var source = ""            // "" | spotify | ytm | sc | jukebox
+    @State private var query = ""
+    @State private var songOnly = false
+    @State private var range = 0
+    @State private var open: Set<Int> = []
+
+    private static let ranges: [(String, Double)] = [
+        ("All time", 0), ("Last hour", 3600), ("Last 24 h", 86400), ("Last 7 days", 7 * 86400),
+    ]
+    static let levelE = Color(hex: 0xFF6B5E)
+    static let levelW = Color(hex: 0xF0B400)
+
+    private var songKey: String { state.displayState().track.map(ConsoleLog.keyOf) ?? "" }
+
+    private var shown: [ConsoleEntry] {
+        let now = Date().timeIntervalSince1970
+        let q = query.trimmingCharacters(in: .whitespaces)
+        let window = Self.ranges[range].1
+        let key = songKey
+        return console.entries.reversed().filter { e in
+            (level == "all" || (level == "errors" && e.level == .error) || (level == "warnings" && e.level != .info))
+                && (source.isEmpty || e.source == source
+                    || (!e.songKey.isEmpty && ConsoleLog.serviceOf(source: String(e.songKey.split(separator: ":").first ?? "")) == source))
+                && (!songOnly || (!key.isEmpty && e.songKey == key))
+                && (window == 0 || now - e.at <= window)
+                && (q.isEmpty || [e.message, e.song, e.songKey, e.details, e.area].contains { $0.localizedCaseInsensitiveContains(q) })
+        }
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            SettingsTop(title: "Settings › Console", onBack: { dismiss() }) {
-                EmptyView()
+        let list = shown
+        VStack(alignment: .leading, spacing: 6) {
+            SettingsTop(title: "Settings \u{203A} Console", onBack: { dismiss() }) {
+                OmpText("\(list.count) of \(console.entries.count)", size: 11, color: Omp.t3)
             }
             HStack(spacing: 6) {
-                MButton("Copy all") {
-                    UIPasteboard.general.string = console.entries.map(\.line).joined(separator: "\n")
-                }
-                MButton("Clear", kind: .danger) { console.clear() }
-                Spacer(minLength: 0)
+                ConsoleChip(label: "Errors", on: level == "errors", dot: Self.levelE) { level = level == "errors" ? "all" : "errors" }
+                ConsoleChip(label: "Warnings", on: level == "warnings", dot: Self.levelW) { level = level == "warnings" ? "all" : "warnings" }
+                ConsoleChip(label: "All", on: level == "all") { level = "all" }
             }
-            .padding(.vertical, 8)
-            if console.entries.isEmpty {
-                OmpText("No console entries", size: 11, color: Omp.t3)
+            ScrollView(.horizontal) {
+                HStack(spacing: 6) {
+                    ConsoleChip(label: "All services", on: source.isEmpty) { source = "" }
+                    ForEach(["spotify", "ytm", "sc", "jukebox"], id: \.self) { s in
+                        ConsoleChip(label: ConsoleLog.sourceLabel(s), on: source == s, dot: Omp.playingColor(s)) { source = source == s ? "" : s }
+                    }
+                }
+            }
+            .scrollIndicators(.hidden)
+            OmpTextField(text: $query, placeholder: "Search the log", height: 36)
+            ScrollView(.horizontal) {
+                HStack(spacing: 6) {
+                    ConsoleChip(label: "This song only", on: songOnly, enabled: !songKey.isEmpty) { songOnly.toggle() }
+                    ConsoleChip(label: Self.ranges[range].0, on: range != 0) { range = (range + 1) % Self.ranges.count }
+                    MButton("Copy") {
+                        UIPasteboard.general.string = ConsoleLog.text(list.reversed())
+                        vm.showStatus("Copied \(list.count) entries", "ok")
+                    }
+                    MButton("Share") { shareLog(list) }
+                    MButton("Clear", kind: .danger) {
+                        present(.confirm(message: "Clear the whole playback log (\(console.entries.count) entries)?", confirm: "Clear") { ConsoleLog.shared.clear() })
+                    }
+                }
+            }
+            .scrollIndicators(.hidden)
+            if list.isEmpty {
+                OmpText(console.entries.isEmpty ? "Nothing logged yet" : "No entries match", size: 11, color: Omp.t3)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .padding(.top, 8)
             } else {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(console.entries) { entry in
-                                Text(entry.line)
-                                    .font(Omp.font(11))
-                                    .foregroundColor(Omp.foreground)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(.vertical, 4)
-                                    .overlay(alignment: .bottom) { Rectangle().fill(Color.white.opacity(0.04)).frame(height: 1) }
-                                    .id(entry.id)
+                            ForEach(list) { e in
+                                ConsoleRow(entry: e, expanded: open.contains(e.id)) {
+                                    if open.contains(e.id) { open.remove(e.id) } else { open.insert(e.id) }
+                                }
+                                .id(e.id)
                             }
                         }
                         .padding(.bottom, 16)
-                        .textSelection(.enabled)
                     }
-                    .onChange(of: console.entries.last?.id) { _, id in
-                        if let id { proxy.scrollTo(id, anchor: .bottom) }
-                    }
-                    .onAppear {
-                        if let last = console.entries.last { proxy.scrollTo(last.id, anchor: .bottom) }
-                    }
+                    .onAppear { focus(proxy) }
+                    .onChange(of: state.consoleFocus) { focus(proxy) }
                 }
             }
         }
@@ -278,6 +333,133 @@ private struct ConsolePage: View {
             return .handled
         }
     }
+
+    /** Opened from a failure toast: that entry, open, with nothing filtering it out. */
+    private func focus(_ proxy: ScrollViewProxy) {
+        let id = state.consoleFocus
+        guard id != 0 else { return }
+        level = "all"; source = ""; query = ""; songOnly = false; range = 0
+        open.insert(id)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { proxy.scrollTo(id, anchor: .top) }
+        vm.consoleFocusSeen()
+    }
+
+    /** The filtered log through the share sheet: newest last, up to ~200 KB of the newest entries. */
+    private func shareLog(_ list: [ConsoleEntry]) {
+        var picked: [ConsoleEntry] = []
+        var size = 0
+        for e in list {                         // newest first
+            let n = e.line.utf8.count + 1
+            if size + n > 200_000 { break }
+            picked.append(e)
+            size += n
+        }
+        presentShareSheet("Jukebox \(SettingsPage.version) playback log\n" + ConsoleLog.text(picked.reversed()), subject: "Jukebox playback log")
+    }
+}
+
+private struct ConsoleChip: View {
+    let label: String
+    let on: Bool
+    var dot: Color? = nil
+    var enabled = true
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                if let dot { Rectangle().fill(dot).frame(width: 7, height: 7) }
+                OmpText(label, size: 11, color: !enabled ? Omp.t3.opacity(0.5) : on ? .white : Omp.t2, bold: on)
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 30)
+            .background(on ? Omp.themeAccent.opacity(0.22) : Omp.raise)
+            .overlay(Rectangle().strokeBorder(on ? Omp.themeAccent : Omp.edge, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+    }
+}
+
+private struct ConsoleRow: View {
+    let entry: ConsoleEntry
+    let expanded: Bool
+    let toggle: () -> Void
+
+    private var levelColor: Color {
+        switch entry.level {
+        case .error: return ConsolePage.levelE
+        case .warning: return ConsolePage.levelW
+        case .info: return Color(hex: 0x5A5A5A)
+        }
+    }
+
+    private var textColor: Color {
+        switch entry.level {
+        case .error: return Color(hex: 0xFFB0A8)
+        case .warning: return Color(hex: 0xFFE08A)
+        case .info: return Omp.foreground
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top, spacing: 7) {
+                Rectangle().fill(levelColor).frame(width: 3, height: entry.song.isEmpty ? 14 : 28).padding(.top, 1)
+                OmpText(ConsoleLog.clockOf(entry), size: 10.5, color: Omp.t3)
+                Rectangle().fill(Omp.playingColor(entry.source)).frame(width: 6, height: 6).padding(.top, 4)
+                VStack(alignment: .leading, spacing: 2) {
+                    OmpText(entry.message, size: 11.5, color: textColor, maxLines: expanded ? 12 : 2)
+                    if !entry.song.isEmpty { OmpText(entry.song, size: 10.5, color: Omp.t3) }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if expanded {
+                VStack(alignment: .leading, spacing: 3) {
+                    detail("When", ConsoleLog.stampOf(entry))
+                    detail("Level", entry.level.label)
+                    detail("Service", ConsoleLog.sourceLabel(entry.source))
+                    detail("From", entry.area)
+                    if !entry.song.isEmpty { detail("Song", "\(entry.song)  \u{B7}  \(entry.songKey)") }
+                    if !entry.details.isEmpty { detail("Details", entry.details) }
+                }
+                .padding(.leading, 10)
+                .padding(.top, 6)
+                .padding(.trailing, 4)
+                .textSelection(.enabled)
+            }
+            Rectangle().fill(Color.white.opacity(0.04)).frame(height: 1).padding(.top, 6)
+        }
+        .padding(.top, 6)
+        .background(expanded ? Omp.tile : .clear)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: toggle)
+    }
+
+    private func detail(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            OmpText(label, size: 10.5, color: Omp.t3).frame(width: 56, alignment: .leading)
+            Text(value).font(Omp.font(10.5)).foregroundColor(Omp.t2)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+/** The system share sheet for some text, over whatever is on screen. */
+@MainActor
+func presentShareSheet(_ text: String, subject: String = "") {
+    let sheet = UIActivityViewController(activityItems: [text], applicationActivities: nil)
+    if !subject.isEmpty { sheet.setValue(subject, forKey: "subject") }
+    let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+    let scene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
+    guard var top = scene?.windows.first(where: \.isKeyWindow)?.rootViewController ?? scene?.windows.first?.rootViewController else { return }
+    while let next = top.presentedViewController { top = next }
+    if let pop = sheet.popoverPresentationController {
+        pop.sourceView = top.view
+        pop.sourceRect = CGRect(x: top.view.bounds.midX, y: top.view.bounds.maxY - 80, width: 1, height: 1)
+    }
+    top.present(sheet, animated: true)
 }
 
 /** A section head: red, uppercase, letter-spaced. */

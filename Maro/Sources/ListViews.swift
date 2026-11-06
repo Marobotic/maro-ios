@@ -116,7 +116,7 @@ final class VisibleRows: ObservableObject {
 }
 
 @MainActor
-func trackMenu(_ track: Track, liked: Bool, vm: MaroViewModel) -> OmpDialog {
+func trackMenu(_ track: Track, liked: Bool, vm: MaroViewModel, present: @escaping (OmpDialog?) -> Void = { _ in }) -> OmpDialog {
     typealias Item = OmpDialog.Item
     // Tapping the row already plays it; this is for when you care
     // where it comes from. Each falls back if that service cannot.
@@ -144,10 +144,22 @@ func trackMenu(_ track: Track, liked: Bool, vm: MaroViewModel) -> OmpDialog {
         Item(icon: .brush, label: "Fix artwork") { vm.fixArtwork(track) },
         Item(icon: .heart, label: liked ? "Unlike" : "Like", tint: liked ? Omp.soft : Omp.foreground) { vm.likeTrack(track) },
         Item(icon: .bell, label: "Set as alarm") { vm.setAsAlarm(track) },
-        Item(icon: .link, label: "Share on Spotify") { vm.shareSpotifyLink(track) },
-        Item(icon: .link, label: "Share on YouTube Music") { vm.shareYouTubeLink(track) },
+        // "Share in..." (round 2 M.3): the same list on every app.
+        Item(icon: .link, label: "Share in\u{2026}", closes: false) { present(shareMenu(track, vm: vm)) },
     ]
     return .songMenu(track: track, items: items)
+}
+
+@MainActor
+func shareMenu(_ track: Track, vm: MaroViewModel) -> OmpDialog {
+    typealias Item = OmpDialog.Item
+    return .songMenu(track: track, items: [
+        Item(icon: .spotify, label: "Spotify", tint: Omp.spotify) { vm.shareIn(track, "spotify") },
+        Item(icon: .ytm, label: "YouTube Music", tint: Omp.ytm) { vm.shareIn(track, "ytm") },
+        Item(icon: .ytm, label: "YouTube") { vm.shareIn(track, "youtube") },
+        Item(icon: .sc, label: "SoundCloud", tint: Omp.sc) { vm.shareIn(track, "sc") },
+        Item(icon: .link, label: "Copy link") { vm.copySongLink(track) },
+    ])
 }
 
 /**
@@ -213,7 +225,7 @@ struct SongRow: View {
                 if isCurrent && loading {
                     OmpSpinner(size: 14, color: Omp.themeAccent)
                 } else if isCurrent && playing {
-                    EqBars()
+                    EqBars(color: Omp.playingColor(track.source))
                 } else if isCurrent {
                     Icon(.playSmall, size: 13, color: Omp.foreground)
                 } else {
@@ -230,8 +242,9 @@ struct SongRow: View {
         .padding(.horizontal, 4)
         .padding(.vertical, 6)
         .frame(minHeight: 56)
-        .background(isCurrent ? Omp.themeAccent.opacity(0.18) : Color.clear)
-        .overlay { if isCurrent { Rectangle().strokeBorder(Omp.themeAccent.opacity(0.8), lineWidth: 1) } }
+        // The playing row takes its song's service colour (round 2 M.5).
+        .background(isCurrent ? Omp.playingColor(track.source).opacity(0.18) : Color.clear)
+        .overlay { if isCurrent { Rectangle().strokeBorder(Omp.playingColor(track.source).opacity(0.8), lineWidth: 1) } }
         .opacity(dimmed ? 0.3 : playable ? 1 : 0.4)
         .contentShape(Rectangle())
         .onTapGesture {
@@ -310,7 +323,7 @@ private struct QueueView: View {
                                     loading: !state.loadingKey.isEmpty,
                                     onRemove: { withAnimation(.easeIn(duration: 0.2)) { vm.removeQueueIndex(index) } },
                                     onPlay: { vm.playQueueIndex(index) },
-                                    onMenu: { present(trackMenu(track, liked: state.isLiked(track), vm: vm)) }
+                                    onMenu: { present(trackMenu(track, liked: state.isLiked(track), vm: vm, present: present)) }
                                 )
                                 .id(index)
                                 .onAppear { visible.appear(index, state.queue, vm) }
@@ -612,7 +625,7 @@ private struct PlaylistDetail: View {
                                 available: state.canPlay(track),
                                 loading: !shown.loadingKey.isEmpty,
                                 onPlay: { vm.playTrack(track, context: tracks, name: row.name, index: index) },
-                                onMenu: { present(trackMenu(track, liked: state.isLiked(track), vm: vm)) }
+                                onMenu: { present(trackMenu(track, liked: state.isLiked(track), vm: vm, present: present)) }
                             )
                             .onAppear {
                                 visible.appear(index, tracks, vm)
@@ -663,7 +676,7 @@ struct TrackList: View {
                         when: when(track),
                         loading: !shown.loadingKey.isEmpty,
                         onPlay: { onPlay(index, track) },
-                        onMenu: { present(trackMenu(track, liked: state.isLiked(track), vm: vm)) }
+                        onMenu: { present(trackMenu(track, liked: state.isLiked(track), vm: vm, present: present)) }
                     )
                     .onAppear { visible.appear(index, tracks, vm) }
                     .onDisappear { visible.disappear(index) }

@@ -368,6 +368,15 @@ private struct Toast: View {
                 HStack(spacing: 11) {
                     Rectangle().fill(error ? Color(hex: 0xD66E36) : Omp.themeAccent).frame(width: 7, height: 7)
                     OmpText(msg, size: 11.5, color: error ? Color(hex: 0xFFB07A) : Color(hex: 0xE8E8E8), maxLines: 3)
+                        .layoutPriority(1)
+                    // A failure links to its entry in the playback log (round 2 M.1).
+                    let entry = vm.state.statusEntry
+                    if entry != 0 {
+                        Button { vm.openConsoleAt(entry) } label: {
+                            OmpText("Details", size: 11.5, color: .white, bold: true).padding(.leading, 4)
+                        }
+                        .buttonStyle(.plain)
+                    }
                 }
                 .padding(.vertical, 11)
                 .padding(.leading, 14)

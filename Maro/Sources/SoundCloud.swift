@@ -260,6 +260,21 @@ actor SoundCloud {
      * so a remembered one is a 404 waiting to happen. Throws Unplayable for
      * DRM-only and preview-only.
      */
+    /** The track's own page on soundcloud.com, "" when it cannot be had. */
+    func pageUrl(_ trackId: String) async -> String {
+        var t = tracks[trackId]
+        if t == nil { t = try? await call("/tracks/" + trackId) }
+        guard let t else { return "" }
+        tracks[trackId] = t
+        let url = t.str("permalink_url")
+        return url.hasPrefix("https://") ? url : ""
+    }
+
+    /** A search on soundcloud.com for `query`. */
+    nonisolated static func searchUrl(_ query: String) -> String {
+        "https://soundcloud.com/search/sounds?q=" + Omp.queryEncode(query.trimmingCharacters(in: .whitespaces))
+    }
+
     func resolve(_ trackId: String) async throws -> Stream {
         let t = try await call("/tracks/" + trackId)
         tracks[trackId] = t

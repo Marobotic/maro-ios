@@ -176,7 +176,7 @@ private struct DiscoverDetail: View {
                                 available: state.canPlay(track),
                                 loading: !shown.loadingKey.isEmpty,
                                 onPlay: { vm.playTrack(track, context: tracks, name: item.name, index: index) },
-                                onMenu: { present(trackMenu(track, liked: state.isLiked(track), vm: vm)) }
+                                onMenu: { present(trackMenu(track, liked: state.isLiked(track), vm: vm, present: present)) }
                             )
                             .onAppear { visible.appear(index, tracks, vm) }
                             .onDisappear { visible.disappear(index) }

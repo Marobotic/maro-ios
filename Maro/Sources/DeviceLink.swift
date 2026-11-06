@@ -330,7 +330,12 @@ final class DeviceLink {
             case "session.offer": if acceptOffer(body, from: peer) { updateSources(); host?.linkChanged() }
             case "ytm.request": await answerYtmRequest(body, to: peer)
             case "ytm.handover": await takeHandover(body, from: peer)
-            case "ytm.handover.ack": ConsoleLog.shared.log("DeviceLink", "YouTube Music moved to \(peer.name)")
+            case "ytm.handover.ack":
+                if body["ok"] as? Bool ?? true {
+                    ConsoleLog.shared.info("Devices", "YouTube Music now held by \(peer.name)", source: "ytm")
+                } else {
+                    ConsoleLog.shared.warn("Devices", "\(peer.name) refused the YouTube Music hand-over: \(body.str("error"))", source: "ytm")
+                }
             default: break
             }
         }
@@ -470,22 +475,55 @@ final class DeviceLink {
         }
     }
 
-    /** The role arrives here ({cookies, userAgent, at}): import, refresh once, take prefs.ytmHolder, ack. */
+    /**
+     * The role arrives here ({cookies, userAgent, at}). It is checked with
+     * Google first - YouTube Music's own account call must answer with an
+     * account name using the received cookies - and only then does this phone
+     * take prefs.ytmHolder and answer ok. Cookies that do not work are wiped,
+     * the session this phone had before (if any) is put back, and the answer
+     * is no. (Round 2: a test copy once handed over made-up cookies.)
+     */
     private func takeHandover(_ p: JSON, from peer: PeerDevice) async {
         let cookies = p.str("cookies")
-        guard !cookies.isEmpty else { return }
+        guard !cookies.isEmpty else {
+            _ = await send("ytm.handover.ack", ["ok": false, "error": "no cookies"], to: peer)
+            return
+        }
+        // Kept in memory only, to put back if the received session is no good.
+        let previous = YtmDevice.shared.signedIn ? await YtmDevice.shared.exportNetscape() : ""
+        if !previous.isEmpty { await YtmDevice.shared.signOut() }
         await YtmDevice.shared.importNetscape(cookies, userAgent: p.str("userAgent"))
+        var account = ""
+        if YtmDevice.shared.signedIn {
+            account = await withTaskGroup(of: String?.self) { group in
+                group.addTask { await YouTubeMusic.shared.accountName() }
+                group.addTask {
+                    try? await Task.sleep(nanoseconds: 20_000_000_000)
+                    return nil
+                }
+                let first = await group.next() ?? nil
+                group.cancelAll()
+                return first ?? ""
+            }
+        }
+        if account.isEmpty {
+            await YtmDevice.shared.signOut()
+            if !previous.isEmpty { await YtmDevice.shared.importNetscape(previous, userAgent: "") }
+            ConsoleLog.shared.warn("Devices", "Refused a YouTube Music hand-over from \(peer.name): Google did not accept the cookies; "
+                                   + (previous.isEmpty ? "nothing kept" : "kept this device's own sign-in"), source: "ytm")
+            _ = await send("ytm.handover.ack", ["ok": false, "error": "Google did not accept the session"], to: peer)
+            host?.linkChanged()
+            host?.linkStatus("YouTube Music from \(peer.name) didn't work - not taken", "error")
+            return
+        }
+        YtmDevice.shared.setAccount(account)
         await YtmDevice.shared.signedInNow()
         holder = deviceId
         await host?.linkSetHolder(deviceId)
-        await send("ytm.handover.ack", ["ok": YtmDevice.shared.signedIn], to: peer)
+        _ = await send("ytm.handover.ack", ["ok": true], to: peer)
+        ConsoleLog.shared.info("Devices", "YouTube Music moved here from \(peer.name) (checked with Google: \(account))", source: "ytm")
         host?.linkChanged()
-        if YtmDevice.shared.signedIn {
-            ConsoleLog.shared.log("DeviceLink", "YouTube Music moved here from \(peer.name)")
-            await applyPending()
-        } else {
-            host?.linkStatus("Google didn't keep the moved sign-in - Sign in to YouTube Music (usually no password)", "error")
-        }
+        await applyPending()
     }
 }
 

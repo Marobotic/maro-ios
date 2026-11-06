@@ -97,6 +97,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
      */
     private var spotifyRestUntil: Double = 0
     private static let spotifyRest: Double = 180
+    /** A stand-in copy may differ from the song by this much (or 4 %), no more: else it is another recording. */
+    private static let copySlack: Double = 8
 
     // Which YouTube video plays each track, and what the droplet and phone hold.
     private var trackMap: [String: String] = [:]
@@ -115,6 +117,16 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     private var retriedTag = 0
     private var tapAt: Double = 0
     private var playRoute = ""
+    /** Why the next song starts: a tap, the last one ending, a skip. For the playback log. */
+    private var playReason = "tap"
+    /** The YouTube id the sounding copy is of ("" for SoundCloud and Spotify streams). */
+    private var playVideoId = ""
+    /** Mid-song recoveries of the current play, and where the next start resumes (-1: not a resume). */
+    private var resumeTag = 0
+    private var resumeTries = 0
+    private var resumingAt: Double = -1
+    /** The song that last really started, for "stopped for another song". */
+    private var lastPlaying: Track?
     private var loggedTag = 0
     private var saveTask: Task<Void, Never>?
     private var playWhenLoaded: String?
@@ -146,6 +158,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     private var phone: PhonePlayer {
         if let phonePlayer { return phonePlayer }
         let p = PhonePlayer(events: self)
+        p.nowTrack = { [weak self] in self?.state.localTrack }
         p.volume = Float(state.volume) / 100
         phonePlayer = p
         nowPlaying = NowPlaying(.init(
@@ -520,8 +533,24 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     }
 
     private func videoIdOf(_ t: Track) -> String {
-        if !t.videoId.isEmpty { return t.videoId }
-        return t.source == "ytm" ? t.id : (trackMap[t.id] ?? "")
+        let vid = !t.videoId.isEmpty ? t.videoId : t.source == "ytm" ? t.id : (trackMap[t.id] ?? "")
+        // A copy that turned out to be a different recording is never used for this song again.
+        return !vid.isEmpty && t.source != "ytm" && rejectedCopies.contains("\(t.id)|\(vid)") ? "" : vid
+    }
+
+    /**
+     * "trackId|videoId" pairs whose copy was measured and found to be another
+     * recording (round 2 M.4): the server matched them by search alone. Kept
+     * across restarts, so the server's table (fetched again every start) cannot
+     * bring them back.
+     */
+    private lazy var rejectedCopies: Set<String> = Set(prefs.stringArray(forKey: "rejectedCopies") ?? [])
+
+    private func rejectCopy(_ t: Track, _ videoId: String) {
+        if t.id.isEmpty || videoId.isEmpty { return }
+        rejectedCopies.insert("\(t.id)|\(videoId)")
+        if trackMap[t.id] == videoId { trackMap.removeValue(forKey: t.id) }
+        prefs.set(Array(rejectedCopies), forKey: "rejectedCopies")
     }
 
     private func loadDeviceState() async {
@@ -1150,11 +1179,13 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             if tag != playTag || startedTag == tag { return }
             if ready {
                 playRoute = "engine"
+                pInfo("The server has a copy now", job.track, "jukebox", details: "video \(videoId)")
                 playStreamAtTier(videoId, tag: tag, duration: job.track.duration)
             } else {
                 // No match on either provider, or the upload failed: skip
                 // this song rather than leave the player paused on it.
                 log.warning("cloud.audio failed for \(job.track.title, privacy: .public): \(error, privacy: .public)")
+                failVisibly("Couldn't play \(job.track.title) - skipped it", "The server could not get a copy: \(error); skipped", job.track, "jukebox")
                 skipCurrent()
             }
         case .warm:
@@ -1231,8 +1262,30 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             showStatus("Spotify isn't signed in on this device - playing from YouTube Music", "info")
         }
         log.info("tap \(track.title, privacy: .public) (\(track.source, privacy: .public)) prefer=\(prefer, privacy: .public) spotifyLogin=\(Spotify.shared.hasLogin) spotifyReady=\(Spotify.shared.ready)")
+        let reason = playReason
+        playReason = "tap"
+        if let prev = lastPlaying, reason == "tap", prev != track {
+            // The song that was on when another one was picked.
+            pInfo("Stopped at \(at(phonePlayer?.currentPosition ?? 0)) for another song", prev, routeSource())
+        }
+        lastPlaying = nil
+        playVideoId = ""
+        resumeTag = 0
+        resumeTries = 0
+        resumingAt = -1
+        let preferLabel = Omp.sourceOptions.first { $0.0 == prefer }?.1 ?? prefer
+        pInfo("Play requested (\(reason)) \u{B7} \(ConsoleLog.sourceLabel(ConsoleLog.serviceOf(track))) song"
+                + (oneOff != nil ? " \u{B7} picked: play on \(Omp.sourceLabel(oneOff!))" : " \u{B7} preferred: \(preferLabel)"),
+              track,
+              details: "duration \(Omp.fmtTime(track.duration)) \u{B7} Spotify player "
+                + (Spotify.shared.ready ? "ready" : Spotify.shared.hasLogin ? "not connected yet" : "signed out")
+                + " \u{B7} " + (state.online ? "online" : "offline"))
         if prefer == "spotify" && track.source == "spotify" && Spotify.shared.hasLogin {
-            if !spotifyCanStart() { return playYouTubeInstead(track, tag: tag) }
+            if !spotifyCanStart() {
+                pWarn("Source: not Spotify \u{2014} its player is \(uptime() < spotifyRestUntil ? "resting after a failure" : "still connecting"); the YouTube copy instead", track, "spotify")
+                return playYouTubeInstead(track, tag: tag)
+            }
+            pInfo("Source: Spotify \u{2014} Spotify preferred and its player is ready", track, "spotify")
             return playSpotifyHere(track, tag: tag)
         }
         if oneOff == "spotify" && track.source != "spotify" && Spotify.shared.hasLogin {
@@ -1241,8 +1294,11 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 let found = await Spotify.shared.search("\(track.title) \(track.artist)")
                 guard tag == playTag else { return }
                 if let alt = found.first(where: { Match.sameSong($0, track) }) {
+                    pInfo("Source: Spotify \u{2014} matched \u{201C}\(alt.title)\u{201D} by \(alt.artist) (\(Omp.fmtTime(alt.duration)))", track, "spotify",
+                          details: "spotify:track:\(alt.id)")
                     playSpotifyHere(alt, tag: tag, display: track)
                 } else {
+                    pWarn("Spotify has no same-length match among \(found.count) results; the usual way", track, "spotify")
                     showStatus("Spotify doesn't have this song - playing it the usual way", "info")
                     startUsual(track, tag: tag)
                 }
@@ -1255,8 +1311,11 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 let alt = await SoundCloud.shared.equivalent(of: track, loose: oneOff != nil)
                 guard tag == playTag else { return }
                 if let alt {
+                    pInfo("Source: SoundCloud \u{2014} matched \u{201C}\(alt.title)\u{201D} by \(alt.artist) (\(Omp.fmtTime(alt.duration)))", track, "sc",
+                          details: "sc:\(alt.id)")
                     playSoundCloud(alt, tag: tag, fallback: track)
                 } else {
+                    pInfo("SoundCloud has no full-length copy by this artist; the usual way", track, "sc")
                     if oneOff != nil { showStatus("SoundCloud has no full-length copy of this song - playing it the usual way", "info") }
                     startUsual(track, tag: tag)
                 }
@@ -1270,17 +1329,29 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         let videoId = videoIdOf(track)
         let saved = (localFiles[videoId] ?? keptFiles[videoId]).map { FileManager.default.fileExists(atPath: $0.path) } ?? false
         if !saved, track.source == "ytm", let why = state.gone[videoId] {
+            pWarn("Skipped: the video is gone from YouTube (\(why))", track, "ytm", details: "video \(videoId)")
             state.localError = "Skipped \(track.title): \(why)"
             return skipCurrent()
         }
-        if let file = localFiles[videoId] ?? keptFiles[videoId], FileManager.default.fileExists(atPath: file.path) {
+        if track.source == "sc" && (state.online || !saved) {
+            // A SoundCloud song plays its own SoundCloud stream (round 2 M.4):
+            // a YouTube copy found by searching its title is another recording
+            // as often as not. Offline, a copy saved here may stand in (its
+            // length is checked when it starts).
+            playRoute = "soundcloud"
+            pInfo("Source: SoundCloud \u{2014} a SoundCloud song plays its own stream", track, "sc", details: "sc:\(track.id)")
+            playSoundCloud(track, tag: tag, fallback: nil)
+        } else if let file = localFiles[videoId] ?? keptFiles[videoId], FileManager.default.fileExists(atPath: file.path) {
             playRoute = "file"
+            playVideoId = videoId
             // Played now: the last a limit on songs on disk lets go.
             try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: file.path)
             // A saved song's rate is its size over its length: the file is the
             // whole song, so that is exactly what is being heard.
             let bytes = (try? FileManager.default.attributesOfItem(atPath: file.path)[.size] as? NSNumber)?.doubleValue ?? 0
             let kbps = track.duration > 1 ? Int(bytes * 8 / track.duration / 1000) : 0
+            pInfo("Source: phone copy \u{2014} saved on this phone", track, "jukebox",
+                  details: "file \(file.lastPathComponent) \u{B7} \(Omp.fmtBytes(Int64(bytes))) \u{B7} video \(videoId)")
             // Saved from one of the droplet's copies; the one that measures the
             // same is the one whose timeline describes it.
             var copy = ""
@@ -1295,49 +1366,63 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 state.audioTimeline = line
             }
         } else if track.source == "spotify" && Spotify.shared.hasLogin {
-            if spotifyCanStart() { playSpotifyHere(track, tag: tag) } else { playYouTubeInstead(track, tag: tag) }
-        } else if track.source == "sc" {
-            playRoute = "soundcloud"
-            playSoundCloud(track, tag: tag, fallback: nil)
+            if spotifyCanStart() {
+                pInfo("Source: Spotify \u{2014} a Spotify song, player ready", track, "spotify")
+                playSpotifyHere(track, tag: tag)
+            } else {
+                pWarn("Source: not Spotify \u{2014} its player is \(uptime() < spotifyRestUntil ? "resting after a failure" : "still connecting"); the YouTube copy instead", track, "spotify")
+                playYouTubeInstead(track, tag: tag)
+            }
         } else if !videoId.isEmpty && (serverCached.contains(videoId) || !serverMapLoaded) {
             playRoute = AudioCache.isWarm(videoId) ? "warm asset" : "stream"
+            pInfo("Source: server copy \u{2014} " + (serverCached.contains(videoId) ? "the server has it" : "server list not loaded yet; trying it")
+                    + (playRoute == "warm asset" ? ", start already on the phone" : ""), track, "jukebox", details: "video \(videoId)")
             playStreamAtTier(videoId, tag: tag, duration: track.duration)
         } else if !videoId.isEmpty {
+            pInfo("Source: YouTube direct \u{2014} not on the server", track, "ytm", details: "video \(videoId)")
             playYouTubeDirect(videoId, track: track, tag: tag)
         } else {
-            playRoute = "engine"
-            phone.stop()
-            requestCloud(videoId.isEmpty ? track : track.with(videoId: videoId), .play(tag: tag))
+            pInfo("Source: YouTube Music search \u{2014} no YouTube copy known yet", track, "ytm")
+            playYouTubeInstead(track, tag: tag, searchOnly: true)
         }
     }
 
     /**
-     * A SoundCloud song from SoundCloud itself, this phone's own request. One
-     * it will not stream (DRM, preview only) goes the way it always went.
+     * A SoundCloud song from SoundCloud itself, this phone's own request. A
+     * stand-in that will not stream goes the row's own song's usual way; the
+     * song itself goes to YouTube Music only for the same recording.
      */
-    private func playSoundCloud(_ track: Track, tag: Int, fallback: Track?) {
+    private func playSoundCloud(_ track: Track, tag: Int, fallback: Track?, at start: Double = 0) {
         Task { @MainActor in
             do {
                 let stream = try await SoundCloud.shared.resolve(track.id)
                 guard tag == playTag else { return }
                 let copy = "sc:" + track.id
+                playVideoId = ""
+                pInfo("Stream: SoundCloud \(stream.hls ? "HLS" : "progressive") \(stream.codec.uppercased()) ~\(stream.kbps) kbps"
+                        + (start > 0 ? " from \(at(start))" : ""),
+                      fallback ?? track, "sc", details: "sc:\(track.id) \u{B7} host \(stream.url.host ?? "")")
                 sounding = (copy, stream.url, stream.hls)
                 setSounding("", copy: copy, kbps: stream.kbps, inTier: nil, route: "soundcloud")
                 state.audioRoute = "soundcloud"
                 // SoundCloud's own statement of the length beats whatever the
                 // queue row carried; the player never invents one.
                 let length = stream.duration > 0 ? stream.duration : track.duration
-                phone.playURL(stream.url, tag: tag, duration: length)
+                phone.playURL(stream.url, tag: tag, duration: length, at: start)
                 if state.statsOpen { measureSounding() }
             } catch {
                 guard tag == playTag else { return }
                 log.info("soundcloud \(track.id) not playable here: \(String(describing: error))")
+                let why = (error as? SoundCloud.Unplayable)?.reason ?? error.localizedDescription
+                pWarn("SoundCloud refused its stream: \(why)", fallback ?? track, "sc", details: "sc:\(track.id) \u{B7} \(String(describing: type(of: error)))")
                 // A stand-in that will not play: the row's own song, the usual way.
                 if let fallback { return startUsual(fallback, tag: tag) }
-                // The engine has no SoundCloud of its own, so the same song is
-                // played from YouTube as the desktop does.
+                // Its own song elsewhere, only when it is the same recording:
+                // YouTube Music's match by title, artist and length (Match.sameSong);
+                // the server's copy is checked by its length when it starts.
                 phone.stop()
-                playYouTubeInstead(track, tag: tag)
+                pInfo("Looking for the same recording on YouTube Music (title, artist and length must agree)", track, "ytm")
+                playYouTubeInstead(track, tag: tag, searchOnly: true)
             }
         }
     }
@@ -1346,26 +1431,32 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
      * A YouTube song the droplet has no copy of: straight from YouTube, the
      * guest stream. Nothing is asked of any other device.
      */
-    private func playYouTubeDirect(_ videoId: String, track: Track, tag: Int) {
+    private func playYouTubeDirect(_ videoId: String, track: Track, tag: Int, at start: Double = 0) {
         playRoute = "youtube"
         Task { @MainActor in
             do {
                 let stream = try await YouTubeDirect.shared.audio(videoId)
                 guard tag == playTag else { return }
                 let copy = "yt:" + videoId
+                playVideoId = videoId
+                let expires = Date(timeIntervalSince1970: stream.expires).formatted(date: .omitted, time: .shortened)
+                pInfo("Stream: YouTube direct \u{B7} itag \(stream.itag) \u{B7} \(stream.kbps) kbps AAC" + (start > 0 ? " from \(at(start))" : ""),
+                      track, "ytm", details: "video \(videoId) \u{B7} address expires \(expires) \u{B7} tied to this network")
                 sounding = (copy, stream.url, false)
                 setSounding(videoId, copy: copy, kbps: stream.kbps, inTier: AudioCache.inTier(stream.kbps), route: "youtube")
-                phone.playYouTube(stream.url, videoId: videoId, tag: tag, duration: track.duration)
+                phone.playYouTube(stream.url, videoId: videoId, tag: tag, duration: track.duration, at: start)
                 if state.statsOpen { measureSounding() }
             } catch let gone as YouTubeDirect.Gone {
                 markGone(videoId, gone.reason)
                 guard tag == playTag else { return }
                 phone.stop()
+                failVisibly("Skipped \(track.title): \(gone.reason)", "YouTube: the video is gone (\(gone.reason)); skipped", track, "ytm", details: "video \(videoId)")
                 state.localError = "Skipped \(track.title): \(gone.reason)"
                 skipCurrent()
             } catch {
                 guard tag == playTag else { return }
                 log.info("youtube \(videoId) direct refused: \(String(describing: error))")
+                pWarn("YouTube refused this phone a stream: \(String(describing: error)); asking the server for its copy", track, "ytm", details: "video \(videoId)")
                 playRoute = "engine"
                 phone.stop()
                 requestCloud(track.with(videoId: videoId), .play(tag: tag))
@@ -1390,29 +1481,36 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
      * A song Spotify did not start (or is resting from): its YouTube copy,
      * straight from YouTube on this phone - the droplet's map first, else a
      * YouTube Music search here. The engine only when neither finds it.
+     * `searchOnly`: the map's match is not trusted (a SoundCloud song, or one
+     * whose copy was refused); only YouTube Music's same-recording match.
      */
-    private func playYouTubeInstead(_ track: Track, tag: Int) {
+    private func playYouTubeInstead(_ track: Track, tag: Int, searchOnly: Bool = false, at start: Double = 0) {
         playRoute = "youtube"
         Task { @MainActor in
-            var vid = videoIdOf(track)
+            var vid = searchOnly ? "" : videoIdOf(track)
+            let searched = vid.isEmpty
             if vid.isEmpty {
                 let found = await YouTubeDirect.shared.search("\(track.title) \(track.artist.split(separator: ",").first.map(String.init) ?? "")")
                 vid = found.first(where: { Match.sameSong($0, track) })?.id ?? ""
             }
             guard tag == playTag else { return }
             if vid.isEmpty {
+                pWarn("YouTube Music has no same recording (title, artist and length within 4 s); asking the server for a copy", track, "ytm")
                 playRoute = "engine"
                 requestCloud(track, .play(tag: tag))
                 return
             }
+            if searched { pInfo("Matched on YouTube Music: video \(vid)", track, "ytm") }
             learn(track.id, vid)
             if serverCached.contains(vid) {
                 // The droplet's copy: Premium, and usually loaded ahead.
                 playRoute = AudioCache.isWarm(vid) ? "warm asset" : "stream"
-                playStreamAtTier(vid, tag: tag, duration: track.duration)
+                pInfo("Source: server copy of the YouTube match", track, "jukebox", details: "video \(vid)")
+                playStreamAtTier(vid, tag: tag, duration: track.duration, at: start)
                 return
             }
-            playYouTubeDirect(vid, track: track, tag: tag)
+            pInfo("Source: YouTube direct \u{2014} the server has no copy", track, "ytm", details: "video \(vid)")
+            playYouTubeDirect(vid, track: track, tag: tag, at: start)
         }
     }
 
@@ -1421,9 +1519,12 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
      * 320 kbps. `display` is the row on screen when it is a stand-in for a
      * song from another service.
      */
-    private func playSpotifyHere(_ track: Track, tag: Int, display: Track? = nil) {
+    private func playSpotifyHere(_ track: Track, tag: Int, display: Track? = nil, at start: Double = 0) {
         playRoute = "spotify"
+        playVideoId = ""
         Spotify.shared.start()
+        pInfo("Stream: Spotify (librespot) \u{B7} up to 320 kbps" + (start > 0 ? " from \(at(start))" : ""), display ?? track, "spotify",
+              details: "spotify:track:\(track.id)")
         sounding = nil
         setSounding("", copy: "", kbps: 0, inTier: nil, route: "spotify")
         state.audioRoute = "spotify"
@@ -1434,7 +1535,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             self.state.audioInTier = nominal > 0 ? nominal >= 320 : nil
         }
         phone.playSpotify("spotify:track:" + track.id, tag: tag,
-                          duration: track.duration > 0 ? track.duration : (display?.duration ?? 0))
+                          duration: track.duration > 0 ? track.duration : (display?.duration ?? 0), at: Int(start * 1000))
         // The queue's next Spotify song waits loaded on a standby player.
         let q = state.localQueue, i = state.localQueueIndex
         if let next = q[safe: i + 1], next.source == "spotify", !next.id.isEmpty {
@@ -1456,9 +1557,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             await sleep(seconds: 4)
             guard let self, tag == self.playTag, self.startedTag != tag, self.isPhone else { return }
             if self.playRoute == "spotify" {
-                ConsoleLog.shared.log("Playback", "Spotify start timed out; trying YouTube")
                 log.warning("spotify did not start \(track.title, privacy: .public) in 4 s; YouTube instead, new connection behind it")
-                self.onFailed(tag: tag, notOnServer: true, message: "Spotify did not start the song")
+                self.onFailed(tag: tag, notOnServer: true, message: "Spotify did not start the song in 4 s")
             }
             await sleep(seconds: 6)
             guard tag == self.playTag, self.startedTag != tag else { return }
@@ -1466,13 +1566,12 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 // (The server fetching a song it has never had takes a while: that one is only waited for.)
                 await sleep(seconds: 5)
                 guard tag == self.playTag, self.startedTag != tag else { return }
-                ConsoleLog.shared.log("Playback", "\(track.source) stream start timed out")
-                self.onFailed(tag: tag, notOnServer: false, message: "The stream did not start")
+                self.onFailed(tag: tag, notOnServer: false, message: "The \(self.routeLabel()) stream did not start in 15 s")
             }
             await sleep(seconds: 40)
             guard tag == self.playTag, self.startedTag != tag else { return }
             log.warning("gave up on \(track.title, privacy: .public): nothing started it")
-            self.showStatus("Couldn't start \(track.title) - skipped it", "error")
+            self.failVisibly("Couldn't start \(track.title) - skipped it", "Nothing started the song in a minute (last try: \(self.routeLabel())); skipped", track)
             self.skipCurrent()
         }
     }
@@ -1487,6 +1586,9 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
      */
     private func networkChanged(_ old: String, _ new: String) {
         log.info("network \(old, privacy: .public) -> \(new, privacy: .public)")
+        ConsoleLog.shared.info("Network", "Network changed: \(old) \u{2192} \(new)" + (isPhone && state.localPlaying ? " while playing (\(routeLabel()))" : ""),
+                               isPhone ? state.localTrack : nil,
+                               details: "YouTube addresses from the old network are dropped (they answer 403 elsewhere); Spotify reconnects")
         Task { await YouTubeDirect.shared.forgetStreams() }
         AudioCache.clear()
         let playingSpotify = isPhone && state.localPlaying && phonePlayer?.onSpotify == true
@@ -1552,13 +1654,18 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
      * A song seen on screen has been asked already; one that has not waits at
      * most a moment for the answer, then plays the original.
      */
-    private func playStreamAtTier(_ videoId: String, tag: Int, duration: Double) {
+    private func playStreamAtTier(_ videoId: String, tag: Int, duration: Double, at start: Double = 0) {
         func go() {
             guard tag == playTag else { return }
             let v = AudioCache.variant(videoId)
             let copy = (v?.name.contains(".") ?? false) ? v!.name : ""
+            playVideoId = videoId
+            pInfo("Stream: server copy" + (v.map { " \u{B7} \($0.kbps) kbps" + ($0.inTier ? "" : " (below the \(AudioCache.rung()) tier)") } ?? "")
+                    + (playRoute == "warm asset" ? " \u{B7} start from the phone's cache" : "")
+                    + (start > 0 ? " from \(at(start))" : ""),
+                  state.localTrack, "jukebox", details: "video \(videoId) \u{B7} copy \(copy.isEmpty ? "original" : copy)")
             setSounding(videoId, copy: copy, kbps: v?.kbps ?? 0, inTier: v?.inTier)
-            phone.playStream(videoId, tag: tag, duration: duration)
+            phone.playStream(videoId, tag: tag, duration: duration, at: start)
         }
         if AudioCache.variant(videoId) != nil { return go() }
         Task { @MainActor in
@@ -1606,9 +1713,54 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         }
     }
 
+    // -- the playback log (round 2 M.1) ---------------------------------------
+
+    private func pInfo(_ msg: String, _ t: Track? = nil, _ source: String? = nil, details: String = "") {
+        ConsoleLog.shared.info("Playback", msg, t ?? state.localTrack, source: source, details: details)
+    }
+
+    private func pWarn(_ msg: String, _ t: Track? = nil, _ source: String? = nil, details: String = "") {
+        ConsoleLog.shared.warn("Playback", msg, t ?? state.localTrack, source: source, details: details)
+    }
+
+    /** A failure the user is told about: an Error in the log, and the toast opens that entry. */
+    private func failVisibly(_ toast: String, _ msg: String, _ t: Track? = nil, _ source: String? = nil, details: String = "") {
+        let id = ConsoleLog.shared.error("Playback", msg, t ?? state.localTrack, source: source, details: details)
+        showStatus(toast, "error", entry: id)
+    }
+
+    /** The service a route's audio comes from, for the log's source filter. */
+    private func routeSource(_ route: String? = nil) -> String {
+        switch route ?? playRoute {
+        case "spotify": return "spotify"
+        case "youtube": return "ytm"
+        case "soundcloud": return "sc"
+        default: return "jukebox"
+        }
+    }
+
+    private func routeLabel(_ route: String? = nil) -> String {
+        let r = route ?? playRoute
+        switch r {
+        case "file": return "phone copy"
+        case "stream", "warm asset", "download": return "server copy"
+        case "engine": return "server copy (fetched for this play)"
+        case "youtube": return "YouTube direct"
+        case "soundcloud": return "SoundCloud"
+        case "spotify": return "Spotify (librespot)"
+        default: return r.isEmpty ? "unknown" : r
+        }
+    }
+
+    private func at(_ s: Double) -> String { Omp.fmtTime(s) }
+
     private func requestCloud(_ track: Track, _ purpose: Purpose) {
         let requestId = UUID().uuidString.lowercased()
         pending[requestId] = Pending(track: track, purpose: purpose)
+        if case .play = purpose {
+            pInfo("Asking the server to fetch a copy", track, "jukebox",
+                  details: track.videoId.isEmpty ? "the server searches by title and artist" : "video \(track.videoId)")
+        }
         send("cloud.prepare", ["requestId": requestId, "track": track.toJSON()])
     }
 
@@ -1622,6 +1774,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         var ask: [JSON] = []
         var onDroplet: [Track] = []
         for t in tracks where !t.id.isEmpty {
+            // A SoundCloud song plays its own stream: no YouTube copy to fetch or warm for it.
+            if t.source == "sc" { continue }
             let videoId = videoIdOf(t)
             if !videoId.isEmpty && localFiles[videoId] != nil { continue }
             if !videoId.isEmpty && serverCached.contains(videoId) {
@@ -1764,22 +1918,66 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
 
     func onStarted(tag: Int) {
         if tag != playTag { return }
+        let track0 = state.localTrack
+        // A copy standing in for the song (a server or phone copy of a YouTube
+        // match, or a match found by search) must be the same recording
+        // (round 2 M.4). AVPlayer only estimates a fragmented file's length,
+        // and too long rather than too short, so a copy is refused here when
+        // it is clearly shorter than the song.
+        let media = phone.mediaDuration
+        let ownVideo = track0.map { $0.source == "ytm" && (playVideoId.isEmpty || playVideoId == $0.id) } ?? true
+        if let t = track0, !playVideoId.isEmpty, !ownVideo, media > 0, t.duration > 1 {
+            let want = t.duration, got = media
+            if want - got > max(Self.copySlack, want * 0.04) {
+                let vid = playVideoId
+                phone.stop()
+                rejectCopy(t, vid)
+                failVisibly("Not playing \(t.title): the copy found is a different recording",
+                            "Wrong copy refused: video \(vid) is \(Omp.fmtTime(got)) long, the song is \(Omp.fmtTime(want)) (\(routeLabel())); not playing a different song",
+                            t, routeSource(),
+                            details: "copy \(routeLabel()) \u{B7} video \(vid) \u{B7} -\(Omp.fmtTime(want - got)) \u{B7} matched by title only (server search or saved map); remembered as wrong for \(t.source):\(t.id)")
+                if retriedTag != tag && t.source == "sc" && playRoute != "soundcloud" {
+                    // Offline stand-in for a SoundCloud song: try its own stream.
+                    retriedTag = tag
+                    playRoute = "soundcloud"
+                    playSoundCloud(t, tag: tag, fallback: nil)
+                    return
+                }
+                if retriedTag != tag && t.source != "sc" {
+                    // Another way to the same recording: YouTube Music matched by title, artist and length.
+                    retriedTag = tag
+                    playYouTubeInstead(t.with(videoId: ""), tag: tag, searchOnly: true)
+                    return
+                }
+                skipCurrent()
+                return
+            }
+        }
         startedTag = tag
+        lastPlaying = track0
         if pendingSeek > 1 {
             phone.seek(to: pendingSeek)
             pendingSeek = 0
         }
         log.info("ready \(Int((uptime() - self.tapAt) * 1000)) ms after tap via \(self.playRoute, privacy: .public)")
-        failStreak = 0
-        // Played, so the droplet keeps it for good.
-        if let track = state.localTrack {
-            let vid = videoIdOf(track), client = client
-            if !vid.isEmpty { Task { await client.markPlayed(vid) } }
+        if resumingAt >= 0 {
+            ConsoleLog.shared.info("Playback", "Resumed at \(at(resumingAt)) on a fresh \(routeLabel()) stream", track0, source: routeSource())
+            resumingAt = -1
+        } else {
+            ConsoleLog.shared.info("Playback", "Started after \(Int((uptime() - tapAt) * 1000)) ms via \(routeLabel())", track0, source: routeSource(),
+                                   details: media > 0 ? "media length \(Omp.fmtTime(media))" : "")
         }
+        failStreak = 0
+        // Played, so the droplet keeps it for good: the copy that really
+        // sounded (none for a SoundCloud or Spotify stream).
+        let played = playVideoId, client = client
+        if !played.isEmpty { Task { await client.markPlayed(played) } }
         state.localPreparing = false
         state.localError = ""
         guard let track = state.localTrack else { return }
-        let videoId = videoIdOf(track)
+        // Only the copy that played is kept: a SoundCloud stream has none, and
+        // the map's match for its song may be another recording.
+        let videoId = playVideoId
         if !videoId.isEmpty && localFiles[videoId] == nil {
             // Keep a copy once it has played a while: in the music folder when
             // saving offline, else in the caches folder so a replay is local.
@@ -1838,6 +2036,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         state.localPreparing = false
         if failStreak >= skipStreakMax && state.localQueue.count > 1 {
             log.warning("\(self.failStreak) songs in a row could not play; stopping")
+            failVisibly("Could not play the last few songs - stopped", "\(failStreak) songs in a row could not play; playback stopped", state.localTrack)
             failStreak = 0
             state.localPlaying = false
             state.localError = "Could not play the last few songs"
@@ -1847,12 +2046,22 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         advance(auto: true, skipped: true)
     }
 
-    func onFailed(tag: Int, notOnServer: Bool, message: String) {
+    func onFailed(tag: Int, notOnServer: Bool, message: String, details: String = "") {
         if tag != playTag { return }
         let track = state.localTrack
-        let failedTrack = track.map { "\($0.source):\($0.id)" } ?? ""
-        let trackContext = failedTrack.isEmpty ? "" : " (\(failedTrack))"
-        ConsoleLog.shared.log("Playback", "\(playRoute) failed\(trackContext): \(message)")
+        if let track, startedTag == tag || resumingAt >= 0 {
+            // It was playing: never leave it silent. The same second, on a fresh stream.
+            let pos = startedTag == tag ? (phonePlayer?.currentPosition ?? 0) : resumingAt
+            return recoverMidSong(track, tag: tag, position: pos, what: "\(routeLabel()) failed: \(message)", details: details)
+        }
+        let last = track == nil || retriedTag == tag
+        ConsoleLog.shared.add(last ? .error : .warning, "Playback", routeSource(),
+                              "\(routeLabel()) failed before it started: \(message)" + (last ? "" : "; trying another way"), track, details: details)
+        if let track, playRoute == "soundcloud", retriedTag != tag, track.source == "sc" {
+            retriedTag = tag
+            pInfo("Looking for the same recording on YouTube Music (title, artist and length must agree)", track, "ytm")
+            return playYouTubeInstead(track, tag: tag, searchOnly: true)
+        }
         if let track, playRoute == "spotify", retriedTag != tag {
             // Spotify would not start it: YouTube from this phone now, and
             // Spotify left alone a while (a new connection made behind it).
@@ -1882,6 +2091,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                     let saved = await saveLocalNow(track, videoId)
                     guard tag == playTag, startedTag != tag else { return }
                     if saved, let file = localFiles[videoId] {
+                        playVideoId = videoId
                         phone.playFile(file, tag: tag, duration: track.duration)
                     } else {
                         playRoute = "engine"
@@ -1899,17 +2109,118 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         }
         // The engine could not put it on the droplet either: move on.
         log.warning("gave up on \(track?.title ?? "", privacy: .public): \(message, privacy: .public)")
+        failVisibly("Couldn't play \(track?.title ?? "") - skipped it", "Gave up after every way failed (last: \(routeLabel()): \(message)); skipped", track, routeSource(), details: details)
         skipCurrent()
+    }
+
+    func onStalled(tag: Int, position: Double, stuck: Double, why: String) {
+        if tag != playTag { return }
+        guard let track = state.localTrack else { return }
+        let what = stuck > 0 ? "Stalled \(Int(stuck)) s (\(why))" : why
+        recoverMidSong(track, tag: tag, position: position, what: what,
+                       details: "route \(routeLabel()) \u{B7} at \(at(position))" + (playVideoId.isEmpty ? "" : " \u{B7} video \(playVideoId)"))
+    }
+
+    /**
+     * A song that had been playing broke (round 2 M.2): an error from the
+     * player (an expired or network-bound address answering 403, a dropped
+     * connection), or a stall. It goes on from the same second on a fresh
+     * stream of the same copy, then on the next source; each step is a
+     * Warning in the log. After three tries it fails visibly and moves on.
+     */
+    private func recoverMidSong(_ track: Track, tag: Int, position: Double, what: String, details: String) {
+        if resumeTag != tag {
+            resumeTag = tag
+            resumeTries = 0
+        }
+        resumeTries += 1
+        let pos = max(0, position)
+        if resumeTries > 3 {
+            failVisibly("\(track.title) kept breaking - skipped it", "\(what) \u{2014} gave up after 3 fresh streams; skipped", track, routeSource(), details: details)
+            return skipCurrent()
+        }
+        resumingAt = pos
+        startedTag = 0
+        let vid = playVideoId
+        let step: String
+        switch playRoute {
+        case "spotify": step = resumeTries == 1 ? "spotify" : "youtube-any"
+        case "soundcloud": step = resumeTries <= 2 ? "soundcloud" : "stop"
+        case "youtube": step = resumeTries == 1 || !serverCached.contains(vid) ? "youtube" : "server"
+        case "file": step = "server"
+        default: step = resumeTries == 1 ? "server" : "youtube"
+        }
+        let next: String
+        switch step {
+        case "spotify": next = "a new Spotify connection"
+        case "soundcloud": next = "a fresh SoundCloud stream"
+        case "youtube", "youtube-any": next = "a fresh YouTube address"
+        case "server": next = "the server's copy"
+        default: next = "nothing left"
+        }
+        ConsoleLog.shared.warn("Playback", "\(what) at \(at(pos)); resuming from there on \(next) (try \(resumeTries) of 3)", track, source: routeSource(), details: details)
+        let tries = resumeTries
+        Task { @MainActor [weak self] in
+            // A fresh stream that does not start either is the next try, not silence.
+            await sleep(seconds: 20)
+            guard let self, tag == self.playTag, self.startedTag != tag, self.resumeTag == tag,
+                  self.resumeTries == tries, self.resumingAt >= 0 else { return }
+            self.recoverMidSong(track, tag: tag, position: self.resumingAt, what: "The fresh \(self.routeLabel()) stream did not start in 20 s", details: "")
+        }
+        switch step {
+        case "spotify":
+            Spotify.shared.reconnect()
+            playSpotifyHere(track, tag: tag, at: pos)
+        case "soundcloud":
+            playRoute = "soundcloud"
+            playSoundCloud(track, tag: tag, fallback: nil, at: pos)
+        case "youtube":
+            if vid.isEmpty {
+                playYouTubeInstead(track, tag: tag, at: max(pos, 1))
+            } else {
+                Task { @MainActor in
+                    await YouTubeDirect.shared.forget(vid)
+                    guard tag == playTag else { return }
+                    playYouTubeDirect(vid, track: track, tag: tag, at: max(pos, 1))
+                }
+            }
+        case "youtube-any":
+            playYouTubeInstead(track, tag: tag, at: max(pos, 1))
+        case "server":
+            let id = vid.isEmpty ? videoIdOf(track) : vid
+            if id.isEmpty {
+                playYouTubeInstead(track, tag: tag, at: max(pos, 1))
+            } else {
+                playRoute = "stream"
+                playStreamAtTier(id, tag: tag, duration: track.duration, at: pos)
+            }
+        default:
+            failVisibly("\(track.title) stopped - skipped it", "\(what) \u{2014} no other source for this song; skipped", track, routeSource(), details: details)
+            skipCurrent()
+        }
     }
 
     private func advance(auto: Bool, skipped: Bool = false) {
         let s = state
         let queue = s.localQueue
         if queue.isEmpty { return }
+        let cur = s.localTrack
+        let pos = phonePlayer?.currentPosition ?? 0
         if auto && !skipped && s.localRepeat == "one" {
+            pInfo("Ended; repeating it (repeat one)", cur)
             phone.seek(to: 0)
             phone.play()
             return
+        }
+        if skipped {
+            pWarn("Skipped (it could not play)", cur)
+            playReason = "skipped the last one"
+        } else if auto {
+            pInfo("Ended at \(at(pos))", cur)
+            playReason = "auto-next"
+        } else {
+            pInfo("Skipped by you at \(at(pos))", cur)
+            playReason = "next"
         }
         let next: Int
         if s.localShuffle && queue.count > 1 {
@@ -1964,6 +2275,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
 
     func setPlaybackMode(_ mode: PlaybackMode) {
         if state.playbackMode == mode { return }
+        ConsoleLog.shared.info("Devices", mode == .remoteDesktop ? "Hand-off: sound moves to the desktop; this phone pauses and controls it" : "Hand-off: sound plays on this phone", state.localTrack)
         if mode == .remoteDesktop { phonePlayer?.pause() }
         if mode == .standalonePhone {
             _ = phone
@@ -2363,8 +2675,10 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                     pendingSeek = progress.position
                     startTrack(track)
                 } else if phone.isPlaying {
+                    pInfo("Paused by you at \(at(phone.currentPosition))")
                     phone.pause()
                 } else {
+                    pInfo("Played by you from \(at(phone.currentPosition))")
                     phone.play()
                 }
             }
@@ -2401,8 +2715,11 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     func previous() {
         if !isPhone { return remoteJump(-1, "previous") }
         if phone.currentPosition > 5 || state.localQueueIndex <= 0 {
+            pInfo("Back to the start (you, at \(at(phone.currentPosition)))")
             phone.seek(to: 0)
         } else {
+            pInfo("Previous song (you, at \(at(phone.currentPosition)))")
+            playReason = "previous"
             playLocalQueue(state.localQueue, state.localQueueIndex - 1, name: nil)
         }
     }
@@ -2506,6 +2823,61 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     func shareYouTubeLink(_ t: Track) {
         let id = videoIdOf(t).ifEmpty(t.source == "ytm" ? t.id : "")
         copyLink(Omp.youtubeShareUrl(videoId: id, query: "\(t.title) \(t.artist)"), "YouTube Music")
+    }
+
+    /**
+     * "Share in..." (round 2 M.3): the song's link on `service` - spotify, ytm,
+     * youtube or sc - handed to the share sheet. The exact page when the song
+     * is from that service (or has a known match there), else that service's
+     * search for "artist title". SoundCloud: the track's own page for a
+     * SoundCloud song or one with a SoundCloud match.
+     */
+    func shareIn(_ t: Track, _ service: String) {
+        Task { @MainActor in
+            let url = await linkOn(t, service)
+            if url.isEmpty { return showStatus("No \(Omp.sourceLabel(service)) link for this song", "error") }
+            presentShareSheet(url, subject: ConsoleLog.songOf(t))
+        }
+    }
+
+    /** "Copy link": the song's own page on the service it is from. */
+    func copySongLink(_ t: Track) {
+        Task { @MainActor in
+            let service = t.source == "spotify" || t.source == "sc" ? t.source : "ytm"
+            copyLink(await linkOn(t, service), Omp.sourceLabel(service))
+        }
+    }
+
+    private func linkOn(_ t: Track, _ service: String) async -> String {
+        let artist = Omp.plainText(String(t.artist.split(separator: ",").first ?? ""))
+        let query = [artist, Omp.plainText(t.title)].filter { !$0.isEmpty }.joined(separator: " ")
+        let vid = videoIdOf(t).ifEmpty(t.source == "ytm" ? t.id : "")
+        switch service {
+        case "spotify": return Omp.spotifyShareUrl(id: t.source == "spotify" ? t.id.ifEmpty(t.sourceId) : "", query: query)
+        case "ytm": return Omp.youtubeShareUrl(videoId: vid, query: query)
+        case "youtube":
+            return vid.isEmpty ? "https://www.youtube.com/results?search_query=" + Omp.queryEncode(query) : "https://www.youtube.com/watch?v=\(vid)"
+        case "sc":
+            var id = t.source == "sc" ? t.id : ""
+            if id.isEmpty { id = await withTimeout(4) { await SoundCloud.shared.equivalent(of: t, loose: false)?.id } ?? "" }
+            let page = id.isEmpty ? "" : (await withTimeout(4) { await SoundCloud.shared.pageUrl(id) } ?? "")
+            return page.isEmpty ? SoundCloud.searchUrl(query) : page
+        default: return ""
+        }
+    }
+
+    /** The answer, or nil after `seconds`. */
+    private func withTimeout<T: Sendable>(_ seconds: Double, _ work: @escaping @Sendable () async -> T?) async -> T? {
+        await withTaskGroup(of: T?.self) { group in
+            group.addTask { await work() }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
     }
 
     private func copyLink(_ url: String, _ service: String) {
@@ -3469,6 +3841,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     }
 
     func setQuality(_ kind: String, _ tier: String) {
+        pInfo("Quality setting: \(kind == "stream" ? "streaming" : "downloads") \u{2192} \(tier)", nil, "jukebox")
         if kind == "stream" { state.quality = tier }
         if kind == "download" { state.downloadQuality = tier }
         send("quality.set", ["kind": kind, "tier": tier])
@@ -4061,9 +4434,19 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         }
     }
 
-    func showStatus(_ msg: String, _ kind: String) {
+    /** Open the Console on one entry (a failure toast's "Details"). */
+    func openConsoleAt(_ entry: Int) {
+        state.statusMsg = ""
+        state.consoleFocus = entry
+        if !state.settingsOpen { toggleSettings() }
+    }
+
+    func consoleFocusSeen() { state.consoleFocus = 0 }
+
+    func showStatus(_ msg: String, _ kind: String, entry: Int = 0) {
         state.statusMsg = msg
         state.statusKind = kind
+        state.statusEntry = entry
     }
 
     func clearStatus() { state.statusMsg = "" }

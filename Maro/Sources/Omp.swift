@@ -144,7 +144,22 @@ enum Omp {
         case "spotify": return "Spotify"
         case "ytm": return "YouTube Music"
         case "sc": return "SoundCloud"
+        case "youtube": return "YouTube"
         default: return src.isBlank ? "Queue" : src
+        }
+    }
+
+    /**
+     * The playing song's colour (round 2 M.5): the highlighted row's border and
+     * tint, the player cover's border and the playing bars. Jukebox / local
+     * songs keep the app red.
+     */
+    static func playingColor(_ src: String) -> Color {
+        switch src {
+        case "spotify": return Color(hex: 0x1DB954)
+        case "ytm", "youtube": return Color(hex: 0xE5323F)
+        case "sc": return Color(hex: 0xFF5500)
+        default: return themeAccent
         }
     }
 
@@ -213,15 +228,46 @@ enum Omp {
      */
     static func spotifyShareUrl(id: String, query: String) -> String {
         if !id.isEmpty { return "https://open.spotify.com/track/\(id)" }
-        if !query.isEmpty { return "https://open.spotify.com/search/" + urlEncode(query) }
+        if !query.isEmpty { return "https://open.spotify.com/search/" + queryEncode(query) }
         return ""
     }
 
     /** The same idea for YouTube Music. */
     static func youtubeShareUrl(videoId: String, query: String) -> String {
         if !videoId.isEmpty { return "https://music.youtube.com/watch?v=\(videoId)" }
-        if !query.isEmpty { return "https://music.youtube.com/search?q=" + urlEncode(query) }
+        if !query.isEmpty { return "https://music.youtube.com/search?q=" + queryEncode(query) }
         return ""
+    }
+
+    /** A search query in a link: readable (letters stay letters), spaces as %20. */
+    static func queryEncode(_ s: String) -> String {
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: "&=+?#/")
+        return s.addingPercentEncoding(withAllowedCharacters: allowed) ?? s
+    }
+
+    /** "&amp;", "&#39;" and the like as the characters they stand for. */
+    static func plainText(_ s: String) -> String {
+        guard s.contains("&") else { return s.trimmingCharacters(in: .whitespaces) }
+        var out = s
+        for (k, v) in ["&amp;": "&", "&quot;": "\"", "&#39;": "'", "&apos;": "'", "&lt;": "<", "&gt;": ">", "&nbsp;": " "] {
+            out = out.replacingOccurrences(of: k, with: v)
+        }
+        if let re = try? NSRegularExpression(pattern: "&#(x?)([0-9a-fA-F]+);") {
+            let ns = out as NSString
+            var result = ""
+            var last = 0
+            for m in re.matches(in: out, range: NSRange(location: 0, length: ns.length)) {
+                result += ns.substring(with: NSRange(location: last, length: m.range.location - last))
+                let hex = ns.substring(with: m.range(at: 1)) == "x"
+                let num = UInt32(ns.substring(with: m.range(at: 2)), radix: hex ? 16 : 10)
+                result += num.flatMap(Unicode.Scalar.init).map { String(Character($0)) } ?? ns.substring(with: m.range)
+                last = m.range.location + m.range.length
+            }
+            result += ns.substring(from: last)
+            out = result
+        }
+        return out.trimmingCharacters(in: .whitespaces)
     }
 
     /// Percent-encodes a whole UTF-8 string, which is what a search path wants.

@@ -420,6 +420,10 @@ struct UiState: Equatable {
     // Status footer
     var statusMsg = ""
     var statusKind = "info"
+    /** The Console entry a failure toast opens, 0 for none. */
+    var statusEntry = 0
+    /** An entry the Console should open on (set by a toast's Details), 0 for none. */
+    var consoleFocus = 0
 
     // A Spotify / YouTube Music sign-in waiting on the user.
     var loginPrompt: LoginPrompt?
