@@ -168,6 +168,8 @@ struct SongRow: View {
     var available = true
     var when = ""
     var loading = false
+    /** On an album page the album is left out of the row (it is the page). */
+    var showAlbum = true
     /** The queue's ×; nil means the + that adds the song to the queue. */
     var onRemove: (() -> Void)? = nil
     let onPlay: () -> Void
@@ -177,33 +179,32 @@ struct SongRow: View {
         // Taken down by YouTube: greyed, the reason under the title, a tap only says why.
         let gone = vm.state.goneReason(track)
         let playable = available && gone.isEmpty
-        let rest = [Omp.sourceLabel(track.source), track.duration > 0 ? Omp.fmtTime(track.duration) : "", when]
-            .filter { !$0.isEmpty && $0 != "Queue" }
-            .joined(separator: " · ")
-        let sub: String = {
-            if !gone.isEmpty { return gone }
-            if !available { return "not on this phone" }
-            return rest
-        }()
-        let artistLink = playable && !track.artist.isEmpty
+        let problem = !gone.isEmpty ? gone : (!available ? "not on this phone" : "")
+        let length = track.duration > 0 ? Omp.fmtTime(track.duration) : ""
         HStack(spacing: 6) {
             CoverArt(track: track, icon: Omp.sourceGlyph(track.source), size: Omp.rowArt)
             HeartButton(liked: liked, size: 15, box: 34) { vm.likeTrack(track) }
             VStack(alignment: .leading, spacing: 3) {
-                OmpText(track.title.ifBlank(track.id), size: 13, color: Omp.foreground, bold: true)
+                // Round 2 K: "Title · 3:42" - the title truncates, the length never does.
+                HStack(spacing: 0) {
+                    OmpText(track.title.ifBlank(track.id), size: 13, color: Omp.foreground, bold: true)
+                    if !length.isEmpty {
+                        Text(" \u{B7} " + length)
+                            .font(Omp.font(12))
+                            .monospacedDigit()
+                            .foregroundColor(Omp.t3)
+                            .lineLimit(1)
+                            .fixedSize()
+                            .layoutPriority(2)
+                    }
+                }
+                // Then "Artist · Album" (Recent adds "· when"): no length, no service.
                 HStack(spacing: 5) {
                     if track.saved && playable { SavedCheck() }
-                    if artistLink {
-                        // The artist opens the artist page; the rest of the row plays.
-                        HStack(spacing: 0) {
-                            OmpText(track.artist, size: 11.5, color: Omp.t2)
-                                .layoutPriority(1)
-                                .contentShape(Rectangle())
-                                .onTapGesture { openArtists(of: track, vm: vm, present: present) }
-                            if !sub.isEmpty { OmpText(" · " + sub, size: 11.5, color: Omp.t2) }
-                        }
+                    if !problem.isEmpty {
+                        OmpText(problem, size: 11.5, color: Omp.urgent)
                     } else {
-                        OmpText(sub, size: 11.5, color: playable ? Omp.t2 : Omp.urgent)
+                        metaLine(tail: [when])
                     }
                 }
             }
@@ -237,6 +238,30 @@ struct SongRow: View {
             if gone.isEmpty { onPlay() } else { vm.showStatus("\(track.title) can't be played: \(gone)", "error") }
         }
         .onLongPressGesture(perform: onMenu)
+    }
+
+    /** The artist (opens its page), the album (opens its page) and the rest, one line. */
+    private func metaLine(tail: [String]) -> some View {
+        let album = showAlbum ? track.album : ""
+        let rest = tail.filter { !$0.isEmpty }.joined(separator: " \u{B7} ")
+        return HStack(spacing: 0) {
+            if !track.artist.isEmpty {
+                OmpText(track.artist, size: 11.5, color: Omp.t2)
+                    .layoutPriority(2)
+                    .contentShape(Rectangle())
+                    .onTapGesture { openArtists(of: track, vm: vm, present: present) }
+            }
+            if !album.isEmpty {
+                OmpText((track.artist.isEmpty ? "" : " \u{B7} ") + album, size: 11.5, color: Omp.t3)
+                    .layoutPriority(1)
+                    .contentShape(Rectangle())
+                    .onTapGesture { vm.openAlbum(of: track) }
+            }
+            if !rest.isEmpty {
+                OmpText((track.artist.isEmpty && album.isEmpty ? "" : " \u{B7} ") + rest, size: 11.5, color: Omp.t3)
+                    .fixedSize()
+            }
+        }
     }
 }
 

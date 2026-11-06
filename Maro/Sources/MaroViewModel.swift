@@ -162,6 +162,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         AudioCache.client = client
         AudioCache.tier = { [weak self] in self?.state.quality ?? "max" }
         ArtLoader.shared.client = client
+        PageStore.client = client
         // This phone's own YouTube Music session: restored, read, kept fresh (round 2 H).
         Task { await YtmDevice.shared.start() }
         // Covers changed on the account (Fix artwork on another device, a

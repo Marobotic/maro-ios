@@ -181,6 +181,10 @@ private struct PageSongRows: View {
     let listName: String
     let state: UiState
     @ObservedObject var vm: MaroViewModel
+    /** Rows of an album page leave the album out (it is the page). */
+    var showAlbum = true
+    /** Called as the rows near their end: the next page of songs. */
+    var onNearEnd: (() -> Void)? = nil
 
     var body: some View {
         let shown = state.displayState()
@@ -195,9 +199,11 @@ private struct PageSongRows: View {
                 vm: vm,
                 available: state.canPlay(track),
                 loading: !shown.loadingKey.isEmpty,
+                showAlbum: showAlbum,
                 onPlay: { vm.playTrack(track, context: tracks, name: listName, index: index) },
                 onMenu: { present(trackMenu(track, liked: state.isLiked(track), vm: vm)) }
             )
+            .onAppear { if index >= tracks.count - 15 { onNearEnd?() } }
         }
     }
 }
@@ -286,7 +292,7 @@ private struct ArtistPageView: View {
                 onShuffle: { playShuffled(songs, name: title, vm: vm) },
                 onQueue: { vm.addAllToQueue(songs) },
                 cover: { ArtistPhoto(url: (info?.photo ?? "").ifBlank(art), name: title, size: 64) },
-                meta: { PageMeta(meta(info, failed: failed, known: known.count)) }
+                meta: { PageMeta(meta(info, failed: failed, known: known.count, title: title, key: key)) }
             )
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
@@ -300,6 +306,10 @@ private struct ArtistPageView: View {
                         }
                     } else if let info {
                         sections(info, key: key, songs: songs, title: title)
+                    } else if !songs.isEmpty {
+                        // The server's songs can land before the page itself.
+                        SectionTitle(text: "Songs")
+                        allSongRows(songs, key: key, title: title)
                     } else {
                         LoadingNote()
                     }
@@ -309,16 +319,24 @@ private struct ArtistPageView: View {
             }
             .scrollIndicators(.hidden)
         }
+        // Round 2 J: every song of the artist, asked for as the page opens.
+        .task(id: key) { store.loadAllSongs(key, name: name, id: id) }
+    }
+
+    /** All the artist's songs; the next page is asked for well before the end. */
+    private func allSongRows(_ songs: [Track], key: String, title: String) -> some View {
+        PageSongRows(tracks: songs, listName: title, state: state, vm: vm) {
+            store.loadMoreSongs(key, name: name, id: id)
+        }
     }
 
     @ViewBuilder
     private func sections(_ info: ArtistInfo, key: String, songs: [Track], title: String) -> some View {
         if !songs.isEmpty {
             SectionTitle(text: "Songs")
-            PageSongRows(tracks: songs, listName: title, state: state, vm: vm)
-            if !info.songsList.isEmpty && store.allSongs[key] == nil {
-                MButton(store.songsLoading.contains(key) ? "Loading…" : "Show all songs", kind: .ghost, height: 30) { store.loadAllSongs(key) }
-                    .padding(.leading, 2)
+            allSongRows(songs, key: key, title: title)
+            if store.songsLoading.contains(key) {
+                OmpSpinner(size: 14, color: Omp.themeAccent).frame(maxWidth: .infinity).frame(height: 40)
             }
         }
         if !info.albums.isEmpty {
@@ -331,8 +349,10 @@ private struct ArtistPageView: View {
         }
     }
 
-    private func meta(_ info: ArtistInfo?, failed: Bool, known: Int) -> String {
+    private func meta(_ info: ArtistInfo?, failed: Bool, known: Int, title: String, key: String) -> String {
         if failed { return "\(known) \(known == 1 ? "track" : "tracks") on this phone" }
+        // "Adele · 214 songs" once every song is counted.
+        if let total = store.songTotal[key], total > 0 { return "\(title) \u{B7} \(total) \(total == 1 ? "song" : "songs")" }
         guard let info else { return "YouTube Music" }
         let releases = info.albums.count + info.singles.count
         let parts = [info.subtitle, releases > 0 ? "\(releases) releases" : ""].filter { !$0.isEmpty }
@@ -397,7 +417,7 @@ private struct AlbumPageView: View {
                     } else if info == nil {
                         LoadingNote()
                     }
-                    PageSongRows(tracks: tracks, listName: title, state: state, vm: vm)
+                    PageSongRows(tracks: tracks, listName: title, state: state, vm: vm, showAlbum: false)
                 }
                 .padding(.horizontal, 6)
                 .padding(.bottom, 8)

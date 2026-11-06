@@ -480,16 +480,98 @@ final class PageStore: ObservableObject {
         }
     }
 
-    /** Every top song of an artist: the "Top songs" list behind the first five. */
-    func loadAllSongs(_ key: String) {
-        guard let info = artists[key], info.songsList.hasPrefix("VL"), allSongs[key] == nil, !songsLoading.contains(key) else { return }
+    /** Set once at start-up: the account client, for the server's finding-songs service. */
+    static var client: MaroClient?
+
+    /** An artist's song total as the server counts it (every song, not just this page). */
+    @Published private(set) var songTotal: [String: Int] = [:]
+    /** The server's token for an artist's next page of songs; absent when all are here. */
+    private var songsNext: [String: String] = [:]
+
+    /**
+     * ALL of an artist's songs (round 2 J), asked for as soon as the page
+     * opens: the server's finding-songs service first (every song, deduped,
+     * most popular first; the first page at once, the rest as you scroll),
+     * else this phone's own YouTube Music lookup (the "Top songs" list).
+     */
+    func loadAllSongs(_ key: String, name: String, id: String) {
+        guard allSongs[key] == nil, !songsLoading.contains(key) else { return }
         songsLoading.insert(key)
         Task {
-            let list = String(info.songsList.dropFirst(2))
-            let found = (try? await YouTubeMusic.shared.playlist(list)) ?? []
+            var query = ["name": name]
+            if !id.isEmpty { query["id"] = id }
+            if let got = await Self.client?.find("artist", query) {
+                let songs = Sync.tracks(got.arr("songs"))
+                if !songs.isEmpty {
+                    songsLoading.remove(key)
+                    allSongs[key] = songs
+                    songTotal[key] = max(got.int("total", songs.count), songs.count)
+                    let next = got.str("next")
+                    if !got.bool("complete", next.isEmpty) && !next.isEmpty { songsNext[key] = next }
+                    return
+                }
+            }
+            // The server couldn't say: the phone's own lookup.
+            if artists[key] == nil { try? await Task.sleep(nanoseconds: 1_500_000_000) }
+            var found: [Track] = []
+            if let info = artists[key], info.songsList.hasPrefix("VL") {
+                found = (try? await YouTubeMusic.shared.playlist(String(info.songsList.dropFirst(2)))) ?? []
+            }
             songsLoading.remove(key)
-            if !found.isEmpty { allSongs[key] = found }
+            if !found.isEmpty {
+                allSongs[key] = found
+                songTotal[key] = found.count
+            }
         }
+    }
+
+    /** The next page of an artist's songs, as the list nears its end. */
+    func loadMoreSongs(_ key: String, name: String, id: String) {
+        guard let token = songsNext[key], !songsLoading.contains(key) else { return }
+        songsLoading.insert(key)
+        Task {
+            var query = ["name": name, "next": token]
+            if !id.isEmpty { query["id"] = id }
+            let got = await Self.client?.find("artist", query)
+            songsLoading.remove(key)
+            guard let got else { return }
+            let more = Sync.tracks(got.arr("songs"))
+            var seen = Set((allSongs[key] ?? []).map { $0.id.ifEmpty($0.title) })
+            allSongs[key] = (allSongs[key] ?? []) + more.filter { seen.insert($0.id.ifEmpty($0.title)).inserted }
+            let next = got.str("next")
+            songsNext[key] = more.isEmpty || next.isEmpty || next == token ? nil : next
+            if let total = got["total"] as? NSNumber { songTotal[key] = max(total.intValue, allSongs[key]?.count ?? 0) }
+        }
+    }
+
+    /** Every track of an album from the server's finding-songs service, as an album page; nil when it can't say. */
+    private func serverAlbum(name: String, id: String, artist: String) async -> JSON? {
+        var query = ["name": name, "artist": artist]
+        if !id.isEmpty { query["id"] = id }
+        guard let got = await Self.client?.find("album", query) else { return nil }
+        let tracks = Sync.tracks(got.arr("songs"))
+        guard !tracks.isEmpty else { return nil }
+        let al = got.obj("album") ?? [:]
+        var a = AlbumInfo()
+        a.id = id.ifEmpty(al.str("id"))
+        a.title = al.str("name").ifEmpty(name)
+        a.kind = al.str("kind").ifEmpty("Album")
+        a.year = al.str("year")
+        a.art = al.str("art")
+        a.artists = (al.arr("artists") ?? []).compactMap { x -> ArtistLink? in
+            if let s = x as? String { return ArtistLink(name: s) }
+            if let o = x as? JSON { return ArtistLink(name: o.str("name"), id: o.str("id")) }
+            return nil
+        }
+        if a.artists.isEmpty && !artist.isEmpty { a.artists = [ArtistLink(name: artist)] }
+        a.tracks = tracks
+        a.trackCount = max(got.int("total", tracks.count), tracks.count)
+        if let secs = got["length"] as? NSNumber, secs.intValue > 0 {
+            a.length = "\(max(1, secs.intValue / 60)) min"
+        } else {
+            a.length = got.str("length")
+        }
+        return a.toJSON()
     }
 
     private func fetch(_ page: DetailPage) async throws -> JSON {
@@ -507,6 +589,8 @@ final class PageStore: ObservableObject {
             if !photo.isEmpty { info.photo = photo }
             return info.toJSON()
         case .album(let name, let id, _, let artist):
+            // Every track from the server first (round 2 J), the phone's own lookup else.
+            if let found = await serverAlbum(name: name, id: id, artist: artist) { return found }
             var browseId = id
             if browseId.isEmpty {
                 guard let found = try await yt.findAlbum(name, artist: artist) else { throw PageMissing() }

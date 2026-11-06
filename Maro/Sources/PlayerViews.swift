@@ -84,7 +84,8 @@ private struct MiniPlayer: View {
                 VStack(alignment: .leading, spacing: 3) {
                     OmpText(track?.title.ifBlank("Nothing playing") ?? "Nothing playing", size: 13, color: Omp.foreground, bold: true)
                     if let track, !track.artist.isEmpty {
-                        OmpText(track.artist, size: 11, color: Omp.sourceColor(track.source))
+                        // Round 2 K: the artist and the album.
+                        OmpText(track.artist + (track.album.isEmpty ? "" : " \u{B7} " + track.album), size: 11, color: Omp.sourceColor(track.source))
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -148,9 +149,17 @@ private struct FullPlayer: View {
                     }
                     if let track, !track.artist.isEmpty {
                         // The artist and the album open their pages.
-                        OmpText(track.artist, size: 11, color: Omp.sourceColor(track.source))
-                            .contentShape(Rectangle())
-                            .onTapGesture { openArtists(of: track, vm: vm, present: present) }
+                        HStack(spacing: 0) {
+                            OmpText(track.artist, size: 11, color: Omp.sourceColor(track.source))
+                                .layoutPriority(1)
+                                .contentShape(Rectangle())
+                                .onTapGesture { openArtists(of: track, vm: vm, present: present) }
+                            if !track.album.isEmpty {
+                                OmpText(" \u{B7} " + track.album, size: 11, color: Omp.t3)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture { vm.openAlbum(of: track) }
+                            }
+                        }
                     }
                     if !state.loadingKey.isEmpty {
                         HStack(spacing: 5) {
@@ -345,12 +354,24 @@ struct JamView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     OmpText(track?.title.ifBlank("Nothing playing") ?? "Nothing playing", size: titleSize, color: Omp.foreground, bold: true)
                     if let track, !track.artist.isEmpty {
-                        OmpText(track.artist, size: 13, color: Color.mix(Omp.sourceColor(track.source), Omp.t2, 0.55))
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                close()
-                                vm.openArtist(track.artistNames.first ?? track.artist, id: track.artistId)
+                        HStack(spacing: 0) {
+                            OmpText(track.artist, size: 13, color: Color.mix(Omp.sourceColor(track.source), Omp.t2, 0.55))
+                                .layoutPriority(1)
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    close()
+                                    vm.openArtist(track.artistNames.first ?? track.artist, id: track.artistId)
+                                }
+                            // Round 2 K: the album, which opens its page.
+                            if !track.album.isEmpty {
+                                OmpText(" \u{B7} " + track.album, size: 13, color: Omp.t3)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture {
+                                        close()
+                                        vm.openAlbum(of: track)
+                                    }
                             }
+                        }
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
