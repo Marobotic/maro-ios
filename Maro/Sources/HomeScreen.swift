@@ -129,7 +129,12 @@ struct HomeScreen: View {
                             withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) { playerMini.toggle() }
                         }
                     }
-                    .padding(6)
+                    .padding(.horizontal, 6)
+                    .padding(.top, 6)
+                    // Down to just above the home indicator, not a whole inset
+                    // short of it (34 pt of empty page on an iPhone 13).
+                    .padding(.bottom, max(6, geo.safeAreaInsets.bottom - 20))
+                    .ignoresSafeArea(.container, edges: .bottom)
                 }
             }
             // The "i" panel: over everything, under the strip. Not modal - taps
