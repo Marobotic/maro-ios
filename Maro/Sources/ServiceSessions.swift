@@ -125,10 +125,6 @@ final class ServiceSessions: @unchecked Sendable {
      * session lives), then kept here. Returns nil, or why it failed.
      */
     func publish(_ name: String, _ payload: JSON, client: MaroClient) async -> String? {
-        // YouTube Music lives on Jukebox online now (YtmVault), never on the
-        // sealed blob: several copies rotating at once is what made Google
-        // sign Maro out. The slot is still read, as a fallback, until then.
-        guard name != Self.ytm else { return "YouTube Music is kept by Jukebox online, not the account blob" }
         guard let key = Keychain.get(Self.keyItem) else { return "Enter your Jukebox password in Settings first" }
         guard let blob = Self.seal(payload, key: key) else { return "Could not seal the session" }
         guard let at = await client.putServiceBlob(name, blob) else { return "Could not save the session to your account" }

@@ -158,15 +158,8 @@ final class ServiceSignIn: NSObject, ObservableObject, WKNavigationDelegate, Ide
             let yt = cookies.filter { $0.domain.hasSuffix("youtube.com") }
             let names = Set(yt.map(\.name))
             guard names.contains("SAPISID") || names.contains("__Secure-3PAPISID"), host.hasSuffix("youtube.com") else { return }
-            status = "Signed in - handing it to Jukebox online"
-            // The header is YouTube's cookies; the jar the droplet imports also
-            // carries Google's, which its Chrome needs to keep the session alive.
-            let jar = cookies.filter { $0.domain.hasSuffix("youtube.com") || $0.domain.hasSuffix("google.com") }
-            let session = Self.youtubeSession(yt, jar: jar)
-            finish(.session(session))
-            // The page's own cookies go: Jukebox online's copy is the only
-            // one, and this browser must never rotate the same session.
-            dropCookies()
+            status = "Signed in - saving it to your account"
+            finish(.session(Self.youtubeSession(yt)))
         } else {
             guard let token = cookies.first(where: { $0.name == "oauth_token" && $0.domain.hasSuffix("soundcloud.com") })?.value,
                   !token.isEmpty else { return }
@@ -181,19 +174,12 @@ final class ServiceSignIn: NSObject, ObservableObject, WKNavigationDelegate, Ide
         }
     }
 
-    /** Everything the sign-in page stored (cookies, storage), wiped. */
-    private func dropCookies() {
-        webView.loadHTMLString("", baseURL: nil)
-        let store = webView.configuration.websiteDataStore
-        store.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast) {}
-    }
-
     /**
      * The desktop's YouTube Music session: ytmusicapi's browser headers (the
      * cookie header and a SAPISIDHASH) and the same cookies as the Netscape
      * file yt-dlp reads.
      */
-    static func youtubeSession(_ cookies: [HTTPCookie], jar: [HTTPCookie]? = nil) -> JSON {
+    static func youtubeSession(_ cookies: [HTTPCookie]) -> JSON {
         let origin = "https://music.youtube.com"
         let header = cookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
         let sapisid = cookies.first { $0.name == "SAPISID" }?.value
@@ -213,7 +199,7 @@ final class ServiceSignIn: NSObject, ObservableObject, WKNavigationDelegate, Ide
             "x-goog-authuser": "0",
         ]
         var lines = ["# Netscape HTTP Cookie File", ""]
-        for c in jar ?? cookies {
+        for c in cookies {
             let domain = c.domain.hasPrefix(".") ? c.domain : "." + c.domain
             let expires = Int(c.expiresDate?.timeIntervalSince1970 ?? 0)
             lines.append([domain, "TRUE", c.path.isEmpty ? "/" : c.path, c.isSecure ? "TRUE" : "FALSE",

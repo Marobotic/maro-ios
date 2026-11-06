@@ -78,11 +78,12 @@ struct SettingsPage: View {
                               },
                               onPurge: { purgeAndSignIn("maro", "Jukebox") })
             service("spotify", "Spotify", slot: ServiceSessions.librespot, account: Spotify.shared.user)
-            service("ytm", "YouTube Music", slot: ServiceSessions.ytm, account: YtmVault.shared.status.account)
+            service("ytm", "YouTube Music", slot: ServiceSessions.ytm,
+                    account: YtmVault.shared.inUse ? YtmVault.shared.status.account.ifBlank("Kept by Jukebox online") : "")
             service("sc", "SoundCloud", slot: ServiceSessions.soundcloud,
                     account: ServiceSessions.shared.session(ServiceSessions.soundcloud)?.obj("user")?.str("name") ?? "")
         }
-        SettingsNote("Signed in here or on any other device, a service is on your account and every device uses it; signing out of one signs every device out of it. YouTube Music is kept signed in by Jukebox online.")
+        SettingsNote("Signed in here or on any other device, a service is on your account and every device uses it; signing out of one signs every device out of it. When Jukebox online keeps a healthy YouTube Music session for your account, it is used instead.")
     }
 
     private func service(_ key: String, _ label: String, slot: String, account: String) -> ServiceAccountRow {
@@ -93,7 +94,8 @@ struct SettingsPage: View {
             on: on, health: state.health[key],
             onCheck: { vm.checkHealth(only: key) },
             onSign: { vm.connectService(key) },
-            onPurge: { purgeAndSignIn(key, label) }
+            onPurge: { purgeAndSignIn(key, label) },
+            ownSignIn: key == "ytm" ? ServiceSessions.shared.session(slot) != nil : nil
         )
     }
 
@@ -426,6 +428,8 @@ private struct ServiceAccountRow: View {
     let onCheck: () -> Void
     let onSign: () -> Void
     let onPurge: () -> Void
+    /** Whether there is a sign-in of this account's own to sign out of (default: when on). */
+    var ownSignIn: Bool? = nil
 
     private static let words: [String: String] = [
         "yes": "Working", "no": "Not working", "checking": "Checking\u{2026}", "offline": "Offline", "off": "Not signed in",
@@ -464,7 +468,8 @@ private struct ServiceAccountRow: View {
                 if on { MButton("Check now", action: onCheck) }
                 if h.state == "no" { MButton("Purge and sign in", kind: .danger, action: onPurge) }
                 if service != "maro" || on {
-                    MButton(on ? "Sign out" : "Sign in", kind: on ? .ghost : .normal, action: onSign)
+                    let own = ownSignIn ?? on
+                    MButton(own ? "Sign out" : "Sign in", kind: own ? .ghost : .normal, action: onSign)
                 }
             }
         }

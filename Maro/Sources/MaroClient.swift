@@ -495,18 +495,6 @@ final class MaroClient: @unchecked Sendable {
         return got.body
     }
 
-    /** Seed the droplet's keeper with a fresh sign-in: {ok, state, account, at}, or nil / the error. */
-    func seedYtmSession(cookies: String, headers: JSON) async -> (ok: Bool, body: JSON)? {
-        guard let got = await answer("POST", "/ytm/session", body: ["cookies": cookies, "headers": headers], timeout: 300) else { return nil }
-        let ok = (200..<300).contains(got.code) && (got.body["ok"] as? Bool) != false
-        return (ok, got.body)
-    }
-
-    func deleteYtmSession() async -> Bool {
-        guard let got = await answer("DELETE", "/ytm/session", timeout: 30) else { return false }
-        return (200..<300).contains(got.code) || got.code == 404
-    }
-
     func setPlayback(_ device: String) async -> Bool {
         guard let resp = try? await call("POST", "/account/playback", body: ["device": device]) else { return false }
         return resp.str("playback") == device

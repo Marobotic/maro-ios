@@ -1,21 +1,21 @@
 import Foundation
 
 /**
- * The YouTube Music session as Jukebox online keeps it (round 2 C).
+ * The YouTube Music session Jukebox online keeps alive, when it has one
+ * (round 2 C, after G was withdrawn).
  *
- * Google kept signing Maro out because several apps each held, rotated and
- * pushed their own copy of the same session. Now the droplet holds the only
- * one: a real Chrome there opens YouTube Music every 20 minutes so Google
- * rotates the cookies itself, and every app takes its latest export from
- * `GET /cache/ytm/session`. This phone never rotates or writes back a
- * cookie, and never puts the session on the account's sealed /service/ytm
- * blob again: a sign-in here seeds the droplet (`POST`), then the sign-in
- * page's own cookies are thrown away.
+ * Bluehost can hold a healthy session for an account: a real Chrome there
+ * opens YouTube Music every 20 minutes so Google rotates the cookies itself.
+ * This phone only READS it (`GET /cache/ytm/session`) and uses it only while
+ * the server says `state: "ok"`; otherwise the phone's own YouTube Music
+ * sign-in (the account's sealed /service/ytm session, as before round 2) is
+ * used. Nothing is ever sent to the server from here, and no cookie is ever
+ * rotated or written back.
  *
  * The copy is read at start, every 10 minutes, and at once when YouTube Music
- * turns the session away (then the call is tried once more). Offline, the
- * last copy fetched keeps working, read-only. Kept in the keychain so a
- * launch without a connection still has it.
+ * turns a session away (then the call is tried once more). Offline, the last
+ * copy fetched keeps working, read-only. Kept in the keychain so a launch
+ * without a connection still has it.
  */
 final class YtmVault: @unchecked Sendable {
     static let shared = YtmVault()
@@ -76,20 +76,22 @@ final class YtmVault: @unchecked Sendable {
         return ["ok", "expired", "error", "pending"].contains(vaultState) || copy != nil
     }
 
+    /**
+     * Whether the server's session is the one to use: the server says it is
+     * healthy ("ok") and its cookies are here. Otherwise the phone's own
+     * sign-in is used.
+     */
+    var inUse: Bool {
+        lock.lock()
+        let ok = vaultState == "ok" && copy != nil
+        lock.unlock()
+        return ok && !cookie.isEmpty
+    }
+
     /** The droplet Chrome's user agent: sent with its cookies, as it asks. */
     var userAgent: String {
         lock.lock(); defer { lock.unlock() }
         return copy?.obj("headers")?.str("user-agent") ?? ""
-    }
-
-    /**
-     * Only while Jukebox online has never held a session may the account's
-     * older sealed copy be used (read-only, never written back), so YouTube
-     * Music keeps working until the first sign-in seeds the droplet.
-     */
-    var mayUseLegacy: Bool {
-        lock.lock(); defer { lock.unlock() }
-        return copy == nil && vaultState == "none"
     }
 
     // -- in step with the droplet ----------------------------------------
@@ -141,56 +143,6 @@ final class YtmVault: @unchecked Sendable {
         if now - refusedAt < 60 { return false }
         refusedAt = now
         return true
-    }
-
-    /**
-     * A sign-in made on this phone, handed to the droplet: it imports the
-     * cookies into its own Chrome and keeps them alive from then on. nil when
-     * it took them, else why not. The phone keeps nothing of its own.
-     */
-    func seed(_ session: JSON) async -> String? {
-        guard let client, client.session != nil else { return "Sign in to Jukebox first" }
-        let cookies = session.str("cookies")
-        guard !cookies.isEmpty else { return "The sign-in carried no cookies - try again" }
-        // The droplet answers once it has imported the cookies and run a full
-        // keepalive (about 90 s, up to ~4 min). A dropped request, or a seed
-        // already running (409 pending), is followed on the status instead.
-        let got = await client.seedYtmSession(cookies: cookies, headers: session.obj("headers") ?? [:])
-        if got == nil || got?.body.str("state") == "pending" {
-            return await followSeed(client)
-        }
-        guard let got else { return "Couldn't reach Jukebox online to keep the sign-in - try again" }
-        guard got.ok else {
-            let why = got.body.str("error")
-            return why.isEmpty ? "Jukebox online did not take the sign-in - try again" : "Jukebox online: \(why)"
-        }
-        take(got.body, cookies: false)
-        // Its fresh export, the copy every app uses.
-        await refresh()
-        return nil
-    }
-
-    /** A seed still running on the droplet: its status every 10 s for up to 5 minutes. */
-    private func followSeed(_ client: MaroClient) async -> String? {
-        for _ in 0..<30 {
-            try? await Task.sleep(nanoseconds: 10_000_000_000)
-            guard let got = await client.ytmSession(withCookies: false) else { continue }
-            let state = got.str("state")
-            if state == "pending" { continue }
-            take(got, cookies: false)
-            if state == "ok" {
-                await refresh()
-                return nil
-            }
-            return state == "expired" ? "Google did not keep that sign-in - try again" : "Jukebox online could not keep the sign-in - try again"
-        }
-        return "Jukebox online is still taking the sign-in - Health will say when it is done"
-    }
-
-    /** Signed out of YouTube Music: the droplet's keeper stopped and wiped, and the copy here gone. */
-    func signOut() async {
-        _ = await client?.deleteYtmSession()
-        forgetLocal(state: "none")
     }
 
     /** Signing out of Jukebox on this phone: the copy here goes (the droplet keeps it for the other devices). */

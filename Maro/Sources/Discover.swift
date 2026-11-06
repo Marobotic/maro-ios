@@ -37,14 +37,12 @@ actor YouTubeMusic {
     private static let origin = "https://music.youtube.com"
 
     /**
-     * The session's cookie header: Jukebox online's copy (YtmVault), the only
-     * session used. Until the droplet has ever held one, the account's older
-     * sealed copy, read-only.
+     * The session's cookie header: Jukebox online's kept session while the
+     * server says it is healthy ("ok"), else this phone's own YouTube Music
+     * sign-in (the account's sealed session, as before round 2).
      */
     private func cookie() -> String {
-        let vault = YtmVault.shared
-        let kept = vault.cookie
-        if !kept.isEmpty || !vault.mayUseLegacy { return kept }
+        if YtmVault.shared.inUse { return YtmVault.shared.cookie }
         return ServiceSessions.shared.session(ServiceSessions.ytm)?.obj("headers")?.str("cookie") ?? ""
     }
 
@@ -95,20 +93,24 @@ actor YouTubeMusic {
             let hash = Insecure.SHA1.hash(data: Data("\(ts) \(sid) \(Self.origin)".utf8)).map { String(format: "%02x", $0) }.joined()
             req.setValue(cookies, forHTTPHeaderField: "Cookie")
             req.setValue("SAPISIDHASH \(ts)_\(hash)", forHTTPHeaderField: "Authorization")
-            req.setValue(YtmVault.shared.authUser, forHTTPHeaderField: "X-Goog-AuthUser")
-            // Jukebox online's cookies travel with its Chrome's own name.
-            let vaultUA = YtmVault.shared.userAgent
-            if !vaultUA.isEmpty && !YtmVault.shared.cookie.isEmpty { req.setValue(vaultUA, forHTTPHeaderField: "User-Agent") }
+            if YtmVault.shared.inUse {
+                // Jukebox online's cookies travel with its Chrome's own name.
+                req.setValue(YtmVault.shared.authUser, forHTTPHeaderField: "X-Goog-AuthUser")
+                let vaultUA = YtmVault.shared.userAgent
+                if !vaultUA.isEmpty { req.setValue(vaultUA, forHTTPHeaderField: "User-Agent") }
+            } else {
+                req.setValue("0", forHTTPHeaderField: "X-Goog-AuthUser")
+            }
         }
         let (data, resp) = try await http.data(for: req)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
         let json = code == 200 ? JSONText.parse(data) as? JSON : nil
-        // Turned away (401 / 403 / signed out): Jukebox online's fresh copy at
-        // once, and the call once more with it. Never a rotation of our own.
+        // Turned away (401 / 403 / signed out): Jukebox online's state read at
+        // once, and the call tried once more if that changed which session (or
+        // which cookies) to use. Never a rotation of our own.
         if !cookies.isEmpty && !retried && (code == 401 || code == 403 || json.map(Self.signedOut) == true) {
-            if await YtmVault.shared.refreshAfterRefusal() {
-                return try await call(endpoint, original, signed: signed, retried: true)
-            }
+            _ = await YtmVault.shared.refreshAfterRefusal()
+            if cookie() != cookies { return try await call(endpoint, original, signed: signed, retried: true) }
         }
         guard let json else {
             throw YouTubeDirect.Refused(reason: "YouTube Music answered \(code)")
