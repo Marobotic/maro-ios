@@ -6,8 +6,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.10"
-    MARKETING_VERSION: "0.2.7"
-    CURRENT_PROJECT_VERSION: "44"
+    MARKETING_VERSION: "0.2.8"
+    CURRENT_PROJECT_VERSION: "45"
 targets:
   Maro:
     type: application
