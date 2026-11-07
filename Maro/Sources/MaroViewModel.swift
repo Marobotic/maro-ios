@@ -133,6 +133,13 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     private var failStreak = 0
     /** The last play that really started (onStarted), for the start watchdog. */
     private var startedTag = 0
+    /** A Spotify song using its verified YouTube stand-in while the player connects. */
+    private var spotifyStandIn: (track: Track, tag: Int)?
+    private var spotifyHandoffAllowedTag = 0
+    private var spotifyHandoffAttemptedTag = 0
+    private var spotifyHandoffActiveTag = 0
+    private var spotifyHandoffTrack: Track?
+    private var spotifyHandoffWasPlaying = false
     private let network = NetworkWatch()
 
     // When the user last cleared the queue, so an empty account snapshot can
@@ -234,6 +241,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         startConnectivityWatch()
         network.onChange = { [weak self] old, new in self?.networkChanged(old, new) }
         network.start()
+        Spotify.shared.onReady = { [weak self] in self?.spotifyStandInBecameReady() }
         Spotify.shared.onReconnected = { [weak self] ok in
             guard let self else { return }
             log.info("spotify reconnected: \(ok)")
@@ -1245,6 +1253,10 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     private func startTrack(_ track: Track) {
         playTag += 1
         let tag = playTag
+        spotifyStandIn = nil
+        spotifyHandoffActiveTag = 0
+        spotifyHandoffTrack = nil
+        spotifyHandoffWasPlaying = false
         tapAt = uptime()
         watchStart(tag, track)
         saveTask?.cancel()
@@ -1256,6 +1268,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         // only takes the artist's own upload.
         let oneOff = oneOffPrefer.removeValue(forKey: track.id)
         let prefer = oneOff ?? state.playbackSource
+        spotifyHandoffAllowedTag = oneOff == nil && prefer == "spotify" && state.playbackSource == "spotify" ? tag : 0
         // The saved choice stays as it is; this phone just can't follow it now.
         if oneOff == nil && prefer == "spotify" && track.source == "spotify" && !Spotify.shared.hasLogin && !preferNoteShown {
             preferNoteShown = true
@@ -1281,8 +1294,10 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 + (Spotify.shared.ready ? "ready" : Spotify.shared.hasLogin ? "not connected yet" : "signed out")
                 + " \u{B7} " + (state.online ? "online" : "offline"))
         if prefer == "spotify" && track.source == "spotify" && Spotify.shared.hasLogin {
+            let connecting = !Spotify.shared.ready && uptime() >= spotifyRestUntil
             if !spotifyCanStart() {
                 pWarn("Source: not Spotify \u{2014} its player is \(uptime() < spotifyRestUntil ? "resting after a failure" : "still connecting"); the YouTube copy instead", track, "spotify")
+                if connecting && spotifyHandoffAllowedTag == tag { spotifyStandIn = (track, tag) }
                 return playYouTubeInstead(track, tag: tag)
             }
             pInfo("Source: Spotify \u{2014} Spotify preferred and its player is ready", track, "spotify")
@@ -1366,11 +1381,15 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 state.audioTimeline = line
             }
         } else if track.source == "spotify" && Spotify.shared.hasLogin {
+            let connecting = !Spotify.shared.ready && uptime() >= spotifyRestUntil
             if spotifyCanStart() {
                 pInfo("Source: Spotify \u{2014} a Spotify song, player ready", track, "spotify")
                 playSpotifyHere(track, tag: tag)
             } else {
                 pWarn("Source: not Spotify \u{2014} its player is \(uptime() < spotifyRestUntil ? "resting after a failure" : "still connecting"); the YouTube copy instead", track, "spotify")
+                if connecting, spotifyHandoffAllowedTag == tag, state.playbackSource == "spotify" {
+                    spotifyStandIn = (track, tag)
+                }
                 playYouTubeInstead(track, tag: tag)
             }
         } else if !videoId.isEmpty && (serverCached.contains(videoId) || !serverMapLoaded) {
@@ -1431,7 +1450,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
      * A YouTube song the droplet has no copy of: straight from YouTube, the
      * guest stream. Nothing is asked of any other device.
      */
-    private func playYouTubeDirect(_ videoId: String, track: Track, tag: Int, at start: Double = 0) {
+    private func playYouTubeDirect(_ videoId: String, track: Track, tag: Int, at start: Double = 0, play: Bool = true) {
         playRoute = "youtube"
         Task { @MainActor in
             do {
@@ -1444,7 +1463,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                       track, "ytm", details: "video \(videoId) \u{B7} address expires \(expires) \u{B7} tied to this network")
                 sounding = (copy, stream.url, false)
                 setSounding(videoId, copy: copy, kbps: stream.kbps, inTier: AudioCache.inTier(stream.kbps), route: "youtube")
-                phone.playYouTube(stream.url, videoId: videoId, tag: tag, duration: track.duration, at: start)
+                phone.playYouTube(stream.url, videoId: videoId, tag: tag, duration: track.duration, at: start, play: play)
                 if state.statsOpen { measureSounding() }
             } catch let gone as YouTubeDirect.Gone {
                 markGone(videoId, gone.reason)
@@ -1470,6 +1489,63 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
      * cannot) used to cost every tap 4 s of silence before YouTube took over;
      * now the YouTube copy plays at once and Spotify is woken behind it.
      */
+    private func spotifyStandInBecameReady() {
+        guard Spotify.shared.ready,
+              let standIn = spotifyStandIn,
+              standIn.tag == playTag,
+              startedTag == standIn.tag,
+              spotifyHandoffAttemptedTag != standIn.tag,
+              spotifyHandoffAllowedTag == standIn.tag,
+              state.playbackSource == "spotify",
+              state.localTrack?.id == standIn.track.id,
+              state.localTrack?.source == "spotify",
+              ["youtube", "stream", "warm asset"].contains(playRoute),
+              let player = phonePlayer,
+              !player.onSpotify else { return }
+
+        let position = player.currentPosition
+        guard standIn.track.duration - position > 10 else {
+            spotifyStandIn = nil
+            return
+        }
+        spotifyHandoffAttemptedTag = standIn.tag
+        spotifyHandoffActiveTag = standIn.tag
+        spotifyHandoffTrack = standIn.track
+        spotifyStandIn = nil
+        let wasPlaying = player.isPlaying
+        spotifyHandoffWasPlaying = wasPlaying
+        pInfo("Switched to Spotify (320 kbps) at \(at(position)): its player connected after the song started", standIn.track, "spotify")
+        playSpotifyHere(standIn.track, tag: standIn.tag, at: position, shouldPlay: wasPlaying)
+
+        Task { @MainActor [weak self] in
+            await sleep(seconds: 4)
+            guard let self, self.spotifyHandoffActiveTag == standIn.tag else { return }
+            if self.phonePlayer?.spotifyLoaded == true {
+                self.spotifyHandoffActiveTag = 0
+                self.spotifyHandoffTrack = nil
+                self.spotifyHandoffWasPlaying = false
+            } else {
+                self.failSpotifyHandoff(tag: standIn.tag)
+            }
+        }
+    }
+
+    private func failSpotifyHandoff(tag: Int) {
+        guard spotifyHandoffActiveTag == tag,
+              tag == playTag,
+              let track = spotifyHandoffTrack,
+              let player = phonePlayer else { return }
+        let position = player.currentPosition
+        let wasPlaying = spotifyHandoffWasPlaying
+        spotifyHandoffActiveTag = 0
+        spotifyHandoffTrack = nil
+        spotifyHandoffWasPlaying = false
+        spotifyRestUntil = uptime() + Self.spotifyRest
+        Spotify.shared.reconnect()
+        pWarn("Spotify did not start after connecting; returning to the YouTube copy at \(at(position))", track, "spotify")
+        playYouTubeInstead(track, tag: tag, at: position, play: wasPlaying)
+    }
+
     private func spotifyCanStart() -> Bool {
         if uptime() < spotifyRestUntil { return false }
         if Spotify.shared.ready { return true }
@@ -1484,7 +1560,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
      * `searchOnly`: the map's match is not trusted (a SoundCloud song, or one
      * whose copy was refused); only YouTube Music's same-recording match.
      */
-    private func playYouTubeInstead(_ track: Track, tag: Int, searchOnly: Bool = false, at start: Double = 0) {
+    private func playYouTubeInstead(_ track: Track, tag: Int, searchOnly: Bool = false, at start: Double = 0, play: Bool = true) {
         playRoute = "youtube"
         Task { @MainActor in
             var vid = searchOnly ? "" : videoIdOf(track)
@@ -1506,11 +1582,11 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 // The droplet's copy: Premium, and usually loaded ahead.
                 playRoute = AudioCache.isWarm(vid) ? "warm asset" : "stream"
                 pInfo("Source: server copy of the YouTube match", track, "jukebox", details: "video \(vid)")
-                playStreamAtTier(vid, tag: tag, duration: track.duration, at: start)
+                playStreamAtTier(vid, tag: tag, duration: track.duration, at: start, play: play)
                 return
             }
             pInfo("Source: YouTube direct \u{2014} the server has no copy", track, "ytm", details: "video \(vid)")
-            playYouTubeDirect(vid, track: track, tag: tag, at: start)
+            playYouTubeDirect(vid, track: track, tag: tag, at: start, play: play)
         }
     }
 
@@ -1519,7 +1595,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
      * 320 kbps. `display` is the row on screen when it is a stand-in for a
      * song from another service.
      */
-    private func playSpotifyHere(_ track: Track, tag: Int, display: Track? = nil, at start: Double = 0) {
+    private func playSpotifyHere(_ track: Track, tag: Int, display: Track? = nil, at start: Double = 0, shouldPlay: Bool = true) {
         playRoute = "spotify"
         playVideoId = ""
         Spotify.shared.start()
@@ -1535,7 +1611,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             self.state.audioInTier = nominal > 0 ? nominal >= 320 : nil
         }
         phone.playSpotify("spotify:track:" + track.id, tag: tag,
-                          duration: track.duration > 0 ? track.duration : (display?.duration ?? 0), at: Int(start * 1000))
+                          duration: track.duration > 0 ? track.duration : (display?.duration ?? 0), at: Int(start * 1000), play: shouldPlay)
         // The queue's next Spotify song waits loaded on a standby player.
         let q = state.localQueue, i = state.localQueueIndex
         if let next = q[safe: i + 1], next.source == "spotify", !next.id.isEmpty {
@@ -1654,7 +1730,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
      * A song seen on screen has been asked already; one that has not waits at
      * most a moment for the answer, then plays the original.
      */
-    private func playStreamAtTier(_ videoId: String, tag: Int, duration: Double, at start: Double = 0) {
+    private func playStreamAtTier(_ videoId: String, tag: Int, duration: Double, at start: Double = 0, play: Bool = true) {
         func go() {
             guard tag == playTag else { return }
             let v = AudioCache.variant(videoId)
@@ -1665,7 +1741,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                     + (start > 0 ? " from \(at(start))" : ""),
                   state.localTrack, "jukebox", details: "video \(videoId) \u{B7} copy \(copy.isEmpty ? "original" : copy)")
             setSounding(videoId, copy: copy, kbps: v?.kbps ?? 0, inTier: v?.inTier)
-            phone.playStream(videoId, tag: tag, duration: duration, at: start)
+            phone.playStream(videoId, tag: tag, duration: duration, at: start, play: play)
         }
         if AudioCache.variant(videoId) != nil { return go() }
         Task { @MainActor in
@@ -1988,6 +2064,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 if offline { saveLocal(track, videoId, announce: false) } else { await keepNow(videoId) }
             }
         }
+        spotifyStandInBecameReady()
     }
 
     func onProgress(position: Double, duration: Double, playing: Bool) {
@@ -2048,6 +2125,9 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
 
     func onFailed(tag: Int, notOnServer: Bool, message: String, details: String = "") {
         if tag != playTag { return }
+        if spotifyHandoffActiveTag == tag, phonePlayer?.spotifyLoaded != true {
+            return failSpotifyHandoff(tag: tag)
+        }
         let track = state.localTrack
         if let track, startedTag == tag || resumingAt >= 0 {
             // It was playing: never leave it silent. The same second, on a fresh stream.

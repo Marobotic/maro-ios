@@ -360,6 +360,7 @@ final class PhonePlayer {
     /** The Spotify song this player is on, or nil when AVPlayer is. */
     private var spotifyUri: String?
     private var spotifyPlaying = false
+    private(set) var spotifyLoaded = false
     private var spotifyMs: Double = 0
     private var spotifyAt: Double = 0
     private var spotifyTick: Task<Void, Never>?
@@ -367,7 +368,7 @@ final class PhonePlayer {
     var onSpotifyRate: (([Int], Int, Int) -> Void)?
     private var spotifyLine: [Int] = []
 
-    func playSpotify(_ uri: String, tag: Int, duration: Double, at ms: Int = 0) {
+    func playSpotify(_ uri: String, tag: Int, duration: Double, at ms: Int = 0, play: Bool = true) {
         watchdog?.cancel()
         player.pause()
         player.replaceCurrentItem(with: nil)
@@ -378,13 +379,14 @@ final class PhonePlayer {
         expected = duration
         spotifyUri = uri
         spotifyPlaying = false
+        spotifyLoaded = false
         spotifyMs = Double(ms)
         spotifyAt = uptime()
         spotifyLine = []
         try? AVAudioSession.sharedInstance().setActive(true)
         let sp = Spotify.shared
         sp.onEvent = { [weak self] ev in self?.spotifyEvent(ev, tag: tag) }
-        sp.load(uri, play: true, ms: ms)
+        sp.load(uri, play: play, ms: ms)
         // librespot reports a position only when it changes state: the lock
         // screen and the bar are kept moving from here.
         spotifyTick?.cancel()
@@ -418,6 +420,7 @@ final class PhonePlayer {
         guard tag == self.tag, let mine = spotifyUri else { return }
         switch ev {
         case .playing(let uri, let ms) where uri == mine:
+            spotifyLoaded = true
             spotifyPlaying = true
             spotifyMs = Double(ms)
             spotifyAt = uptime()
@@ -427,6 +430,7 @@ final class PhonePlayer {
             }
             report()
         case .paused(let uri, let ms) where uri == mine:
+            spotifyLoaded = true
             spotifyPlaying = false
             spotifyMs = Double(ms)
             spotifyAt = uptime()
@@ -466,6 +470,7 @@ final class PhonePlayer {
         Spotify.shared.stop()
         spotifyUri = nil
         spotifyPlaying = false
+        spotifyLoaded = false
         spotifyTick?.cancel()
         spotifyTick = nil
     }
@@ -476,20 +481,20 @@ final class PhonePlayer {
     func playURL(_ url: URL, tag: Int, duration: Double, at: Double = 0) { start(AVURLAsset(url: url), tag: tag, duration: duration, at: at) }
 
     /** YouTube's own CDN wants the same browser the URL was asked for as. */
-    func playYouTube(_ url: URL, videoId: String, tag: Int, duration: Double, at: Double = 0) {
+    func playYouTube(_ url: URL, videoId: String, tag: Int, duration: Double, at: Double = 0, play: Bool = true) {
         let asset = AudioCache.youtubeAsset(videoId, url: url)
         AudioCache.onlyFor(videoId)
-        start(asset, tag: tag, duration: duration, at: at)
+        start(asset, tag: tag, duration: duration, at: at, play: play)
     }
 
-    func playStream(_ videoId: String, tag: Int, duration: Double, at: Double = 0) {
+    func playStream(_ videoId: String, tag: Int, duration: Double, at: Double = 0, play: Bool = true) {
         let asset = AudioCache.asset(videoId)
         AudioCache.onlyFor(videoId)
         AudioCache.forget(videoId)
-        start(asset, tag: tag, duration: duration, at: at)
+        start(asset, tag: tag, duration: duration, at: at, play: play)
     }
 
-    private func start(_ asset: AVURLAsset, tag: Int, duration: Double, at: Double = 0) {
+    private func start(_ asset: AVURLAsset, tag: Int, duration: Double, at: Double = 0, play: Bool = true) {
         leaveSpotify()
         self.tag = tag
         started = false
@@ -525,7 +530,7 @@ final class PhonePlayer {
                 self.player.play()
             }
         }
-        wantsToPlay = true
+        wantsToPlay = play
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
         if let failObserver { NotificationCenter.default.removeObserver(failObserver) }
         endObserver = NotificationCenter.default.addObserver(forName: AVPlayerItem.didPlayToEndTimeNotification, object: item, queue: .main) { [weak self] _ in
@@ -549,7 +554,7 @@ final class PhonePlayer {
         try? AVAudioSession.sharedInstance().setActive(true)
         player.replaceCurrentItem(with: item)
         if at > 0 { player.seek(to: CMTime(seconds: at, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero) }
-        player.play()
+        if play { player.play() } else { player.pause() }
         watch(tag)
     }
 

@@ -30,6 +30,8 @@ final class Spotify {
     }
 
     var onEvent: ((Event) -> Void)?
+    /** The player became ready after starting or reconnecting. */
+    var onReady: (() -> Void)?
     /** A sign-in on this phone became a stored login: librespot's credentials. */
     var onLoggedIn: ((JSON) -> Void)?
     /** A reconnect() finished: true when a new connection is up. */
@@ -204,6 +206,7 @@ final class Spotify {
         case "ready":
             ready = true
             user = ev.str("user")
+            onReady?()
             if (ev["login"] as? Bool) == true {
                 ConsoleLog.shared.log("Spotify", "service sign-in succeeded")
                 signingIn = false
