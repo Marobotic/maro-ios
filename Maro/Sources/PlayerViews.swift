@@ -371,7 +371,7 @@ struct JamView: View {
                         Image("LaunchNote").resizable().scaledToFit().frame(width: 26, height: 26)
                         Spacer(minLength: 0)
                         if !noLyrics {
-                            TButton(showLyrics ? .chevronDown : .chevronUp, size: 18, box: 32, color: Omp.iconTint) {
+                            MButton("", icon: showLyrics ? .chevronDown : .chevronUp, iconSize: 18, kind: .dark) {
                                 withAnimation(.easeOut(duration: 0.22)) { showLyrics.toggle() }
                             }
                             .transition(.opacity)
@@ -389,7 +389,7 @@ struct JamView: View {
                             JamDock(state: state, vm: vm)
                         }
                         .padding(.horizontal, 12)
-                        .padding(.bottom, 8)
+                        .padding(.bottom, 12)
                         .transition(.opacity.combined(with: .offset(y: 12)))
                     } else {
                         let side = min(360, geo.size.height * 0.42, geo.size.width - 48)
@@ -460,34 +460,43 @@ private struct JamDock: View {
 
     var body: some View {
         let track = state.track
-        HStack(spacing: 8) {
-            CoverArt(track: track, icon: Omp.sourceGlyph(track?.source ?? ""), size: 48)
-                .id(track?.id ?? "")
-            VStack(alignment: .leading, spacing: 3) {
-                OmpText(track?.title.ifBlank("Nothing playing") ?? "Nothing playing", size: 13, color: Omp.foreground, bold: true)
-                    .lineLimit(1)
-                if let track, !track.artist.isEmpty {
-                    OmpText(track.artist, size: 11, color: Omp.sourceColor(track.source)).lineLimit(1)
+        VStack(spacing: 2) {
+            JamSeek(state: state, vm: vm)
+            HStack(spacing: 10) {
+                CoverArt(track: track, icon: Omp.sourceGlyph(track?.source ?? ""), size: 46)
+                    .padding(1)
+                    .overlay(Rectangle().strokeBorder(Omp.sourceColor(track?.source ?? ""), lineWidth: 1))
+                    .id(track?.id ?? "")
+                VStack(alignment: .leading, spacing: 3) {
+                    OmpText(track?.title.ifBlank("Nothing playing") ?? "Nothing playing", size: 13, color: Omp.foreground, bold: true)
+                        .lineLimit(1)
+                    if let track, !track.artist.isEmpty {
+                        OmpText(track.artist, size: 11, color: Omp.sourceColor(track.source)).lineLimit(1)
+                    }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                HeartButton(liked: state.isLiked(track), size: 20, box: 36, color: Omp.iconTint, enabled: track != nil) {
+                    if let track { vm.likeTrack(track) }
+                }
+                JamSkip(glyph: .prev, enabled: state.isCurrent, label: "Previous", iconSize: 20, targetSize: 36) { vm.previous() }
+                Button { vm.playPause() } label: {
+                    Icon(state.playing ? .pause : .play, size: 18, color: .black)
+                        .offset(x: state.playing ? 0 : 1)
+                        .frame(width: 40, height: 40)
+                        .background(Circle().fill(Color.white))
+                        .contentShape(Circle())
+                }
+                .buttonStyle(PressStyle(scale: 0.94))
+                .disabled(!(state.isCurrent || !state.queue.isEmpty))
+                .accessibilityLabel(state.playing ? "Pause" : "Play")
+                JamSkip(glyph: .next, enabled: state.isCurrent, label: "Next", iconSize: 20, targetSize: 36) { vm.next() }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            HeartButton(liked: state.isLiked(track), size: 18, box: 32, color: Omp.iconTint, enabled: track != nil) {
-                if let track { vm.likeTrack(track) }
-            }
-            JamSkip(glyph: .prev, enabled: state.isCurrent, label: "Previous") { vm.previous() }
-            Button { vm.playPause() } label: {
-                Icon(state.playing ? .pause : .play, size: 18, color: Omp.foreground)
-                    .frame(width: 40, height: 40)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(PressStyle(scale: 0.9))
-            .disabled(!(state.isCurrent || !state.queue.isEmpty))
-            .accessibilityLabel(state.playing ? "Pause" : "Play")
-            JamSkip(glyph: .next, enabled: state.isCurrent, label: "Next") { vm.next() }
         }
-        .padding(8)
-        .background(Omp.tile)
-        .overlay(Rectangle().strokeBorder(Omp.line, lineWidth: 1))
+        .padding(.horizontal, 10)
+        .padding(.top, 6)
+        .padding(.bottom, 10)
+        .background(Color.black.opacity(0.4))
+        .overlay(Rectangle().strokeBorder(Color.white.opacity(0.08), lineWidth: 1))
     }
 }
 
@@ -556,12 +565,14 @@ private struct JamSkip: View {
     let glyph: Glyph
     let enabled: Bool
     let label: String
+    var iconSize: CGFloat = 26
+    var targetSize: CGFloat = 44
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            Icon(glyph, size: 26, color: .white)
-                .frame(width: 44, height: 44)
+            Icon(glyph, size: iconSize, color: .white)
+                .frame(width: targetSize, height: targetSize)
                 .contentShape(Rectangle())
         }
         .buttonStyle(PressStyle(scale: 0.9))
