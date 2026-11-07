@@ -1484,10 +1484,9 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     }
 
     /**
-     * Whether a tap should go to Spotify: only when its player is connected
-     * and not resting after a failure. A Spotify that is still connecting (or
-     * cannot) used to cost every tap 4 s of silence before YouTube took over;
-     * now the YouTube copy plays at once and Spotify is woken behind it.
+     * Spotify connected while a Spotify song plays its YouTube stand-in (it
+     * was still connecting at the tap): the song moves to Spotify at the same
+     * second, playing or paused as it was, once per song.
      */
     private func spotifyStandInBecameReady() {
         guard Spotify.shared.ready,
@@ -1546,6 +1545,12 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         playYouTubeInstead(track, tag: tag, at: position, play: wasPlaying)
     }
 
+    /**
+     * Whether a tap should go to Spotify: only when its player is connected
+     * and not resting after a failure. A Spotify that is still connecting (or
+     * cannot) used to cost every tap 4 s of silence before YouTube took over;
+     * now the YouTube copy plays at once and Spotify is woken behind it.
+     */
     private func spotifyCanStart() -> Bool {
         if uptime() < spotifyRestUntil { return false }
         if Spotify.shared.ready { return true }
