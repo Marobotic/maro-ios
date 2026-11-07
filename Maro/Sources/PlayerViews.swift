@@ -281,7 +281,7 @@ struct TransportBar: View {
 /**
  * The full-screen view (the desktop's Jamming mode): the red glow from the
  * left, the cover with its title, heart and controls, and the lyrics large
- * below, following the song. "Hide lyrics" leaves the big cover alone; a song
+ * below, following the song. Hiding lyrics leaves the big cover alone; a song
  * with no lyrics at all gets that layout only, with no button, and the choice
  * made comes back with the next song that has lyrics.
  */
@@ -304,24 +304,25 @@ struct JamView: View {
                         Image("LaunchNote").resizable().scaledToFit().frame(width: 26, height: 26)
                         Spacer(minLength: 0)
                         if !noLyrics {
-                            MButton(showLyrics ? "Hide lyrics" : "Show lyrics", kind: .dark) {
+                            TButton(showLyrics ? .chevronDown : .chevronUp, size: 18, box: 32, color: Omp.iconTint) {
                                 withAnimation(.easeOut(duration: 0.22)) { showLyrics.toggle() }
                             }
                             .transition(.opacity)
                         }
-                        MButton("Exit", icon: .close, iconSize: 13, kind: .dark, action: close)
+                        MButton("", icon: .close, iconSize: 13, kind: .dark, action: close)
+                            .accessibilityLabel("Close")
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 12)
                     .frame(minHeight: 52)
                     if lyricsMode {
-                        let side = max(120, min(geo.size.width * 0.5, geo.size.height * 0.26))
-                        VStack(spacing: 20) {
-                            artColumn(side: side, titleSize: 16, big: false)
+                        VStack(spacing: 0) {
                             JamLyrics(lyrics: lyrics, vm: vm)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            JamDock(state: state, vm: vm)
                         }
-                        .padding(.horizontal, 16)
-                        .padding(.bottom, 16)
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 8)
                         .transition(.opacity.combined(with: .offset(y: 12)))
                     } else {
                         let side = min(360, geo.size.height * 0.42, geo.size.width - 48)
@@ -382,6 +383,44 @@ struct JamView: View {
             JamControls(state: state, vm: vm, big: big)
         }
         .frame(width: side)
+    }
+}
+
+/** Compact song and transport dock used only while full-screen lyrics are visible. */
+private struct JamDock: View {
+    let state: UiState
+    @ObservedObject var vm: MaroViewModel
+
+    var body: some View {
+        let track = state.track
+        HStack(spacing: 8) {
+            CoverArt(track: track, icon: Omp.sourceGlyph(track?.source ?? ""), size: 48)
+                .id(track?.id ?? "")
+            VStack(alignment: .leading, spacing: 3) {
+                OmpText(track?.title.ifBlank("Nothing playing") ?? "Nothing playing", size: 13, color: Omp.foreground, bold: true)
+                    .lineLimit(1)
+                if let track, !track.artist.isEmpty {
+                    OmpText(track.artist, size: 11, color: Omp.sourceColor(track.source)).lineLimit(1)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            HeartButton(liked: state.isLiked(track), size: 18, box: 32, color: Omp.iconTint, enabled: track != nil) {
+                if let track { vm.likeTrack(track) }
+            }
+            JamSkip(glyph: .prev, enabled: state.isCurrent, label: "Previous") { vm.previous() }
+            Button { vm.playPause() } label: {
+                Icon(state.playing ? .pause : .play, size: 18, color: Omp.foreground)
+                    .frame(width: 40, height: 40)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(PressStyle(scale: 0.9))
+            .disabled(!(state.isCurrent || !state.queue.isEmpty))
+            .accessibilityLabel(state.playing ? "Pause" : "Play")
+            JamSkip(glyph: .next, enabled: state.isCurrent, label: "Next") { vm.next() }
+        }
+        .padding(8)
+        .background(Omp.tile)
+        .overlay(Rectangle().strokeBorder(Omp.line, lineWidth: 1))
     }
 }
 
