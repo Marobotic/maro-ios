@@ -125,15 +125,16 @@ struct HomeScreen: View {
                     VStack(spacing: 6) {
                         Strip(state: shown, vm: vm)
                         MainTile(state: shown, vm: vm, queueJump: $queueJump, wide: false)
-                        PlayerTile(state: shown, vm: vm, mini: playerMini) {
+                        // Under the home indicator, 6 pt from the curve like the sides;
+                        // the player's content stays where it was, clear of the bar.
+                        PlayerTile(state: shown, vm: vm, mini: playerMini,
+                                   homeBar: max(0, geo.safeAreaInsets.bottom - 26)) {
                             withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) { playerMini.toggle() }
                         }
                     }
                     .padding(.horizontal, 6)
                     .padding(.top, 6)
-                    // Down to just above the home indicator, not a whole inset
-                    // short of it (34 pt of empty page on an iPhone 13).
-                    .padding(.bottom, max(6, geo.safeAreaInsets.bottom - 20))
+                    .padding(.bottom, 6)
                     .ignoresSafeArea(.container, edges: .bottom)
                 }
             }

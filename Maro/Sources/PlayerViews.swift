@@ -10,6 +10,8 @@ struct PlayerTile: View {
     let state: UiState
     @ObservedObject var vm: MaroViewModel
     let mini: Bool
+    /** Room kept clear inside the tile for the home indicator over it. */
+    var homeBar: CGFloat = 0
     /** nil: no arrow (the wide layout keeps the full player). */
     var toggle: (() -> Void)? = nil
 
@@ -22,6 +24,7 @@ struct PlayerTile: View {
                 FullPlayer(state: state, vm: vm, collapse: toggle)
             }
         }
+        .padding(.bottom, homeBar)
         .frame(maxWidth: .infinity)
         // The desktop's ambient: the song's colour glowing in from the top left.
         .background(
@@ -46,18 +49,18 @@ struct PlayerTile: View {
 
     @State private var placed: CGRect = .zero
 
-    /// The bottom corners follow a rounded screen's: its radius minus the
-    /// tile's distance from each edge, at least a third of it, so the tile
-    /// sits inside the curve instead of pointing into it. Square screens stay square.
-    private var corners: ScreenCornerTile {
+    /// The bottom corners follow the screen's, the iPhone way: one radius,
+    /// concentric with the display's corner (its radius minus the tile's
+    /// distance from the edge), on Apple's continuous curve. Square screens stay square.
+    private var corners: UnevenRoundedRectangle {
         let r = ScreenCorners.radius
-        guard r > 0, placed != .zero else { return ScreenCornerTile() }
+        guard r > 0, placed != .zero else { return UnevenRoundedRectangle() }
         let screen = UIScreen.main.bounds
         let bottom = screen.maxY - placed.maxY
-        func corner(_ side: CGFloat) -> CGSize {
-            CGSize(width: max(r - side, r / 3), height: max(r - bottom, r / 3))
-        }
-        return ScreenCornerTile(bottomLeft: corner(placed.minX), bottomRight: corner(screen.maxX - placed.maxX))
+        func corner(_ side: CGFloat) -> CGFloat { max(r - max(side, bottom), r / 3) }
+        return UnevenRoundedRectangle(bottomLeadingRadius: corner(placed.minX),
+                                      bottomTrailingRadius: corner(screen.maxX - placed.maxX),
+                                      style: .continuous)
     }
 }
 
@@ -68,39 +71,6 @@ enum ScreenCorners {
         guard screen.responds(to: Selector(("_displayCornerRadius"))) else { return 0 }
         return (screen.value(forKey: "_displayCornerRadius") as? CGFloat) ?? 0
     }()
-}
-
-/** A rectangle whose bottom corners are quarter ellipses (x and y radius each). */
-struct ScreenCornerTile: InsettableShape {
-    var bottomLeft: CGSize = .zero
-    var bottomRight: CGSize = .zero
-    var inset: CGFloat = 0
-
-    func inset(by amount: CGFloat) -> ScreenCornerTile {
-        var s = self
-        s.inset += amount
-        return s
-    }
-
-    func path(in rect: CGRect) -> Path {
-        let r = rect.insetBy(dx: inset, dy: inset)
-        let k: CGFloat = 0.5523     // a quarter ellipse as one cubic
-        func shrink(_ c: CGSize) -> CGSize { CGSize(width: max(c.width - inset, 0), height: max(c.height - inset, 0)) }
-        let bl = shrink(bottomLeft), br = shrink(bottomRight)
-        var p = Path()
-        p.move(to: CGPoint(x: r.minX, y: r.minY))
-        p.addLine(to: CGPoint(x: r.maxX, y: r.minY))
-        p.addLine(to: CGPoint(x: r.maxX, y: r.maxY - br.height))
-        p.addCurve(to: CGPoint(x: r.maxX - br.width, y: r.maxY),
-                   control1: CGPoint(x: r.maxX, y: r.maxY - br.height * (1 - k)),
-                   control2: CGPoint(x: r.maxX - br.width * (1 - k), y: r.maxY))
-        p.addLine(to: CGPoint(x: r.minX + bl.width, y: r.maxY))
-        p.addCurve(to: CGPoint(x: r.minX, y: r.maxY - bl.height),
-                   control1: CGPoint(x: r.minX + bl.width * (1 - k), y: r.maxY),
-                   control2: CGPoint(x: r.minX, y: r.maxY - bl.height * (1 - k)))
-        p.closeSubpath()
-        return p
-    }
 }
 
 /** The cover in the player: square, a 1 pt red border. */
