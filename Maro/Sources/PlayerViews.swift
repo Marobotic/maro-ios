@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /**
  * The player tile. On a phone it starts as one slim bar (cover, title, the
@@ -30,9 +31,75 @@ struct PlayerTile: View {
                                endRadius: max(geo.size.width, geo.size.height) * 0.75)
             }
         )
-        .tile()
-        .clipped()
+        .background(Omp.tile)
+        .overlay(corners.strokeBorder(Omp.line, lineWidth: 1))
+        .clipShape(corners)
+        .background(
+            GeometryReader { geo in
+                Color.clear
+                    .onAppear { placed = geo.frame(in: .global) }
+                    .onChange(of: geo.frame(in: .global)) { _, f in placed = f }
+            }
+        )
         .animation(.spring(response: 0.32, dampingFraction: 0.86), value: mini)
+    }
+
+    @State private var placed: CGRect = .zero
+
+    /// The bottom corners follow a rounded screen's: its radius minus the
+    /// tile's distance from each edge, at least a third of it, so the tile
+    /// sits inside the curve instead of pointing into it. Square screens stay square.
+    private var corners: ScreenCornerTile {
+        let r = ScreenCorners.radius
+        guard r > 0, placed != .zero else { return ScreenCornerTile() }
+        let screen = UIScreen.main.bounds
+        let bottom = screen.maxY - placed.maxY
+        func corner(_ side: CGFloat) -> CGSize {
+            CGSize(width: max(r - side, r / 3), height: max(r - bottom, r / 3))
+        }
+        return ScreenCornerTile(bottomLeft: corner(placed.minX), bottomRight: corner(screen.maxX - placed.maxX))
+    }
+}
+
+enum ScreenCorners {
+    /// The display's corner radius in points (47.33 on an iPhone 13); 0 on a square screen.
+    static let radius: CGFloat = {
+        let screen = UIScreen.main
+        guard screen.responds(to: Selector(("_displayCornerRadius"))) else { return 0 }
+        return (screen.value(forKey: "_displayCornerRadius") as? CGFloat) ?? 0
+    }()
+}
+
+/** A rectangle whose bottom corners are quarter ellipses (x and y radius each). */
+struct ScreenCornerTile: InsettableShape {
+    var bottomLeft: CGSize = .zero
+    var bottomRight: CGSize = .zero
+    var inset: CGFloat = 0
+
+    func inset(by amount: CGFloat) -> ScreenCornerTile {
+        var s = self
+        s.inset += amount
+        return s
+    }
+
+    func path(in rect: CGRect) -> Path {
+        let r = rect.insetBy(dx: inset, dy: inset)
+        let k: CGFloat = 0.5523     // a quarter ellipse as one cubic
+        func shrink(_ c: CGSize) -> CGSize { CGSize(width: max(c.width - inset, 0), height: max(c.height - inset, 0)) }
+        let bl = shrink(bottomLeft), br = shrink(bottomRight)
+        var p = Path()
+        p.move(to: CGPoint(x: r.minX, y: r.minY))
+        p.addLine(to: CGPoint(x: r.maxX, y: r.minY))
+        p.addLine(to: CGPoint(x: r.maxX, y: r.maxY - br.height))
+        p.addCurve(to: CGPoint(x: r.maxX - br.width, y: r.maxY),
+                   control1: CGPoint(x: r.maxX, y: r.maxY - br.height * (1 - k)),
+                   control2: CGPoint(x: r.maxX - br.width * (1 - k), y: r.maxY))
+        p.addLine(to: CGPoint(x: r.minX + bl.width, y: r.maxY))
+        p.addCurve(to: CGPoint(x: r.minX, y: r.maxY - bl.height),
+                   control1: CGPoint(x: r.minX + bl.width * (1 - k), y: r.maxY),
+                   control2: CGPoint(x: r.minX, y: r.maxY - bl.height * (1 - k)))
+        p.closeSubpath()
+        return p
     }
 }
 
