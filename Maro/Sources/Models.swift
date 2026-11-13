@@ -488,6 +488,20 @@ struct UiState: Equatable {
         return t.trackIds.contains { localAvailable.contains($0) }
     }
 
+    /**
+     * A queue song the repeat mode will not play, drawn dark (the desktop's
+     * .qrow.dk): off skips the songs before the playing one, all skips none,
+     * one skips every song but the playing one. Call it on displayState(),
+     * whose repeat is this phone's own while it plays.
+     */
+    func queueSkips(_ index: Int) -> Bool {
+        switch self.repeat {
+        case "one": return index != queueIndex
+        case "all": return false
+        default: return index < queueIndex
+        }
+    }
+
     func downloadOf(_ row: LibraryRow) -> DownloadJob? { downloads["v3:" + row.source + ":" + row.id] }
 
     /** The device whose speakers the music comes out of. */

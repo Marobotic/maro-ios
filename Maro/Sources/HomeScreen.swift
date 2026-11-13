@@ -16,10 +16,21 @@ private func deviceLabel(_ device: Device) -> String {
     return device.kind == "phone" ? "Phone" : "Desktop"
 }
 
-/** Every connected device; the one playing now in accent-soft, the rest grey. */
+/**
+ * Every connected device; the one playing now in accent-soft, the rest grey.
+ * While this phone plays on its own it lists none (it is out of the shared
+ * player) and offers the way back instead: hidden, solo looked like remote
+ * play had broken.
+ */
 @MainActor
 func devicePicker(_ state: UiState, _ vm: MaroViewModel) -> OmpDialog {
-    .menu(title: "Play on", items: state.pickerDevices().map { device in
+    if state.solo {
+        return .menu(title: "This phone plays on its own", items: [
+            OmpDialog.Item(icon: .wifi, label: "Use my devices", tint: Omp.soft,
+                           detail: "Play on them, control them, share the queue", bold: true) { vm.setSolo(false) },
+        ])
+    }
+    return .menu(title: "Play on", items: state.pickerDevices().map { device in
         OmpDialog.Item(
             icon: .wifi,
             label: deviceLabel(device),
@@ -263,12 +274,10 @@ private struct Strip: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             HStack(spacing: 4) {
                 StripButton(glyph: .info, on: state.statsOpen) { vm.toggleStats() }
-                // Where the music plays, one tap away. Not there while this
-                // phone plays on its own. Accent-soft while this phone plays.
-                if !state.solo {
-                    StripButton(glyph: .wifi, color: state.playingDeviceId == state.myDeviceId ? Omp.soft : Omp.t2) {
-                        present(devicePicker(state, vm))
-                    }
+                // Where the music plays, one tap away (while this phone plays
+                // on its own, the way back). Accent-soft while this phone plays.
+                StripButton(glyph: .wifi, color: state.solo || state.playingDeviceId == state.myDeviceId ? Omp.soft : Omp.t2) {
+                    present(devicePicker(state, vm))
                 }
                 StripButton(glyph: .gear, on: state.settingsOpen) { vm.toggleSettings() }
             }

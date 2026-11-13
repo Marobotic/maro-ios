@@ -245,7 +245,8 @@ struct SongRow: View {
         // The playing row takes its song's service colour (round 2 M.5).
         .background(isCurrent ? Omp.playingColor(track.source).opacity(0.18) : Color.clear)
         .overlay { if isCurrent { Rectangle().strokeBorder(Omp.playingColor(track.source).opacity(0.8), lineWidth: 1) } }
-        .opacity(dimmed ? 0.3 : playable ? 1 : 0.4)
+        // A repeat change fades the row to or from dark, as the desktop's .qrow (.25 s ease).
+        .animation(.easeInOut(duration: 0.22)) { $0.opacity(dimmed ? 0.3 : playable ? 1 : 0.4) }
         .contentShape(Rectangle())
         .onTapGesture {
             if gone.isEmpty { onPlay() } else { vm.showStatus("\(track.title) can't be played: \(gone)", "error") }
@@ -318,7 +319,7 @@ private struct QueueView: View {
                                     playing: state.playing,
                                     liked: state.isLiked(track),
                                     vm: vm,
-                                    dimmed: state.repeat == "one" ? !isCurrent : state.repeat == "off" ? index < state.queueIndex : false,
+                                    dimmed: state.queueSkips(index),
                                     available: state.canPlay(track),
                                     loading: !state.loadingKey.isEmpty,
                                     onRemove: { withAnimation(.easeIn(duration: 0.2)) { vm.removeQueueIndex(index) } },

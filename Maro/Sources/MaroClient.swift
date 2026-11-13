@@ -177,8 +177,9 @@ final class MaroClient: @unchecked Sendable {
      * The engine uploads a track's cover to /covers/<art key> when it resolves
      * it, so the phone asks for the art by the same key the desktop would.
      */
-    func cover(_ key: String) async -> Data? {
-        var req = request(Self.base + "/covers/" + Self.escape(key))
+    /** A cover by the droplet's key; `px` > 0 asks for it at about that size (WebP), not whole. */
+    func cover(_ key: String, px: Int = 0) async -> Data? {
+        var req = request(Self.base + "/covers/" + Self.escape(key) + (px > 0 ? "?px=\(px)" : ""))
         req.setValue("image/*", forHTTPHeaderField: "Accept")
         return await raw(req)
     }

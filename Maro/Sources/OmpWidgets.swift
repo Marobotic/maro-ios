@@ -344,11 +344,11 @@ struct CoverArt: View {
                     if Task.isCancelled { return }
                     if let quick { image = quick }
                 }
-                // A row is done once it shows that. The droplet's chosen
-                // cover is a 1200 px picture: fetched for every row on 4G it
-                // crowded out the rows and the music, so only a big box (the
-                // full-screen cover, a card) asks for it, or a row whose copy
-                // is on the phone already.
+                // A row is done once it shows that: one request per row. The
+                // droplet's chosen cover (at this box's ?px= step) is asked
+                // for by a big box (the full-screen cover, a card), a row
+                // with no picture of its own, or a row whose copy is on the
+                // phone already.
                 if image != nil && !big && !have { return }
                 guard !key.isEmpty, loader.cached(key) == nil else { return }
                 for attempt in 0..<3 {

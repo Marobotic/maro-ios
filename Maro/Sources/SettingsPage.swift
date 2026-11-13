@@ -114,9 +114,15 @@ struct SettingsPage: View {
             present(.name(title: "Device name", placeholder: Omp.defaultPhoneName, confirm: "Save", initial: state.deviceName) { vm.setDeviceName($0) })
         }
         SettingsAction(label: "Console", value: "\(console.entries.count) entries", action: "Open") { showingConsole = true }
-        // Off: part of the account's one shared player. On: this
-        // phone plays on its own and leaves the device lists.
-        SettingsSwitch(label: "Play music on this device only", on: state.solo) { vm.setSolo($0) }
+        // Off: part of the account's one shared player. On: this phone
+        // plays on its own and leaves the device lists. A whole-row tap
+        // turned it on unnoticed (as on an Android phone), so on asks first;
+        // off is one tap.
+        SettingsSwitch(label: "Play music on this device only", on: state.solo) { on in
+            if !on { return vm.setSolo(false) }
+            present(.confirm(message: "Play music on this phone only? It leaves your devices: they can't see or control it, and it can't play on them or follow their queue.",
+                             confirm: "Play here only") { vm.setSolo(true) })
+        }
         SettingsSwitch(label: "Keep songs on this phone",
                        value: state.songs.isEmpty ? "" : "\(state.songs.count) saved",
                        on: state.savingOffline) { vm.setSavingOffline($0) }

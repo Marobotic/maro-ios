@@ -278,33 +278,16 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         if isPhone && (old.localTrack != state.localTrack || old.localPlaying != state.localPlaying) {
             updateNowPlaying()
         }
-        // A list that arrived or changed: its covers onto the phone before
-        // they are scrolled to.
-        for (name, was, list) in [("playlist", old.playlistTracks, state.playlistTracks), ("discover", old.discoverTracks, state.discoverTracks),
-                                  ("search", old.searchResults, state.searchResults), ("queue", old.localQueue, state.localQueue),
-                                  ("recent", old.recent, state.recent)]
-        where was.count != list.count || was.first?.id != list.first?.id {
-            ArtLoader.shared.prefetch(list, list: name)
-        }
-        // The library: every playlist kept on the phone, read once.
-        if old.library.count != state.library.count && !NetworkWatch.expensive { prefetchLibraryArt(state.library) }
-        // And their kept song lists counted, so each row shows what we hold.
+        // Covers are not read ahead for whole lists (every song of a playlist,
+        // every kept playlist of the library): a list's rows read theirs as
+        // they come on screen, with the rows around them (VisibleRows).
+        // The library's kept song lists counted, so each row shows what we hold.
         if old.library != state.library { loadKeptCounts(state.library) }
         // A service signed in from "How do you want to listen?": into the app.
         if (state.listenGate == "pick" || (state.listenGate == "checking" && !state.unreachableServices.isEmpty)) && !state.services.isEmpty { setGate("in") }
         // Round 2 L: never left on a hidden tab - an empty queue or no lyrics lands on Library.
         if (state.view == Sync.viewQueue && state.displayState().queue.isEmpty) || (state.view == Sync.viewLyrics && state.noLyrics) {
             state.view = Sync.viewPlaylists
-        }
-    }
-
-    private func prefetchLibraryArt(_ rows: [LibraryRow]) {
-        let keys = rows.filter { !$0.isHeader && !$0.id.isEmpty }.map { playlistKey($0) }
-        let cache = deviceCache
-        Task.detached(priority: .utility) {
-            for key in keys {
-                if let kept = cache.playlist(key) { ArtLoader.shared.prefetch(kept.tracks, list: "kept:" + key, onDisk: true) }
-            }
         }
     }
 
@@ -2708,7 +2691,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             if delivered {
                 for _ in 1...30 {
                     await sleep(seconds: 1)
-                    if let data = await client.cover(artKey), !data.isEmpty {
+                    if let data = await client.cover(artKey, px: ArtSize.steps[0]), !data.isEmpty {
                         found = true
                         break
                     }
@@ -2729,15 +2712,18 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
      * and stay on disk for good.
      */
     func prefetchArt(_ artKey: String) {
-        if artKey.isEmpty || ArtLoader.shared.has(artKey) || !artFetched.insert(artKey).inserted { return }
+        // A row whose art is a picture URL draws it straight away: nothing to ask the desktop for.
+        if artKey.isEmpty || artKey.hasPrefix("http") || ArtLoader.shared.has(artKey) || !artFetched.insert(artKey).inserted { return }
         Task {
-            if await client.postAction("art.fetch", ["ids": [artKey]]) {
-                for _ in 1...15 {
-                    await sleep(seconds: 1)
-                    if let data = await client.cover(artKey), !data.isEmpty { break }
+            guard await client.postAction("art.fetch", ["ids": [artKey]]) else { return }
+            for _ in 1...15 {
+                await sleep(seconds: 1)
+                // Checked with the smallest copy; the tile reads its own size once it is there.
+                if let data = await client.cover(artKey, px: ArtSize.steps[0]), !data.isEmpty {
+                    ArtLoader.shared.invalidate(artKey)
+                    return
                 }
             }
-            ArtLoader.shared.invalidate(artKey)
         }
     }
 

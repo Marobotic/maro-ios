@@ -6,8 +6,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.10"
-    MARKETING_VERSION: "0.2.8"
-    CURRENT_PROJECT_VERSION: "45"
+    MARKETING_VERSION: "0.2.9"
+    CURRENT_PROJECT_VERSION: "46"
 targets:
   Maro:
     type: application
@@ -61,6 +61,8 @@ targets:
     deploymentTarget: "14.0"
     sources:
       - path: Maro/Sources/DeviceCrypto.swift
+      # And how big a cover each box asks for (Foundation only, like the crypto).
+      - path: Maro/Sources/ArtSize.swift
       - path: MaroTests
     settings:
       base:

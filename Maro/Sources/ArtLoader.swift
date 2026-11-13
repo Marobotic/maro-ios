@@ -7,10 +7,13 @@ import UIKit
  * Cover art for rows, the now-playing card and the lock screen.
  *
  * Decoded images stay in memory at the size they are drawn, bytes stay on
- * disk, and the network is the last resort. Decoding happens off the main
- * thread and is downsampled, so a 640 px JPEG never lands in a 30 pt row.
- * Spotify and Google serve the same image at smaller sizes, so small slots
- * ask for a small file too.
+ * disk, and the network is the last resort: nothing is downloaded twice.
+ * Every request names the size of the box it is for (ArtSize): the droplet's
+ * chosen cover at its nearest ?px= step, Spotify / Google / YouTube /
+ * SoundCloud at their nearest variant. A row is a ~10-20 KB thumbnail; only a
+ * big box on screen (the full player, the lock screen) asks for a big one.
+ * Covers load when their box draws, and ahead only for the rows around the
+ * ones on screen - never a whole list, never a page not opened.
  */
 final class ArtLoader: ObservableObject, @unchecked Sendable {
     static let shared = ArtLoader()
@@ -47,13 +50,14 @@ final class ArtLoader: ObservableObject, @unchecked Sendable {
     //
     // One cover per song, chosen by the droplet (YouTube Music's sleeve, else
     // Spotify's, else SoundCloud's, else the video's still) and answered for
-    // every id the song is known by. Kept here once, as the droplet has it,
-    // and scaled to exactly each box's pixel size the first time that box
-    // draws it:
+    // every id the song is known by. Fetched at the droplet's size step for
+    // the box (?px=, WebP), kept once per step, and scaled to exactly each
+    // box's pixel size the first time that box draws it:
     //
-    //   covers/songs/<master>.jpg        the droplet's picture
-    //   covers/songs/<master>@<px>.jpg   the same, exactly px x px
-    //   covers/songs/index.json          art key -> master, version
+    //   covers/songs/<master>~<step>.img       the droplet's picture at that step
+    //   covers/songs/<master>~<step>@<px>.jpg  the same, exactly px x px
+    //   covers/songs/<master>.jpg              a full-size copy kept before ?px=
+    //   covers/songs/index.json                art key -> master, version
     //
     // A cover that changes on the droplet (Fix artwork anywhere, or a song's
     // first proper cover replacing an old copy) arrives through syncChanges().
@@ -112,28 +116,33 @@ final class ArtLoader: ObservableObject, @unchecked Sendable {
     /** A song row's cover in pixels, as the rows last drew it (prefetch asks the same size). */
     var rowPx = 84
 
-    /** Whether this song's chosen cover is on the phone already. */
+    /** Whether this song's chosen cover is on the phone already, at any size. */
     func hasSong(_ t: Track) -> Bool {
         guard !t.artKey.isEmpty, let have = withIndex({ index[t.artKey] }) else { return false }
-        return Self.size(of: masterFile(have.master)) > 0
+        return songFile(have.master, atLeast: 0) != nil
     }
 
     private var jobs: [String: Task<Void, Never>] = [:]
     private let jobsLock = NSLock()
 
+    /** How far around the rows on screen covers are read ahead: a screen and a half below, half a screen above. */
+    static let aheadBelow = 24
+    static let aheadAbove = 8
+
     /**
-     * A list's covers ahead of being shown, decoded at row size into memory,
-     * so a row scrolled - or flung - to draws its picture in its first frame
-     * (rows used to wait for a fetch and a decode once drawn, and a fling
-     * showed blank boxes). Rows nearest `around` first: the droplet's chosen
-     * cover when it is on the phone, else the song's own picture. A new call
-     * for the same `list` replaces the old one. `onDisk` only: the pictures
-     * onto the disk, nothing decoded - for lists not on screen.
+     * The covers of the rows around `around` (a row on screen), decoded at
+     * row size into memory, so a row scrolled - or flung - to draws its
+     * picture in its first frame. Only that window, nearest first, never the
+     * whole list: a long playlist used to download every cover as it opened.
+     * The droplet's chosen cover when it is on the phone, else the song's own
+     * picture as a row-sized thumbnail. A new call for the same `list`
+     * replaces the old one.
      */
-    func prefetch(_ tracks: [Track], list: String, around: Int = 0, onDisk: Bool = false) {
-        if onDisk { return prefetchToDisk(tracks) }
+    func prefetch(_ tracks: [Track], list: String, around: Int) {
         let px = rowPx
-        let order = tracks.indices.sorted { abs($0 - around) < abs($1 - around) }.map { tracks[$0] }
+        let lo = max(0, around - Self.aheadAbove), hi = min(tracks.count, around + Self.aheadBelow)
+        guard lo < hi else { return }
+        let order = (lo..<hi).sorted { abs($0 - around) < abs($1 - around) }.map { tracks[$0] }
         let width = NetworkWatch.expensive ? 3 : 8
         let job = Task.detached(priority: .userInitiated) { [weak self] in
             var at = 0
@@ -162,57 +171,58 @@ final class ArtLoader: ObservableObject, @unchecked Sendable {
         if !t.artUrl.isEmpty { _ = await load(artKey: "", artUrl: t.artUrl, px: px) }
     }
 
-    private func prefetchToDisk(_ tracks: [Track]) {
-        let px = rowPx
-        let urls = tracks.compactMap { t -> String? in
-            guard !t.artUrl.isEmpty, !hasSong(t) else { return nil }
-            let u = Self.sized(t.artUrl, px)
-            return u.isEmpty || Self.size(of: diskFile(u)) > 0 ? nil : t.artUrl
-        }
-        guard !urls.isEmpty else { return }
-        Task.detached(priority: .utility) { [weak self] in
-            await withTaskGroup(of: Void.self) { group in
-                var next = 0
-                // On 4G a few at a time, so the rows on screen and the music
-                // are not crowded out.
-                for _ in 0..<min(NetworkWatch.expensive ? 2 : 8, urls.count) {
-                    let u = urls[next]; next += 1
-                    group.addTask { _ = await self?.bytesFor(artKey: "", artUrl: u, px: px) }
-                }
-                while await group.next() != nil, next < urls.count {
-                    let u = urls[next]; next += 1
-                    group.addTask { _ = await self?.bytesFor(artKey: "", artUrl: u, px: px) }
-                }
-            }
-        }
-    }
-
     func loadSong(_ t: Track, px: Int) async -> UIImage? {
         let key = songKey(t, px: px)
         if key.isEmpty || px <= 0 { return nil }
         if let hit = memory.object(forKey: key as NSString) { return hit }
-        guard let master = await masterFor(t), let image = scaled(master, px: px) else { return nil }
+        guard let file = await songFileFor(t, px: px), let image = scaled(file, px: px) else { return nil }
         memory.setObject(image, forKey: key as NSString, cost: px * px * 4)
         return image
     }
 
+    /** A full-size copy, as kept before the droplet took ?px= (and old per-id copies). */
     private func masterFile(_ master: String) -> URL { songDir.appendingPathComponent(master + ".jpg") }
 
-    /** The master picture for this song on disk, fetched once. */
-    private func masterFor(_ t: Track) async -> URL? {
-        if let have = withIndex({ index[t.artKey] }), Self.size(of: masterFile(have.master)) > 0 {
-            return masterFile(have.master)
+    private func stepFile(_ master: String, _ step: Int) -> URL { songDir.appendingPathComponent("\(master)~\(step).img") }
+
+    /** The smallest copy of this master on the phone that fills `step` px, else nil. */
+    private func songFile(_ master: String, atLeast step: Int) -> URL? {
+        for s in ArtSize.steps where s >= step {
+            let f = stepFile(master, s)
+            if Self.size(of: f) > 0 { return f }
         }
-        let q = Self.query(t).map { "\($0.0)=\(MaroClient.escape($0.1))" }.joined(separator: "&")
+        let full = masterFile(master)
+        return Self.size(of: full) > 0 ? full : nil
+    }
+
+    /** Every file kept for a master: its copies and their scaled boxes. */
+    private func removeFiles(of master: String) {
+        let files = (try? FileManager.default.contentsOfDirectory(at: songDir, includingPropertiesForKeys: nil)) ?? []
+        for f in files where Self.belongs(f, to: master) { try? FileManager.default.removeItem(at: f) }
+    }
+
+    private static func belongs(_ file: URL, to master: String) -> Bool {
+        let n = file.lastPathComponent
+        return n == master + ".jpg" || n.hasPrefix(master + "@") || n.hasPrefix(master + "~")
+    }
+
+    /**
+     * This song's cover for a box of `px` pixels: a copy on the phone that is
+     * big enough, else the droplet's picture at the step for `px`, fetched
+     * once and kept.
+     */
+    private func songFileFor(_ t: Track, px: Int) async -> URL? {
+        let step = ArtSize.step(px)
+        if let have = withIndex({ index[t.artKey] }), let file = songFile(have.master, atLeast: step) { return file }
+        let q = (Self.query(t) + [("px", String(step))]).map { "\($0.0)=\(MaroClient.escape($0.1))" }.joined(separator: "&")
         guard let got = await client?.songCover(t.artKey, query: q) else { return nil }
+        // An old per-id copy comes back whole and with no master: kept as one.
         let master = got.master.isEmpty ? Self.safe(t.artKey) : got.master
-        let file = masterFile(master)
-        let same = withIndex { index.values.contains { $0.master == master && $0.version == got.version } }
-        if !(same && Self.size(of: file) > 0) {
-            try? got.bytes.write(to: file, options: .atomic)
-            let files = (try? FileManager.default.contentsOfDirectory(at: songDir, includingPropertiesForKeys: nil)) ?? []
-            for f in files where f.lastPathComponent.hasPrefix(master + "@") { try? FileManager.default.removeItem(at: f) }
-        }
+        let file = got.master.isEmpty ? masterFile(master) : stepFile(master, step)
+        let known = withIndex { index.values.first { $0.master == master }?.version }
+        // The picture changed on the droplet: every older copy of it goes.
+        if let known, known != got.version { removeFiles(of: master) }
+        try? got.bytes.write(to: file, options: .atomic)
         withIndex {
             for (k, v) in index where v.master == master && v.version != got.version { index[k] = (master, got.version) }
             index[t.artKey] = (master, got.master.isEmpty ? 0 : got.version)
@@ -221,11 +231,13 @@ final class ArtLoader: ObservableObject, @unchecked Sendable {
         return file
     }
 
-    /** The master at exactly px x px, made once and kept beside it. */
+    /** A kept copy at exactly px x px, made once and kept beside it. */
     private func scaled(_ master: URL, px: Int) -> UIImage? {
         let out = songDir.appendingPathComponent(master.deletingPathExtension().lastPathComponent + "@\(px).jpg")
         if let data = try? Data(contentsOf: out), let image = UIImage(data: data) { return image }
-        guard let source = CGImageSourceCreateWithURL(master as CFURL, nil),
+        // From the bytes: the droplet's copies are WebP in a .img file.
+        guard let bytes = try? Data(contentsOf: master),
+              let source = CGImageSourceCreateWithData(bytes as CFData, nil),
               let full = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return nil }
         let side = min(full.width, full.height)
         let square = full.cropping(to: CGRect(x: (full.width - side) / 2, y: (full.height - side) / 2,
@@ -263,7 +275,7 @@ final class ArtLoader: ObservableObject, @unchecked Sendable {
             let inUse = Set(index.values.map(\.master))
             let files = (try? FileManager.default.contentsOfDirectory(at: songDir, includingPropertiesForKeys: nil)) ?? []
             for m in gone.subtracting(inUse) {
-                for f in files where f.lastPathComponent == m + ".jpg" || f.lastPathComponent.hasPrefix(m + "@") {
+                for f in files where Self.belongs(f, to: m) {
                     try? FileManager.default.removeItem(at: f)
                 }
             }
@@ -330,13 +342,15 @@ final class ArtLoader: ObservableObject, @unchecked Sendable {
     private func bytesFor(artKey: String, artUrl: String, px: Int) async -> Data? {
         let url = Self.sized(artUrl, px)
         let file: URL
-        if !url.isEmpty { file = diskFile(url) } else if !artKey.isEmpty { file = diskFile("key:\(artKey)") } else { return nil }
+        if !url.isEmpty { file = diskFile(url) } else if !artKey.isEmpty { file = diskFile(Self.keyId(artKey, ArtSize.step(px))) } else { return nil }
         if let data = try? Data(contentsOf: file), !data.isEmpty { return data }
+        // A whole copy kept before size steps does for any box: not fetched again.
+        if url.isEmpty, let data = try? Data(contentsOf: diskFile("key:\(artKey)")), !data.isEmpty { return data }
         if !url.isEmpty, let data = await client?.coverURL(url), !data.isEmpty {
             try? data.write(to: file, options: .atomic)
             return data
         }
-        if !artKey.isEmpty, let data = await client?.cover(artKey), !data.isEmpty {
+        if !artKey.isEmpty, let data = await client?.cover(artKey, px: ArtSize.step(px)), !data.isEmpty {
             try? data.write(to: file, options: .atomic)
             return data
         }
@@ -348,7 +362,7 @@ final class ArtLoader: ObservableObject, @unchecked Sendable {
     /** Any already-cached resolution of the same art, largest first. */
     private func fallback(artKey: String, artUrl: String) -> URL? {
         var candidates: [String] = []
-        if !artKey.isEmpty { candidates.append("key:\(artKey)") }
+        if !artKey.isEmpty { candidates += Self.keyIds(artKey) }
         if !artUrl.isEmpty {
             for px in [48, 80, 320, 640, 960, 1280] {
                 let u = Self.sized(artUrl, px)
@@ -367,7 +381,7 @@ final class ArtLoader: ObservableObject, @unchecked Sendable {
     /** Forget one cover everywhere and redraw it; for "Download artwork". */
     @MainActor
     func invalidate(_ artKey: String) {
-        try? FileManager.default.removeItem(at: diskFile("key:\(artKey)"))
+        for id in Self.keyIds(artKey) { try? FileManager.default.removeItem(at: diskFile(id)) }
         // NSCache cannot list its keys, so drop the lot; rows reload from disk.
         memory.removeAllObjects()
         epoch += 1
@@ -381,7 +395,11 @@ final class ArtLoader: ObservableObject, @unchecked Sendable {
         epoch += 1
     }
 
-    func has(_ artKey: String) -> Bool { Self.size(of: diskFile("key:\(artKey)")) > 0 }
+    func has(_ artKey: String) -> Bool { Self.keyIds(artKey).contains { Self.size(of: diskFile($0)) > 0 } }
+
+    /** A cover kept by the droplet's key, one file per ?px= step; "key:<k>" alone is a whole one kept before steps. */
+    private static func keyId(_ artKey: String, _ step: Int) -> String { "key:\(artKey)@\(step)" }
+    private static func keyIds(_ artKey: String) -> [String] { ["key:\(artKey)"] + ArtSize.steps.map { keyId(artKey, $0) } }
 
     func diskBytes() -> Int64 {
         let files = FileManager.default.enumerator(at: diskDir, includingPropertiesForKeys: nil)?
@@ -421,22 +439,6 @@ final class ArtLoader: ObservableObject, @unchecked Sendable {
         return diskDir.appendingPathComponent(digest + ".img")
     }
 
-    /**
-     * Ask the CDN for an image near [px]. Spotify's album art ids carry the
-     * size (ab67616d 0000b273 = 640, 00001e02 = 300, 00004851 = 64); Google
-     * image URLs end in =wN-hN.
-     */
-    static func sized(_ url: String, _ px: Int) -> String {
-        guard url.hasPrefix("http://") || url.hasPrefix("https://") else { return "" }
-        if url.contains("i.scdn.co/image/ab67616d") {
-            let want = px <= 80 ? "00004851" : px <= 320 ? "00001e02" : "0000b273"
-            return url.replacingOccurrences(of: "ab67616d0000(b273|1e02|4851)", with: "ab67616d\(want)", options: .regularExpression)
-        }
-        if (url.contains("googleusercontent.com") || url.contains("ggpht.com")),
-           url.range(of: "=w\\d+-h\\d+", options: .regularExpression) != nil {
-            let side = max(px, 60)
-            return url.replacingOccurrences(of: "=w\\d+-h\\d+", with: "=w\(side)-h\(side)", options: .regularExpression)
-        }
-        return url
-    }
+    /** The same picture's URL near [px] (ArtSize.sized). */
+    static func sized(_ url: String, _ px: Int) -> String { ArtSize.sized(url, px) }
 }
