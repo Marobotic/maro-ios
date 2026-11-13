@@ -759,6 +759,13 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     private var lastPublishedPlaying = false
     private var publishedOnce = false
 
+    /** Another live device holds the shared player (`PlayerOwner`); a gone owner holds nothing. */
+    private var otherDeviceHoldsPlayer: Bool {
+        guard !solo, let doc = playerDoc else { return false }
+        let live = Set(state.devices.filter(\.connected).map(\.id))
+        return PlayerOwner.otherHolds(owner: doc.str("device"), me: deviceId(), queueCount: playerQueue.count, connected: live)
+    }
+
     /** What the shared player is doing right now. */
     private func syncPlayer() async {
         if solo { return }
@@ -774,6 +781,12 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             doc = full                          // a queue change we did not get the list for
         }
         if let prev = playerDoc, doc.int("rev") < prev.int("rev") { return }
+        // A device that took the player since the last list (a phone that just
+        // opened) is looked up now: if live it is the remote, so this phone stops.
+        let claimer = doc.str("device")
+        if !claimer.isEmpty && claimer != deviceId() && !state.devices.contains(where: { $0.id == claimer }) {
+            await pullAccount()
+        }
         if doc["queue"] != nil {
             playerQueue = Sync.tracks(doc.arr("queue")).map(giveVideoId)
             playerQueueRev = doc.int("queueRev")
@@ -781,6 +794,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         playerDoc = doc
         let device = doc.str("device")
         let active = device == deviceId()
+        // A gone owner's state is not shown and never pauses this phone.
+        if !active && !otherDeviceHoldsPlayer { return }
         let wasActive = playerActive
         playerActive = active
         let queue = playerQueue
@@ -856,9 +871,9 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     private func publishPlayer(force: Bool = false) async {
         guard !solo, state.signedIn, isPhone else { return }
         let owner = playerDoc?.str("device") ?? ""
-        if !owner.isEmpty && owner != deviceId() { return }
+        if otherDeviceHoldsPlayer { return }
         let s = state
-        if owner.isEmpty && !s.localPlaying && !force { return }
+        if owner != deviceId() && !s.localPlaying && !force { return }
         let now = uptime()
         let pos = progress.at(now)
         let key: [AnyHashable] = [s.localQueueIndex, s.localPlaying, s.localShuffle, s.localRepeat, s.volume, s.localQueueName,
@@ -937,7 +952,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     /** Play `tracks` from `index`, here or on whichever device plays. */
     private func playList(_ tracks: [Track], _ index: Int, name: String?) {
         if tracks.isEmpty { return }
-        if isPhone { return playLocalQueue(tracks, index, name: name) }
+        // Another live device plays: it gets the list (a phone included).
+        if isPhone && !otherDeviceHoldsPlayer { return playLocalQueue(tracks, index, name: name) }
         let start = min(max(index, 0), tracks.count - 1)
         showRemote(tracks[start], start)
         state.queue = tracks
@@ -1008,7 +1024,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         var s = base
         // On the shared player, the queue and song come from it, not from the
         // desktop's snapshot.
-        let shared = playerDoc != nil && !solo
+        let shared = playerDoc != nil && !solo && (otherDeviceHoldsPlayer || playerActive)
         if !shared {
             s.queue = Sync.tracks(snap.arr("queue")).map(giveVideoId)
             s.queueIndex = snap.int("queueIndex", base.queueIndex)
@@ -1072,7 +1088,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             return
         case "nowPlaying":
             // The shared player says what plays; this is the old way.
-            if playerDoc != nil && !solo { return }
+            if playerDoc != nil && !solo && (otherDeviceHoldsPlayer || playerActive) { return }
             let t = Relay.trackFromNowPlaying(p)
             if !t.id.isEmpty || !t.title.isEmpty { state.track = t }
             state.playing = p.bool("playing", state.playing)
@@ -4552,7 +4568,7 @@ extension MaroViewModel: DeviceLinkHost {
 
     func linkStatus(_ message: String, _ kind: String) { showStatus(message, kind) }
 
-    var linkPlayingDevice: String { playerDoc?.str("device") ?? "" }
+    var linkPlayingDevice: String { otherDeviceHoldsPlayer || playerActive ? playerDoc?.str("device") ?? "" : "" }
 
     var linkPlayingHere: Bool { isPhone && state.localPlaying }
 

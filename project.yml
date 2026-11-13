@@ -7,7 +7,7 @@ settings:
   base:
     SWIFT_VERSION: "5.10"
     MARKETING_VERSION: "0.2.9"
-    CURRENT_PROJECT_VERSION: "46"
+    CURRENT_PROJECT_VERSION: "47"
 targets:
   Maro:
     type: application
@@ -63,6 +63,8 @@ targets:
       - path: Maro/Sources/DeviceCrypto.swift
       # And how big a cover each box asks for (Foundation only, like the crypto).
       - path: Maro/Sources/ArtSize.swift
+      # Who holds the shared player (a gone owner holds nothing).
+      - path: Maro/Sources/PlayerOwner.swift
       - path: MaroTests
     settings:
       base:
