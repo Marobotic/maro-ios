@@ -14,6 +14,7 @@ enum Glyph: Hashable {
     case trash, trashSmall, refresh, refreshAlt, addQueue, search, close, plus
     case heart, check, radio, download, link, bell
     case spotify, ytm, sc, cloud, clear, edit, warning, note, brush, user, disc, thumbsUp, pixelNote
+    case people, more
 }
 
 /** One piece of a glyph: drawn as a line, filled, or both (the desktop's fill + stroke polygons). */
@@ -136,6 +137,11 @@ enum GlyphBook {
         case .brush: return ([("M18 3l3 3-9 9-3-3z", .stroke), ("M9 12c-3 0-5 2-5 5 0 1-1 2-2 2 2 2 7 2 9-1 1-1.5 1-3.5 1-3", .stroke)], 2)
         case .user: return ([("M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2", .stroke), (circle(12, 7, 4), .stroke)], 2)
         case .disc: return ([(circle(12, 12, 10), .stroke), (circle(12, 12, 2), .stroke)], 2)
+        // Listen together: the desktop's people button (SVG_PEOPLE in ui/together.ts).
+        case .people:
+            return ([("M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2", .stroke), (circle(9, 7, 4), .stroke),
+                     ("M22 21v-2a4 4 0 0 0-3-3.87", .stroke), ("M16 3.13a4 4 0 0 1 0 7.75", .stroke)], 2)
+        case .more: return ([(circle(5, 12, 1.6), .fill), (circle(12, 12, 1.6), .fill), (circle(19, 12, 1.6), .fill)], 2)
         }
     }
 

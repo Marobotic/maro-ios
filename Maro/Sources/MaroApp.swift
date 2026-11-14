@@ -27,6 +27,8 @@ struct MaroApp: App {
                     LoginScreen(vm: vm)
                 }
             }
+            // A jam link: jukebox://jam/<code> (and the share link, once universal links are set up).
+            .onOpenURL { vm.openLink($0) }
             .preferredColorScheme(.dark)
             .tint(Omp.themeAccent)
             // The local route while open; the YouTube Music role moves after a

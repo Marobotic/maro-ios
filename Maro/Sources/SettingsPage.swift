@@ -26,6 +26,7 @@ struct SettingsPage: View {
                         LazyVStack(alignment: .leading, spacing: 2) {
                             accounts
                             playback
+                            TogetherPrivacy(together: vm.together)
                             quality
                             library
                             storedData
@@ -204,7 +205,7 @@ struct SettingsPage: View {
 }
 
 /** The page head: the Back button and the title. */
-private struct SettingsTop<Trailing: View>: View {
+struct SettingsTop<Trailing: View>: View {
     let title: String
     let onBack: () -> Void
     @ViewBuilder var trailing: () -> Trailing
@@ -469,7 +470,7 @@ func presentShareSheet(_ text: String, subject: String = "") {
 }
 
 /** A section head: red, uppercase, letter-spaced. */
-private struct SettingsHead: View {
+struct SettingsHead: View {
     let label: String
     var first = false
 
@@ -567,6 +568,19 @@ private struct SettingsSwitch: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+}
+
+/** Listen together's two privacy switches (the account's /social/settings). */
+private struct TogetherPrivacy: View {
+    @ObservedObject var together: Together
+
+    var body: some View {
+        SettingsHead(label: "Listening together")
+        SettingsSwitch(label: "Share what I'm listening to", value: together.shareListening ? "Friends see it" : "Hidden",
+                       on: together.shareListening) { together.setShareListening($0) }
+        SettingsSwitch(label: "Let friends join what I play", on: together.friendsCanJoin) { together.setFriendsCanJoin($0) }
+            .task { await together.loadSettings() }
     }
 }
 

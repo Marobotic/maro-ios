@@ -195,12 +195,40 @@ enum AudioCache {
     }
 }
 
-/** Write the whole song to [dir]. Runs off the main actor. */
+/** Write the whole song to [dir]. Runs off the main actor; `transfer` (a Transfers row) follows its bytes. */
 enum AudioSaver {
-    static func saveTo(_ videoId: String, dir: URL, client: MaroClient) async throws -> URL {
+    static func saveTo(_ videoId: String, dir: URL, client: MaroClient, transfer: Int? = nil) async throws -> URL {
+        if let transfer { await Transfers.shared.begin(transfer) }
+        do {
+            let target = try await download(videoId, dir: dir, client: client, transfer: transfer)
+            if let transfer {
+                let size = ((try? FileManager.default.attributesOfItem(atPath: target.path))?[.size] as? NSNumber)?.int64Value ?? 0
+                await Transfers.shared.progress(transfer, done: size, total: size)
+                await Transfers.shared.finish(transfer)
+            }
+            return target
+        } catch {
+            if let transfer { await Transfers.shared.fail(transfer, error.localizedDescription) }
+            throw error
+        }
+    }
+
+    private static func download(_ videoId: String, dir: URL, client: MaroClient, transfer: Int?) async throws -> URL {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let req = client.request(MaroClient.audioURL(videoId).absoluteString, timeout: 60)
-        let (temp, resp) = try await client.http.download(for: req)
+        // The bytes so far, four times a second, while the row is on the list.
+        let watch = TransferWatch()
+        let poll = transfer.map { id in
+            Task.detached {
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    let (got, of) = watch.bytes
+                    await Transfers.shared.progress(id, done: got, total: of)
+                }
+            }
+        }
+        defer { poll?.cancel() }
+        let (temp, resp) = try await client.http.download(for: req, delegate: watch)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(code) else {
             try? FileManager.default.removeItem(at: temp)

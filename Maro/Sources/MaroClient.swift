@@ -444,6 +444,29 @@ final class MaroClient: @unchecked Sendable {
         }
     }
 
+    // -- listening together (plans/listen-together-api.md) --
+
+    /**
+     * One /friends, /social, /jam or /invites call: the answer with ok true,
+     * or {ok: false, error, status} with the server's own words (written for
+     * people, shown as they are).
+     */
+    func social(_ method: String, _ path: String, body: JSON? = nil) async -> JSON {
+        guard session != nil else { return ["ok": false, "error": "Sign in to your Jukebox account first", "signin": true] }
+        guard let got = await answer(method, path, body: body, timeout: 15) else {
+            return ["ok": false, "error": "Could not reach the music server"]
+        }
+        var out = got.body
+        if got.code >= 400 || out["ok"] as? Bool == false {
+            out["error"] = out.str("error").ifEmpty("The music server answered \(got.code)")
+            out["ok"] = false
+            out["status"] = got.code
+            return out
+        }
+        out["ok"] = true
+        return out
+    }
+
     /** A playlist's stored song list ({tracks, savedAt, snapshotId}) by "source:id", or nil. */
     func savedPlaylist(_ key: String) async -> JSON? {
         guard let got = await answer("GET", "/playlists/" + Self.escape(key)), (200..<300).contains(got.code) else { return nil }

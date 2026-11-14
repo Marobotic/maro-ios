@@ -7,9 +7,10 @@ on the phone itself with AVPlayer (lock screen and Control Center included).
 ## Build
 
 There is no Xcode project in the repo: `project.yml` is an
-[XcodeGen](https://github.com/yonaskolb/XcodeGen) spec. Every push to `main`
-runs `.github/workflows/build.yml` on a macOS runner, which generates the
-project and builds an unsigned `Maro.ipa` (artifact `Maro-ipa`).
+[XcodeGen](https://github.com/yonaskolb/XcodeGen) spec. `.github/workflows/build.yml` runs on a macOS
+runner only when started by hand (Actions > Build > Run workflow, any branch)
+or for a `v*` tag, never on a push; it generates the project and builds an
+unsigned `Maro.ipa` (artifact `Maro-ipa`).
 
 ## Install (free Apple ID)
 

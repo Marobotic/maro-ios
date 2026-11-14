@@ -28,6 +28,7 @@ struct ViewArea: View {
             case Sync.viewSongs: SongsView(state: state, vm: vm)
             case Sync.viewRecent: RecentView(state: state, vm: vm)
             case Sync.viewSearch: SearchView(state: state, vm: vm)
+            case Sync.viewTransfers: TransfersView()
             default: QueueView(state: state, vm: vm, jump: queueJump)
             }
         }
@@ -182,6 +183,8 @@ struct SongRow: View {
     var loading = false
     /** On an album page the album is left out of the row (it is the page). */
     var showAlbum = true
+    /** A jam guest who added it (queue rows): "by Name" takes the album's place. */
+    var addedBy = ""
     /** The queue's ×; nil means the + that adds the song to the queue. */
     var onRemove: (() -> Void)? = nil
     let onPlay: () -> Void
@@ -245,8 +248,12 @@ struct SongRow: View {
         // The playing row takes its song's service colour (round 2 M.5).
         .background(isCurrent ? Omp.playingColor(track.source).opacity(0.18) : Color.clear)
         .overlay { if isCurrent { Rectangle().strokeBorder(Omp.playingColor(track.source).opacity(0.8), lineWidth: 1) } }
-        // A repeat change fades the row to or from dark, as the desktop's .qrow (.25 s ease).
-        .animation(.easeInOut(duration: 0.22)) { $0.opacity(dimmed ? 0.3 : playable ? 1 : 0.4) }
+        // A song the repeat mode will not reach fades to the desktop's .qrow.dk
+        // .3 (unplayable ones sit at .4) instead of jumping when the mode
+        // changes: Android's 220 ms FastOutSlowIn, keyed on the dim value
+        // (the scoped animation block did not reach it, and the rows jumped).
+        .opacity(dimmed ? 0.3 : playable ? 1 : 0.4)
+        .animation(.timingCurve(0.4, 0, 0.2, 1, duration: 0.22), value: dimmed ? 0.3 : playable ? 1 : 0.4)
         .contentShape(Rectangle())
         .onTapGesture {
             if gone.isEmpty { onPlay() } else { vm.showStatus("\(track.title) can't be played: \(gone)", "error") }
@@ -256,7 +263,7 @@ struct SongRow: View {
 
     /** The artist (opens its page), the album (opens its page) and the rest, one line. */
     private func metaLine(tail: [String]) -> some View {
-        let album = showAlbum ? track.album : ""
+        let album = showAlbum && addedBy.isEmpty ? track.album : ""
         let rest = tail.filter { !$0.isEmpty }.joined(separator: " \u{B7} ")
         return HStack(spacing: 0) {
             if !track.artist.isEmpty {
@@ -270,6 +277,11 @@ struct SongRow: View {
                     .layoutPriority(1)
                     .contentShape(Rectangle())
                     .onTapGesture { vm.openAlbum(of: track) }
+            }
+            // Keeps its width; the artist gives way.
+            if !addedBy.isEmpty {
+                OmpText((track.artist.isEmpty ? "" : " \u{B7} ") + "by " + addedBy, size: 11.5, color: Omp.soft)
+                    .fixedSize()
             }
             if !rest.isEmpty {
                 OmpText((track.artist.isEmpty && album.isEmpty ? "" : " \u{B7} ") + rest, size: 11.5, color: Omp.t3)
@@ -322,6 +334,7 @@ private struct QueueView: View {
                                     dimmed: state.queueSkips(index),
                                     available: state.canPlay(track),
                                     loading: !state.loadingKey.isEmpty,
+                                    addedBy: track.addedBy,
                                     onRemove: { withAnimation(.easeIn(duration: 0.2)) { vm.removeQueueIndex(index) } },
                                     onPlay: { vm.playQueueIndex(index) },
                                     onMenu: { present(trackMenu(track, liked: state.isLiked(track), vm: vm, present: present)) }

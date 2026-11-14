@@ -162,6 +162,13 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
 
     private var artFetched: Set<String> = []
 
+    /** Friends and jams (Together.swift); this view model plays a jam's music as a guest. */
+    private(set) lazy var together: Together = {
+        let t = Together(client: client)
+        t.vm = self
+        return t
+    }()
+
     private var phone: PhonePlayer {
         if let phonePlayer { return phonePlayer }
         let p = PhonePlayer(events: self)
@@ -233,6 +240,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 await pullAccount()
                 await pullSync()
                 await syncPlayer()
+                await together.signedIn()
                 await refreshTrackMap()
                 await sleep(seconds: 1.5)
                 await pullAccount()
@@ -658,7 +666,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     }
 
     private func persistLocalQueueSoon(_ tracks: [Track], name: String) {
-        if !localDirty { return }
+        // Following a jam: the queue on screen is the host's, this phone's own waits aside.
+        if !localDirty || jamFollow { return }
         localQueueSave?.cancel()
         localQueueSave = Task {
             await sleep(seconds: 1)
@@ -775,7 +784,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     }
 
     private func applyPlayer(_ incoming: JSON) async {
-        if solo { return }
+        // Following a jam, this account's own player is set aside (read again on leaving).
+        if solo || jamFollow { return }
         var doc = incoming
         if doc["queue"] == nil && doc.int("queueRev") != playerQueueRev, let full = await client.getPlayer() {
             doc = full                          // a queue change we did not get the list for
@@ -869,7 +879,9 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
      * jump of the playhead, and every 15 s while playing.
      */
     private func publishPlayer(force: Bool = false) async {
-        guard !solo, state.signedIn, isPhone else { return }
+        // Following a jam, nothing goes to this account's own player: its
+        // other devices never see the host's music as this account's.
+        guard !solo, !jamFollow, state.signedIn, isPhone else { return }
         let owner = playerDoc?.str("device") ?? ""
         if otherDeviceHoldsPlayer { return }
         let s = state
@@ -952,6 +964,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     /** Play `tracks` from `index`, here or on whichever device plays. */
     private func playList(_ tracks: [Track], _ index: Int, name: String?) {
         if tracks.isEmpty { return }
+        if jamFollow { return jamAddList(tracks, index) }
         // Another live device plays: it gets the list (a phone included).
         if isPhone && !otherDeviceHoldsPlayer { return playLocalQueue(tracks, index, name: name) }
         let start = min(max(index, 0), tracks.count - 1)
@@ -1102,6 +1115,11 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
             }
         case "cloud.audio":
             onCloudAudio(p)
+            return
+        case "jam", "social":
+            // Listen together: a jam's state, or a friend's news.
+            let type = msg.str("type")
+            Task { await together.onRelay(type, p) }
             return
         case "lyrics":
             // The desktop engine's answer to "lyrics.get".
@@ -2035,6 +2053,11 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         }
         startedTag = tag
         lastPlaying = track0
+        // A jam song: at the host's second now, not when it was asked for.
+        if jamFollow, state.localQueueIndex == jamIndex, let t = jamTarget, t.playing {
+            pendingSeek = JamClock.advanced(t.pos, at: t.at, playing: true, now: uptime())
+            jamLastSeek = uptime()
+        }
         if pendingSeek > 1 {
             phone.seek(to: pendingSeek)
             pendingSeek = 0
@@ -2088,7 +2111,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
 
     /** Remember the song and second, so killing the app only pauses it. */
     private func savePlayheadNow() {
-        guard let track = state.localTrack, localDirty || localQueueOnDisk else { return }
+        guard !jamFollow, let track = state.localTrack, localDirty || localQueueOnDisk else { return }
         let index = state.localQueueIndex, position = progress.at(uptime())
         let key = "\(index)|\(track.id)|\(Int(position))"
         if key == lastPlayhead { return }
@@ -2172,7 +2195,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 playRoute = "download"
                 log.info("stream failed (\(message, privacy: .public)), downloading instead")
                 Task {
-                    let saved = await saveLocalNow(track, videoId)
+                    let saved = await saveLocalNow(track, videoId,
+                                                   transfer: Transfers.shared.open(track.title.ifBlank(videoId), sub: track.artist, queued: false, auto: true))
                     guard tag == playTag, startedTag != tag else { return }
                     if saved, let file = localFiles[videoId] {
                         playVideoId = videoId
@@ -2288,6 +2312,17 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         let s = state
         let queue = s.localQueue
         if queue.isEmpty { return }
+        // In a jam the host decides what comes next; this phone only moves on
+        // to the following song (the host's push confirms it, or corrects it).
+        if jamFollow {
+            if queue.indices.contains(s.localQueueIndex + 1) {
+                playReason = "the jam"
+                playLocalQueue(queue, s.localQueueIndex + 1, name: nil)
+            } else {
+                state.localPlaying = false
+            }
+            return
+        }
         let cur = s.localTrack
         let pos = phonePlayer?.currentPosition ?? 0
         if auto && !skipped && s.localRepeat == "one" {
@@ -2323,7 +2358,10 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
 
     private func saveLocal(_ track: Track, _ videoId: String, announce: Bool) {
         Task {
-            let ok = await saveLocalNow(track, videoId)
+            // Kept as it played (not asked for): an automatic row on the Transfers list.
+            let row = announce || localFiles[videoId] != nil || videoId.isEmpty ? nil
+                : Transfers.shared.open(track.title.ifBlank(videoId), sub: track.artist, queued: false, auto: true)
+            let ok = await saveLocalNow(track, videoId, transfer: row)
             if announce {
                 showStatus(ok ? "Saved \(track.title) on this phone" : "Could not save \(track.title)", ok ? "ok" : "error")
             }
@@ -2334,17 +2372,27 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     private func keepNow(_ videoId: String) async {
         if videoId.isEmpty || keptFiles[videoId] != nil || localFiles[videoId] != nil || !serverCached.contains(videoId) { return }
         let dir = keptDirectory(), client = client
-        guard let file = try? await Task.detached(operation: { try await AudioSaver.saveTo(videoId, dir: dir, client: client) }).value else { return }
+        // On the Transfers list too, as the app's own: it leaves once done.
+        let song = state.localTrack.flatMap { videoIdOf($0) == videoId ? $0 : nil }
+        let transfer = Transfers.shared.open(song?.title ?? videoId, sub: song?.artist ?? "", queued: false, auto: true)
+        guard let file = try? await Task.detached(operation: { try await AudioSaver.saveTo(videoId, dir: dir, client: client, transfer: transfer) }).value else { return }
         keptFiles[videoId] = file
         trimKeptSongs()
     }
 
     /** Copy the droplet's copy of [videoId] to the music folder. Returns once done. */
-    private func saveLocalNow(_ track: Track, _ videoId: String) async -> Bool {
-        if videoId.isEmpty { return false }
-        if localFiles[videoId] != nil { return true }
+    private func saveLocalNow(_ track: Track, _ videoId: String, transfer: Int? = nil) async -> Bool {
+        if videoId.isEmpty {
+            if let transfer { Transfers.shared.fail(transfer, "no copy of it found") }
+            return false
+        }
+        if localFiles[videoId] != nil {
+            if let transfer { Transfers.shared.drop(transfer) }
+            return true
+        }
         let dir = musicDirectory(), client = client
-        guard let file = try? await Task.detached(operation: { try await AudioSaver.saveTo(videoId, dir: dir, client: client) }).value else {
+        let row = transfer ?? Transfers.shared.open(track.title.ifBlank(videoId), sub: track.artist, queued: false)
+        guard let file = try? await Task.detached(operation: { try await AudioSaver.saveTo(videoId, dir: dir, client: client, transfer: row) }).value else {
             return false
         }
         localFiles[videoId] = file
@@ -2373,6 +2421,316 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         state.playbackMode = mode
         progress = Progress()
     }
+
+    // -- listening together: following a jam's host ---------------------------
+    //
+    // A jam is the host's own shared player. As a guest this phone follows it:
+    // the host's queue becomes the queue here while the jam lasts (this
+    // phone's own queue is put aside under "jamSaved" and comes back on
+    // leaving), the song at the host's index plays from the shared cache at
+    // the host's second, and every press (play, skip, seek, add to queue) goes
+    // to the host's player as a jam command. Nothing is published to this
+    // account's own player meanwhile. The desktop's app/src/social.rs.
+
+    private static let jamSavedKey = "jamSaved"
+    private var jamFollow = false
+    /** The jam queue's revision held here (-1: none yet). */
+    private(set) var jamQueueRev = -1
+    /** The host's index and playhead: (second, uptime it was at that second, playing). */
+    private var jamIndex = -1
+    private var jamTarget: (pos: Double, at: Double, playing: Bool)?
+    private var jamLastSeek: Double = 0
+    /** A press shown here before the host's answer: (playing, until). */
+    private var jamOptimistic: (playing: Bool, until: Double)?
+    private var jamTicker: Task<Void, Never>?
+
+    /** This phone follows a host as a guest. */
+    var followingJam: Bool { jamFollow }
+    /** "Play music on this device only" is on. */
+    var playsSolo: Bool { solo }
+
+    /** A jam view from Together: follow the host as a guest, or play on as the host. */
+    func jamView(_ view: JSON, guest: Bool) async {
+        if guest {
+            if !jamFollow { await enterFollow() }
+            followHost(view.obj("player") ?? [:])
+        } else if jamFollow {
+            // Started a jam of our own while following another: our queue comes back.
+            leaveFollow()
+        }
+    }
+
+    /** The jam is over for this phone: its own queue back, if it was put aside. */
+    func jamEnded() {
+        if jamFollow || prefs.data(forKey: Self.jamSavedKey) != nil { leaveFollow() }
+    }
+
+    /** Put this phone's own queue aside and stop its music; this account's player hears it paused, once. */
+    private func enterFollow() async {
+        let s = state
+        // A put-aside queue still there (the app was killed mid-jam) is the real one.
+        if prefs.data(forKey: Self.jamSavedKey) == nil {
+            let saved: JSON = [
+                "queue": s.localQueue.map { $0.toJSON() }, "index": s.localQueueIndex, "name": s.localQueueName,
+                "current": s.localTrack.map { $0.toJSON() as Any } ?? NSNull(), "position": progress.at(uptime()),
+                "shuffle": s.localShuffle, "repeat": s.localRepeat, "mode": s.playbackMode.rawValue,
+            ]
+            prefs.set(JSONText.data(saved), forKey: Self.jamSavedKey)
+        }
+        if isPhone && s.localPlaying {
+            phonePlayer?.pause()
+            state.localPlaying = false
+            await publishPlayer(force: true)
+        }
+        phonePlayer?.stop()
+        playTag += 1
+        jamFollow = true
+        jamQueueRev = -1
+        jamIndex = -1
+        jamTarget = nil
+        jamOptimistic = nil
+        if !isPhone { setPlaybackMode(.standalonePhone) }
+        state.localTrack = nil
+        state.localQueueIndex = -1
+        state.localPreparing = false
+        ConsoleLog.shared.info("Together", "Listening together: this phone follows the host")
+        jamTicker?.cancel()
+        jamTicker = Task { [weak self] in
+            while !Task.isCancelled {
+                await sleep(seconds: 1)
+                guard let self, self.jamFollow else { return }
+                self.jamTick()
+            }
+        }
+    }
+
+    /** Back to this phone's own queue, paused where it was. */
+    private func leaveFollow() {
+        jamFollow = false
+        jamTicker?.cancel()
+        jamTicker = nil
+        jamTarget = nil
+        jamOptimistic = nil
+        jamQueueRev = -1
+        jamIndex = -1
+        phonePlayer?.stop()
+        // A jam song still starting is dropped (its start sees a newer tag).
+        playTag += 1
+        let saved = prefs.data(forKey: Self.jamSavedKey).flatMap { JSONText.parse($0) as? JSON }
+        prefs.removeObject(forKey: Self.jamSavedKey)
+        var s = state
+        s.localQueue = Sync.tracks(saved?.arr("queue")).map(giveVideoId)
+        s.localQueueName = saved?.str("name", "Phone queue") ?? "Phone queue"
+        let index = saved?.int("index", -1) ?? -1
+        s.localQueueIndex = s.localQueue.indices.contains(index) ? index : -1
+        let current = Track.from(saved?.obj("current"))
+        s.localTrack = current.id.isEmpty ? s.localQueue[safe: s.localQueueIndex] : current
+        s.localShuffle = saved?.bool("shuffle") ?? false
+        s.localRepeat = saved?.str("repeat", "off") ?? "off"
+        s.localPlaying = false
+        s.localPreparing = false
+        s.localError = ""
+        state = s
+        if saved?.str("mode") == PlaybackMode.remoteDesktop.rawValue {
+            setPlaybackMode(.remoteDesktop)
+        } else {
+            progress = Progress(position: saved?.double("position") ?? 0, duration: s.localTrack?.duration ?? 0, playing: false, anchor: uptime())
+        }
+        ConsoleLog.shared.info("Together", "Left the jam: this phone's own queue is back")
+        publishedOnce = false
+        Task { await syncPlayer() }
+    }
+
+    /** Play what the host plays, at the host's second. */
+    private func followHost(_ p: JSON) {
+        guard jamFollow, !p.isEmpty else { return }
+        let playing = p.bool("playing")
+        let target = JamClock.playhead(position: p.double("position"), positionAt: p.double("positionAt"),
+                                       serverNow: p.double("serverNow"), playing: playing)
+        let index = p.int("index", -1)
+        jamIndex = index
+        jamTarget = (target, uptime(), playing)
+        var s = state
+        if let q = p.arr("queue") {
+            jamQueueRev = p.int("queueRev", -1)
+            let tracks = Sync.tracks(q).map(giveVideoId)
+            if tracks != s.localQueue { s.localQueue = tracks }
+        }
+        s.localQueueName = p.str("name")
+        s.localRepeat = p.str("repeat", "off")
+        s.localShuffle = p.bool("shuffle")
+        if s != state { state = s }
+        if let o = jamOptimistic, uptime() > o.until { jamOptimistic = nil }
+        let queue = s.localQueue
+        let local = JamLocal(index: s.localQueueIndex,
+                             key: s.localTrack.map { JamFollow.key(source: $0.source, id: $0.id) },
+                             playing: s.localPlaying, loading: s.localPreparing, position: progress.at(uptime()),
+                             duration: progress.duration > 0 ? progress.duration : s.localTrack?.duration ?? 0)
+        let step = JamFollow.decide(keys: queue.map { JamFollow.key(source: $0.source, id: $0.id) },
+                                    durations: queue.map(\.duration), index: index, target: target, playing: playing,
+                                    optimistic: jamOptimistic?.playing, local: local)
+        switch step {
+        case .nothing:
+            break
+        case .stop:
+            phonePlayer?.stop()
+            playTag += 1
+            var t = state
+            t.localTrack = nil
+            t.localPlaying = false
+            t.localPreparing = false
+            state = t
+            progress = Progress()
+        case .start(let i):
+            pendingSeek = target
+            jamLastSeek = uptime()
+            playReason = "the jam"
+            playLocalQueue(queue, i, name: nil)
+        case .cold(let i):
+            // Paused at the host: the song is set here at its second, silent,
+            // and starts from there when the host plays.
+            phonePlayer?.stop()
+            playTag += 1
+            var t = state
+            t.localQueueIndex = i
+            t.localTrack = queue[i]
+            t.localPlaying = false
+            t.localPreparing = false
+            state = t
+            progress = Progress(position: target, duration: queue[i].duration, playing: false, anchor: uptime())
+        case .pause:
+            phonePlayer?.pause()
+            jamSeek(target)
+        case .resume:
+            jamResume(target)
+        case .seek:
+            jamSeek(target)
+        }
+    }
+
+    private func jamSeek(_ seconds: Double) {
+        jamLastSeek = uptime()
+        let to = max(0, seconds)
+        if let p = phonePlayer, p.hasMedia { p.seek(to: to) }
+        progress = Progress(position: to, duration: progress.duration, playing: progress.playing, anchor: uptime())
+    }
+
+    private func jamResume(_ seconds: Double) {
+        guard let track = state.localTrack else { return }
+        jamLastSeek = uptime()
+        if let p = phonePlayer, p.hasMedia {
+            p.seek(to: max(0, seconds))
+            p.play()
+        } else {
+            // Set cold (or after a restart): the song starts here, at the host's second.
+            pendingSeek = seconds
+            state.localPreparing = true
+            startTrack(track)
+        }
+    }
+
+    /**
+     * Once a second while following (and only then): the local playhead is kept
+     * within JamClock.drift of the host's, counted on from the last push with the
+     * local clock.
+     */
+    private func jamTick() {
+        if let o = jamOptimistic, uptime() < o.until { return }
+        guard let t = jamTarget else { return }
+        let s = state
+        if !t.playing {
+            // Paused at the host while a song was still starting here: it started anyway.
+            if s.localPlaying { phonePlayer?.pause() }
+            return
+        }
+        if uptime() - jamLastSeek < 4 { return }
+        guard s.localQueueIndex == jamIndex, s.localTrack != nil, !s.localPreparing else { return }
+        let want = JamClock.advanced(t.pos, at: t.at, playing: true, now: uptime())
+        let duration = progress.duration > 0 ? progress.duration : s.localTrack?.duration ?? 0
+        if duration > 0 && want > duration - 1 { return }
+        if !s.localPlaying {
+            // Stopped here while the host plays on (a stall, a refused pause): back on it.
+            if phonePlayer?.hasMedia == true { jamResume(want) }
+            return
+        }
+        let local = progress.at(uptime())
+        if JamClock.needsSeek(local: local, host: want) {
+            log.info("jam: \(local - want, format: .fixed(precision: 1)) s from the host, catching up")
+            jamSeek(want)
+        }
+    }
+
+    /** A guest's play, pause, skip or seek: to the host's player, shown here once it is taken. */
+    private func jamPress(_ action: String, _ payload: JSON = [:]) {
+        guard together.allows(action) else { return jamRefuse("The host lets guests add songs only") }
+        Task {
+            guard await together.command(action, payload) else { return }
+            switch action {
+            case "toggle":
+                let playing = !state.localPlaying
+                jamOptimistic = (playing, uptime() + 3)
+                if let t = jamTarget {
+                    jamTarget = (JamClock.advanced(t.pos, at: t.at, playing: t.playing, now: uptime()), uptime(), playing)
+                }
+                if playing {
+                    jamResume(jamTarget?.pos ?? progress.at(uptime()))
+                } else {
+                    phonePlayer?.pause()
+                }
+            case "seek":
+                let to = payload.double("position")
+                if let t = jamTarget { jamTarget = (to, uptime(), t.playing) }
+                jamSeek(to)
+            default:
+                break
+            }
+        }
+    }
+
+    private func jamAdd(_ action: String, _ payload: JSON, _ done: String) {
+        Task { if await together.command(action, payload) { showStatus(done, "ok") } }
+    }
+
+    /** "Play" on a list in a jam: its songs from there join the jam's queue (at most 200). */
+    private func jamAddList(_ tracks: [Track], _ index: Int) {
+        let start = min(max(index, 0), max(tracks.count - 1, 0))
+        let pick = Array(tracks.dropFirst(start).prefix(200))
+        if pick.isEmpty { return }
+        let n = pick.count
+        jamAdd("queue.add", ["tracks": pick.map { $0.toJSON() }], "Added \(n) \(n == 1 ? "song" : "songs") to the jam")
+    }
+
+    /** "Play now" in a jam: next in the jam's queue, and skipped to when the host allows it. */
+    private func jamPlayNow(_ t: Track) {
+        Task {
+            guard await together.command("queue.addNext", ["track": t.toJSON()]) else { return }
+            if together.allows("next") {
+                await sleep(seconds: 0.4)
+                _ = await together.command("next")
+            } else {
+                showStatus("Playing next in the jam: \(t.title)", "ok")
+            }
+        }
+    }
+
+    private func jamRefuse(_ why: String) { showStatus(why, "info") }
+
+    // -- the Friends page ---------------------------------------------------
+
+    func openFriends() {
+        if state.friendsOpen { return }
+        state.settingsOpen = false
+        state.friendsOpen = true
+        together.pageShown(true)
+    }
+
+    func closeFriends() {
+        state.friendsOpen = false
+        together.pageShown(false)
+    }
+
+    /** A jam link opened from outside the app (jukebox://jam/<code>, the share link). */
+    func openLink(_ url: URL) { together.openLink(url.absoluteString) }
 
     // -- auth ---------------------------------------------------------------
 
@@ -2442,6 +2800,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 await pullAccount()
                 await pullSync()
                 await syncPlayer()
+                await together.signedIn()
                 await refreshTrackMap()
                 showStatus(
                     created ? "Account created. Now pick how you want to listen." : "Signed in as \(client.email ?? "")",
@@ -2489,6 +2848,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     }
 
     private func resetToSignIn(email: String = "", error: String? = nil) {
+        if jamFollow { leaveFollow() }
+        together.reset()
         phonePlayer?.stop()
         pending.removeAll()
         pumpStop = true
@@ -2751,6 +3112,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     // -- player -------------------------------------------------------------
 
     func playPause() {
+        if jamFollow { return jamPress("toggle") }
         let s = state
         if isPhone {
             if s.localTrack == nil && !s.localQueue.isEmpty {
@@ -2779,6 +3141,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     }
 
     func next() {
+        if jamFollow { return jamPress("next") }
         if isPhone { advance(auto: false) } else { remoteJump(1, "next") }
     }
 
@@ -2800,6 +3163,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     }
 
     func previous() {
+        if jamFollow { return jamPress("previous") }
         if !isPhone { return remoteJump(-1, "previous") }
         if phone.currentPosition > 5 || state.localQueueIndex <= 0 {
             pInfo("Back to the start (you, at \(at(phone.currentPosition)))")
@@ -2812,12 +3176,14 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     }
 
     func restart() {
+        if jamFollow { return jamPress("seek", ["position": 0]) }
         if !isPhone { return remote("restart") }
         phone.seek(to: 0)
         phone.play()
     }
 
     func seek(_ position: Double) {
+        if jamFollow { return jamPress("seek", ["position": position]) }
         var p = progress
         p.position = position
         p.anchor = uptime()
@@ -2832,6 +3198,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     }
 
     func setRepeat(_ mode: String) {
+        if jamFollow { return jamRefuse("In a jam only the host changes the queue") }
         if isPhone {
             state.localRepeat = mode
         } else {
@@ -2841,6 +3208,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     }
 
     func toggleShuffle() {
+        if jamFollow { return jamRefuse("In a jam only the host changes the queue") }
         if isPhone {
             state.localShuffle.toggle()
         } else {
@@ -2850,6 +3218,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     }
 
     func playQueueIndex(_ i: Int) {
+        if jamFollow { return jamRefuse("In a jam only the host picks a song from the queue") }
         if isPhone {
             playLocalQueue(state.localQueue, i, name: nil)
         } else {
@@ -2986,6 +3355,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
      */
     func playSingle(_ t: Track) {
         if t.id.isEmpty { return }
+        if jamFollow { return jamPlayNow(t) }
         if !isPhone {
             remote("playtrack", ["track": t.toJSON()])
             return
@@ -3006,6 +3376,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
 
     func queueNext(_ t: Track) {
         if t.id.isEmpty { return }
+        if jamFollow { return jamAdd("queue.addNext", ["track": t.toJSON()], "Playing next in the jam: \(t.title)") }
         if isPhone {
             let t2 = giveVideoId(t)
             var queue = state.localQueue
@@ -3031,6 +3402,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
 
     func addToQueue(_ t: Track) {
         if t.id.isEmpty { return }
+        if jamFollow { return jamAdd("queue.add", ["track": t.toJSON()], "Added to the jam: \(t.title)") }
         if isPhone {
             // Already queued: nothing to add.
             if state.localQueue.contains(where: { $0.id == t.id }) { return }
@@ -3045,6 +3417,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     func addAllToQueue(_ tracks: [Track]) {
         let list = tracks.filter { !$0.id.isEmpty }
         if list.isEmpty { return }
+        if jamFollow { return jamAddList(list, 0) }
         if isPhone {
             var queue = state.localQueue
             for t in list where !queue.contains(where: { $0.id == t.id }) { queue.append(giveVideoId(t)) }
@@ -3056,6 +3429,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     }
 
     func removeQueueIndex(_ i: Int) {
+        if jamFollow { return jamRefuse("In a jam only the host changes the queue") }
         if !isPhone { return remote("queue.remove", ["index": i]) }
         guard state.localQueue.indices.contains(i) else { return }
         let wasCurrent = i == state.localQueueIndex
@@ -3076,6 +3450,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
 
     func moveQueue(_ from: Int, _ to: Int) {
         if from == to { return }
+        if jamFollow { return jamRefuse("In a jam only the host changes the queue") }
         if !isPhone { return remote("queue.move", ["from": from, "to": to]) }
         var queue = state.localQueue
         guard queue.indices.contains(from), queue.indices.contains(to) else { return }
@@ -3094,6 +3469,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     }
 
     func clearQueue() {
+        if jamFollow { return jamRefuse("In a jam only the host changes the queue") }
         // The account snapshot may still hold the old songs for a while: mark
         // the clear so the merge guard adopts the empty queue.
         queueClearedAt = uptime()
@@ -3766,6 +4142,9 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         // A previous job that timed out may have left results behind.
         downloadInbox.removeAll()
         bump()
+        // Every song to fetch on the Transfers list, waiting its turn.
+        var rows: [String: Int] = [:]
+        for t in missing { rows[t.id] = Transfers.shared.open(t.title.ifBlank(t.id), sub: t.artist, queued: true) }
         var todo = missing[...]
         while !todo.isEmpty {
             var asks: [JSON] = []
@@ -3774,7 +4153,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 todo = todo.dropFirst()
                 let videoId = videoIdOf(t)
                 if !videoId.isEmpty && serverCached.contains(videoId) {
-                    if await saveLocalNow(t.with(videoId: videoId), videoId) { done += 1 } else { failed += 1 }
+                    if await saveLocalNow(t.with(videoId: videoId), videoId, transfer: rows[t.id]) { done += 1 } else { failed += 1 }
                 } else {
                     let requestId = UUID().uuidString.lowercased()
                     let track = videoId.isEmpty ? t : t.with(videoId: videoId)
@@ -3797,12 +4176,15 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                     let r = downloadInbox.removeFirst()
                     lastResult = uptime()
                     got += 1
-                    if r.ready, await saveLocalNow(r.track, r.track.videoId) {
+                    let row = rows.removeValue(forKey: r.track.id)
+                    if r.ready, await saveLocalNow(r.track, r.track.videoId, transfer: row) {
                         done += 1
                     } else if !r.ready, let why = Self.removedReason(r.error) {
                         markUnavailable(r.track, why)
+                        if let row { Transfers.shared.fail(row, why) }
                         unavailable += 1
                     } else {
+                        if let row, !r.ready { Transfers.shared.fail(row, r.error.ifEmpty("the server could not get it")) }
                         failed += 1
                     }
                     bump()
@@ -3813,6 +4195,11 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 // cannot be prepared either.
                 markOnline(false)
                 failed += asked
+            }
+            // Asked for and never answered.
+            for a in asks {
+                let id = (a["track"] as? JSON)?.str("id") ?? ""
+                if let row = rows.removeValue(forKey: id) { Transfers.shared.fail(row, "no answer from the server") }
             }
             bump()
         }
@@ -4019,6 +4406,7 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
     func selectDevice(_ device: Device) {
         if !device.connected && !device.id.isEmpty { return }
         if solo { return showStatus("This phone plays on its own. Turn off \u{201C}Play music on this device only\u{201D} first.", "error") }
+        if jamFollow { return showStatus("In a jam this phone plays the host's music. Leave the jam to play on another device.", "info") }
         let target = device.id.ifEmpty(deviceId())
         Task {
             // The latest word from this phone before the sound leaves it.
@@ -4097,6 +4485,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
         let command = p.str("command")
         log.info("control '\(command, privacy: .public)' for \(p.str("device"), privacy: .public)")
         if p.str("device") != deviceId() { return }
+        // Following a jam, the sound stays here with the host's music.
+        if jamFollow && ["handoff", "transfer", "playtracks"].contains(command) { return }
         if command == "handoff" {
             let transfer = transferOut()
             phonePlayer?.pause()
@@ -4154,7 +4544,8 @@ final class MaroViewModel: ObservableObject, PhonePlayerEvents {
                 guard let self else { return }
                 if self.pump == nil { return }
                 let s = self.state
-                guard s.signedIn, self.isPhone else {
+                // Following a jam: the host's music is not this account's to report.
+                guard s.signedIn, self.isPhone, !self.jamFollow else {
                     lastKey = []
                     continue
                 }

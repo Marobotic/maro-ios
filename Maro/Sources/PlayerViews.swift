@@ -17,7 +17,9 @@ struct PlayerTile: View {
 
     var body: some View {
         let tint = state.track.map { Omp.sourceColor($0.source) } ?? Omp.themeAccent
-        Group {
+        VStack(spacing: 0) {
+            // "Listening together with Name" while in a jam.
+            TogetherLine(vm: vm, together: vm.together)
             if mini {
                 MiniPlayer(state: state, vm: vm, expand: { toggle?() })
             } else {
@@ -217,8 +219,7 @@ private struct FullPlayer: View {
                 .padding(.trailing, collapse == nil ? 0 : 34)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            SeekRow(state: state, vm: vm)
-            TransportBar(state: state, vm: vm)
+            // The desktop's order (0.5.0): volume above the buttons, the seek row under them.
             HStack(spacing: 10) {
                 Button { vm.setVolume(state.volume > 0 ? 0 : 100) } label: {
                     Icon(state.volume <= 0 ? .volumeMute : state.volume < 50 ? .volumeLow : .volume, size: 16, color: Omp.iconTint)
@@ -229,8 +230,12 @@ private struct FullPlayer: View {
                 VolumeSlider(fraction: Double(state.volume) / 100) { f in vm.setVolume(Int((f * 100).rounded())) }
                 OmpText("\(state.volume)%", size: 11, color: Omp.t3)
                     .frame(width: 34, alignment: .trailing)
+                // Listen together: start a jam, or open the one you are in.
+                JamButton(vm: vm, together: vm.together)
                 TButton(.expand, size: 15, box: 32, color: Omp.t3, enabled: track != nil) { openJam() }
             }
+            TransportBar(state: state, vm: vm)
+            SeekRow(state: state, vm: vm)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)

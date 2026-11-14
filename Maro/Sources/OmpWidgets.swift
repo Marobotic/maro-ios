@@ -388,8 +388,13 @@ struct HeartButton: View {
     var color: Color = Omp.t2
     var enabled = true
     let action: () -> Void
-    @State private var pop: CGFloat = 1
+    /** Bumped by each like: runs the pop once. */
+    @State private var pops = 0
     @State private var burst = false
+
+    /** The desktop's heartPop curve, cubic-bezier(.34, 1.56, .64, 1): it overshoots. */
+    private static let overshoot = UnitCurve.bezier(startControlPoint: UnitPoint(x: 0.34, y: 1.56),
+                                                    endControlPoint: UnitPoint(x: 0.64, y: 1))
 
     var body: some View {
         Button {
@@ -398,8 +403,20 @@ struct HeartButton: View {
         } label: {
             ZStack {
                 if burst { HeartBurst() }
+                // .42 s: 1.45 at 30 %, .86 at 60 %, back to 1, each step on the
+                // overshoot curve (the CSS keyframes). Three chained
+                // withAnimation calls set all three values in one tick, so only
+                // the last (1) was ever drawn and the heart never moved.
                 Icon(.heart, size: size, color: liked ? Omp.like : color, filled: liked)
-                    .scaleEffect(pop)
+                    .keyframeAnimator(initialValue: CGFloat(1), trigger: pops) { content, scale in
+                        content.scaleEffect(scale)
+                    } keyframes: { _ in
+                        KeyframeTrack {
+                            LinearKeyframe(1.45, duration: 0.126, timingCurve: Self.overshoot)
+                            LinearKeyframe(0.86, duration: 0.126, timingCurve: Self.overshoot)
+                            LinearKeyframe(1, duration: 0.168, timingCurve: Self.overshoot)
+                        }
+                    }
             }
             .frame(width: box, height: box)
             .contentShape(Rectangle())
@@ -410,9 +427,7 @@ struct HeartButton: View {
     }
 
     private func celebrate() {
-        withAnimation(.easeOut(duration: 0.12)) { pop = 1.45 }
-        withAnimation(.easeInOut(duration: 0.13).delay(0.12)) { pop = 0.86 }
-        withAnimation(.spring(response: 0.2, dampingFraction: 0.5).delay(0.25)) { pop = 1 }
+        pops += 1
         burst = true
         Task {
             await sleep(seconds: 0.6)

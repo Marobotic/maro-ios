@@ -100,6 +100,9 @@ struct Track: Equatable, Hashable {
     /** YouTube Music's ids for the artist (UC...) and the release (MPREb...), when the row carried them. */
     var artistId = ""
     var albumId = ""
+    /** Who put it in a jam's queue (a guest): their id and name, both empty otherwise. */
+    var addedById = ""
+    var addedBy = ""
 
     /** One song reaches the panel under several ids; all of them are this song. */
     var trackIds: [String] {
@@ -135,6 +138,8 @@ struct Track: Equatable, Hashable {
         ]
         if !artistId.isEmpty { o["artistId"] = artistId }
         if !albumId.isEmpty { o["albumId"] = albumId }
+        // Kept when this phone hands the queue back (the host's own player).
+        if !addedBy.isEmpty { o["addedBy"] = ["id": addedById, "name": addedBy] }
         return o
     }
 
@@ -160,7 +165,9 @@ struct Track: Equatable, Hashable {
             playedAt: o.int64("played_at"),
             viaYoutube: o.bool("viaYoutube"),
             artistId: o.str("artistId"),
-            albumId: o.str("albumId")
+            albumId: o.str("albumId"),
+            addedById: o.obj("addedBy")?.str("id") ?? "",
+            addedBy: o.obj("addedBy")?.str("name") ?? ""
         )
     }
 }
@@ -414,6 +421,8 @@ struct UiState: Equatable {
     /** Artist and album pages opened over the tabs, newest last: Back pops one. */
     var pages: [DetailPage] = []
     var settingsOpen = false
+    /** Friends and jams, a full page like Settings. */
+    var friendsOpen = false
     /** The "?" stats panel. Opened and closed by its button only. */
     var statsOpen = false
 
@@ -590,6 +599,7 @@ enum Sync {
     static let viewSongs = "songs"
     static let viewRecent = "recent"
     static let viewSearch = "search"
+    static let viewTransfers = "transfers"
 
     static func tracks(_ arr: [Any]?) -> [Track] {
         guard let arr else { return [] }

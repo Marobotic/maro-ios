@@ -6,8 +6,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.10"
-    MARKETING_VERSION: "0.2.9"
-    CURRENT_PROJECT_VERSION: "47"
+    MARKETING_VERSION: "0.3.0"
+    CURRENT_PROJECT_VERSION: "48"
 targets:
   Maro:
     type: application
@@ -33,6 +33,14 @@ targets:
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSRequiresIPhoneOS: true
+        # Listen together: jukebox://jam/<code> opens the app and joins the jam.
+        # (https://marobotic.dev/jukebox/jam/<code> would need universal links:
+        # an Associated Domains entitlement and an apple-app-site-association
+        # file on marobotic.dev naming a paid Team ID - not possible unsigned.)
+        CFBundleURLTypes:
+          - CFBundleURLName: dev.marobotic.maro.jam
+            CFBundleURLSchemes:
+              - jukebox
         # The Android splash: the logo centred on the panel background.
         UILaunchScreen:
           UIColorName: SplashBackground
@@ -65,6 +73,9 @@ targets:
       - path: Maro/Sources/ArtSize.swift
       # Who holds the shared player (a gone owner holds nothing).
       - path: Maro/Sources/PlayerOwner.swift
+      # Listen together: jam links, the host's playhead, what a guest does; and the transfer list.
+      - path: Maro/Sources/JamLogic.swift
+      - path: Maro/Sources/TransferMath.swift
       - path: MaroTests
     settings:
       base:

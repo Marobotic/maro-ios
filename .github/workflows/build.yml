@@ -1,8 +1,9 @@
 name: Build
 
+# Builds run only when asked (Run workflow) or for a version tag, never on a push.
 on:
   push:
-    branches: [main]
+    tags: ["v*"]
   workflow_dispatch:
 
 jobs:

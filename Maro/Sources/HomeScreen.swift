@@ -9,6 +9,7 @@ private let tabs: [(key: String, label: String)] = [
     (Sync.viewDiscover, "Discover"),
     (Sync.viewSearch, "Search"),
     (Sync.viewSongs, "Songs"),
+    (Sync.viewTransfers, "Transfers"),
 ]
 
 private func deviceLabel(_ device: Device) -> String {
@@ -113,6 +114,8 @@ struct HomeScreen: View {
             Group {
                 if state.settingsOpen {
                     SettingsPage(state: state, vm: vm).frame(maxWidth: 860).frame(maxWidth: .infinity)
+                } else if state.friendsOpen {
+                    FriendsPage(vm: vm, together: vm.together).frame(maxWidth: 860).frame(maxWidth: .infinity)
                 } else if wide {
                     VStack(spacing: 8) {
                         Strip(state: shown, vm: vm)
@@ -173,6 +176,8 @@ struct HomeScreen: View {
                 .transition(.opacity.combined(with: .scale(scale: 1.03)))
             }
         }
+        // A jam invite that just arrived, over everything but the popups.
+        .overlay(alignment: .top) { InviteBanner(together: vm.together) }
         .overlay { if let dialog { DialogView(dialog: dialog) { self.dialog = nil }.id(dialog.id) } }
         .onChange(of: vm.jamRequest) { withAnimation(.easeOut(duration: 0.3)) { jamOpen = true } }
         .overlay { if let prompt = vm.state.loginPrompt { LoginPromptView(prompt: prompt, vm: vm) } }
@@ -274,6 +279,8 @@ private struct Strip: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             HStack(spacing: 4) {
                 StripButton(glyph: .info, on: state.statsOpen) { vm.toggleStats() }
+                // Friends and jams (the desktop's phone-width people button).
+                PeopleButton(vm: vm, together: vm.together)
                 // Where the music plays, one tap away (while this phone plays
                 // on its own, the way back). Accent-soft while this phone plays.
                 StripButton(glyph: .wifi, color: state.solo || state.playingDeviceId == state.myDeviceId ? Omp.soft : Omp.t2) {
@@ -286,6 +293,22 @@ private struct Strip: View {
         .padding(.trailing, 8)
         .frame(height: 52)
         .tile()
+    }
+}
+
+/** Friends: accent-soft while in a jam, a dot while a request or an invite waits. */
+private struct PeopleButton: View {
+    @ObservedObject var vm: MaroViewModel
+    @ObservedObject var together: Together
+
+    var body: some View {
+        StripButton(glyph: .people, color: together.jam != nil ? Omp.soft : Omp.t2) { vm.openFriends() }
+            .overlay(alignment: .topTrailing) {
+                if together.waiting > 0 {
+                    Rectangle().fill(Omp.themeAccent).frame(width: 7, height: 7).padding(7).allowsHitTesting(false)
+                }
+            }
+            .accessibilityLabel("Friends")
     }
 }
 
@@ -318,6 +341,7 @@ private struct TabsRow: View {
     @Binding var queueJump: Int
     let wide: Bool
     @Namespace private var pill
+    @ObservedObject private var transfers = Transfers.shared
 
     var body: some View {
         // Round 2 L: an empty queue hides Queue, no lyrics hides Lyrics; both come back by themselves.
@@ -325,6 +349,8 @@ private struct TabsRow: View {
         let shownTabs = tabs.filter { tab in
             if tab.key == Sync.viewQueue { return !wide && !emptyQueue }
             if tab.key == Sync.viewLyrics { return !state.noLyrics }
+            // Only while something downloads, or finished rows wait for Clear.
+            if tab.key == Sync.viewTransfers { return !transfers.list.items.isEmpty }
             return true
         }
         let selected = wide && state.view == Sync.viewQueue ? Sync.viewLyrics : state.view
@@ -358,6 +384,10 @@ private struct TabsRow: View {
             .onChange(of: selected) { withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo(selected) } }
         }
         .frame(height: 32)
+        // Cleared while open: back to the library.
+        .onChange(of: transfers.list.items.isEmpty) { _, empty in
+            if empty && state.view == Sync.viewTransfers { vm.selectTab(Sync.viewPlaylists) }
+        }
     }
 }
 
