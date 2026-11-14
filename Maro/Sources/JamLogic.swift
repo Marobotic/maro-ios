@@ -13,10 +13,17 @@ enum JamLink {
     static func code(_ text: String) -> String? {
         var t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         while t.hasSuffix("/") { t.removeLast() }
-        let tail = t.split(omittingEmptySubsequences: false) { $0 == "/" || $0 == "=" }.last.map(String.init) ?? ""
-        let last = (tail.split(omittingEmptySubsequences: false) { $0 == "?" || $0 == "#" }.first.map(String.init) ?? "").lowercased()
+        // The address without its #fragment, then its path and its ?query
+        // (a share link may carry ?from=..., the web app ?jam=<code>).
+        let bare = t.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? ""
+        let halves = bare.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
+        var path = halves.first ?? ""
+        while path.hasSuffix("/") { path.removeLast() }
+        let query = halves.count > 1 ? halves[1] : ""
+        let fromQuery = query.split(separator: "&").first { $0.hasPrefix("jam=") }.map { String($0.dropFirst(4)) }
+        let last = (fromQuery ?? path.split(separator: "/").last.map(String.init) ?? "").lowercased()
         let ok = last.count == 8 && last.allSatisfy { ($0 >= "a" && $0 <= "z") || ($0 >= "2" && $0 <= "9") }
-        let shaped = t.lowercased() == last || t.contains("/jam/") || t.contains("jam=") || t.hasPrefix("jukebox:")
+        let shaped = t.lowercased() == last || path.contains("/jam/") || fromQuery != nil || t.hasPrefix("jukebox:")
         return ok && shaped ? last : nil
     }
 
