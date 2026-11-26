@@ -30,6 +30,8 @@ final class Spotify {
     }
 
     var onEvent: ((Event) -> Void)?
+    /** The player became ready after starting or reconnecting. */
+    var onReady: (() -> Void)?
     /** A sign-in on this phone became a stored login: librespot's credentials. */
     var onLoggedIn: ((JSON) -> Void)?
     /** A reconnect() finished: true when a new connection is up. */
@@ -160,6 +162,11 @@ final class Spotify {
         ((await ask("playlist", ["id": id], wait: 100)) as? [JSON])?.map(Self.track)
     }
 
+    /** Spotify Liked Songs, every page of it (the desktop lists it as the playlist "__liked__"). */
+    func liked() async -> [Track]? {
+        ((await ask("liked", wait: 100)) as? [JSON])?.map(Self.track)
+    }
+
     /** A song's radio: Spotify's "<song> Radio" playlist, and its songs. */
     func radio(_ trackId: String) async -> (id: String, tracks: [Track])? {
         guard let data = await ask("radio", ["uri": "spotify:track:" + trackId], wait: 100) as? JSON else { return nil }
@@ -199,6 +206,7 @@ final class Spotify {
         case "ready":
             ready = true
             user = ev.str("user")
+            onReady?()
             if (ev["login"] as? Bool) == true {
                 ConsoleLog.shared.log("Spotify", "service sign-in succeeded")
                 signingIn = false
@@ -208,6 +216,9 @@ final class Spotify {
                     onLoggedIn?(creds)
                 }
             }
+        case "tier":
+            // The account's plan (Premium, Duo, Family, Student, Free), for Settings > Accounts.
+            if let attrs = ev.obj("attrs"), let plan = Plans.spotify(attrs) { Plans.shared.set("spotify", user, plan) }
         case "reconnected":
             onReconnected?((ev["ok"] as? Bool) == true)
         case "reply":

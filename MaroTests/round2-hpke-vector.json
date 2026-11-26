@@ -1,0 +1,40 @@
+{
+  "about": "Jukebox round 2, section I.6 interop vector. HPKE base mode DHKEM(X25519, HKDF-SHA256) / HKDF-SHA256 / AES-256-GCM; info = 'jukebox-v1:' + type; aad = from|to|msgId; sig = Ed25519 over enc||ct||aad (sealed) or body||aad (signed plain). Keys are raw 32 bytes, base64url. Generated with @hpke/core 1.7.4 and node crypto; every app's unit test must open 'sealed' to 'plaintext' and verify both signatures. The keys are test-only.",
+  "recipient": {
+    "deviceId": "vector-recipient-0001",
+    "x25519Private": "QMFLP9-v9kiKJuGHSLtEkuKyywztv9LuH-Aik_akUFw",
+    "x25519Public": "IqyVrgDrmsa50FHaYOLunaGA3pCpM1mVl31JzM1T8S4"
+  },
+  "sender": {
+    "deviceId": "vector-sender-0001",
+    "ed25519Seed": "mCZNAfpOHnixHo-0Jt461hiAFJnqIXjV00avpxRnAOA",
+    "ed25519Public": "B5219wK16OljMykAeh5JaLrTEDqHeFsrJ-_7V-7LcZQ"
+  },
+  "sealed": {
+    "info": "jukebox-v1:session.offer",
+    "aad": "vector-sender-0001|vector-recipient-0001|6f1c2a8e-0b7d-4c55-9a51-3d2f8e7a9c01",
+    "plaintext": "{\"service\":\"soundcloud\",\"payload\":{\"token\":\"vector-token-not-real\",\"user\":{\"id\":\"1\",\"name\":\"Vector\"}}}",
+    "envelope": {
+      "v": 1,
+      "type": "session.offer",
+      "msgId": "6f1c2a8e-0b7d-4c55-9a51-3d2f8e7a9c01",
+      "from": "vector-sender-0001",
+      "to": "vector-recipient-0001",
+      "enc": "62izdZJHrPUtKXSRs80jrepzMslffz-CfNkO-uA8IlU",
+      "ct": "3-G9V-u8MeO-yvgaXQ4a7BwiujJL0owImJUUxhHFJ7wBgSrmrZu1EUUqZF-9ckFgRYvql4qrhK-0eH4ietZkqOL0cyutZ63Np85zVjAih9jmAohBJy-VfGh25x-wgnGw88krQfRI6Qmr55Qmepd4BO7D26dREg",
+      "sig": "xoQOvVRxU7eZu2Osy8CnRe7aDYjwj8RkyMOd5KSuvzZqoHa3v-PhhDHwY04Qc383StBDUhgOMiz--QtokCkiDQ"
+    }
+  },
+  "signedPlain": {
+    "aad": "vector-sender-0001|vector-recipient-0001|0a9b8c7d-6e5f-4a3b-9c2d-1e0f2a3b4c5d",
+    "envelope": {
+      "v": 1,
+      "type": "ytm.request",
+      "msgId": "0a9b8c7d-6e5f-4a3b-9c2d-1e0f2a3b4c5d",
+      "from": "vector-sender-0001",
+      "to": "vector-recipient-0001",
+      "body": "{\"op\":\"like\",\"args\":{\"videoId\":\"dQw4w9WgXcQ\",\"liked\":true},\"reqId\":\"vector-req-1\"}",
+      "sig": "jHguZAFS807FUdNd1D48ZQF43T7UvgwjRlPilWmhEFNP2oUYrZcAy8sXpeZY09FMwiZKMnDQya2dT_0ZScnvAA"
+    }
+  }
+}

@@ -177,8 +177,9 @@ final class MaroClient: @unchecked Sendable {
      * The engine uploads a track's cover to /covers/<art key> when it resolves
      * it, so the phone asks for the art by the same key the desktop would.
      */
-    func cover(_ key: String) async -> Data? {
-        var req = request(Self.base + "/covers/" + Self.escape(key))
+    /** A cover by the droplet's key; `px` > 0 asks for it at about that size (WebP), not whole. */
+    func cover(_ key: String, px: Int = 0) async -> Data? {
+        var req = request(Self.base + "/covers/" + Self.escape(key) + (px > 0 ? "?px=\(px)" : ""))
         req.setValue("image/*", forHTTPHeaderField: "Accept")
         return await raw(req)
     }
@@ -354,7 +355,8 @@ final class MaroClient: @unchecked Sendable {
      * Returns nil when the engine has not pushed one yet.
      */
     func sync() async -> JSON? {
-        guard let resp = try? await call("GET", "/sync"), !resp.str("kind").isEmpty else { return nil }
+        // Without the saved song lists (they have a store of their own, /playlists).
+        guard let resp = try? await call("GET", "/sync?lists=0"), !resp.str("kind").isEmpty else { return nil }
         return resp
     }
 
@@ -413,6 +415,126 @@ final class MaroClient: @unchecked Sendable {
         ((try? await call("DELETE", "/service/" + Self.escape(name), timeout: 15))?["ok"] as? Bool) == true
     }
 
+    // -- song lists stored on the account (round 2 B) --
+
+    /**
+     * One status-checked call: (HTTP status, body). nil when the droplet
+     * could not be asked at all (offline), so "none" and "unreachable" are
+     * never confused.
+     */
+    private func answer(_ method: String, _ path: String, body: JSON? = nil, timeout: TimeInterval = 20) async -> (code: Int, body: JSON)? {
+        var req = request(Self.base + path, method: method, timeout: timeout)
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        if let body {
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.httpBody = JSONText.data(body)
+        }
+        do {
+            let (data, resp) = try await http.data(for: req)
+            checkRejected(req, resp)
+            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            // Never the body: the YouTube Music session's answers carry cookies.
+            if !(200..<300).contains(code) && code != 404 {
+                ConsoleLog.shared.log("MaroClient", "\(method) \(path.split(separator: "?").first ?? "") HTTP \(code)")
+            }
+            return (code, JSONText.parse(data) as? JSON ?? [:])
+        } catch {
+            ConsoleLog.shared.log("MaroClient", "\(method) \(path.split(separator: "?").first ?? "") failed: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    // -- listening together (plans/listen-together-api.md) --
+
+    /**
+     * One /friends, /social, /jam or /invites call: the answer with ok true,
+     * or {ok: false, error, status} with the server's own words (written for
+     * people, shown as they are).
+     */
+    func social(_ method: String, _ path: String, body: JSON? = nil) async -> JSON {
+        guard session != nil else { return ["ok": false, "error": "Sign in to your Jukebox account first", "signin": true] }
+        guard let got = await answer(method, path, body: body, timeout: 15) else {
+            return ["ok": false, "error": "Could not reach the music server"]
+        }
+        var out = got.body
+        if got.code >= 400 || out["ok"] as? Bool == false {
+            out["error"] = out.str("error").ifEmpty("The music server answered \(got.code)")
+            out["ok"] = false
+            out["status"] = got.code
+            return out
+        }
+        out["ok"] = true
+        return out
+    }
+
+    /** A playlist's stored song list ({tracks, savedAt, snapshotId}) by "source:id", or nil. */
+    func savedPlaylist(_ key: String) async -> JSON? {
+        guard let got = await answer("GET", "/playlists/" + Self.escape(key)), (200..<300).contains(got.code) else { return nil }
+        let entry = got.body.obj("playlist") ?? got.body
+        return entry.arr("tracks") == nil ? nil : entry
+    }
+
+    /**
+     * Store a song list read on this phone, for every device. "newer" when
+     * the account already holds a newer copy (read that one), "ok", or nil.
+     */
+    func putSavedPlaylist(_ key: String, _ entry: JSON) async -> String? {
+        guard let got = await answer("PUT", "/playlists/" + Self.escape(key), body: entry, timeout: 60),
+              (200..<300).contains(got.code) else { return nil }
+        return got.body.str("kept") == "newer" ? "newer" : "ok"
+    }
+
+    /** The account's stored lists, without their songs: [{key, count, savedAt, snapshotId}], or nil. */
+    func savedPlaylistIndex() async -> [JSON]? {
+        guard let got = await answer("GET", "/playlists", timeout: 15), (200..<300).contains(got.code) else { return nil }
+        return (got.body.arr("playlists") ?? []).compactMap { $0 as? JSON }
+    }
+
+    // -- devices and messages between them (round 2 I) --
+
+    /** PUT /devices/self: this device, its public key, what it holds, its local route. */
+    func registerDevice(_ body: JSON) async -> Bool {
+        guard let got = await answer("PUT", "/devices/self", body: body, timeout: 15) else { return false }
+        return (200..<300).contains(got.code)
+    }
+
+    /** GET /devices: {devices:[...], player:{device, playing}, network}, or nil when the server can't say. */
+    func devicesDoc() async -> JSON? {
+        guard let got = await answer("GET", "/devices", timeout: 15), (200..<300).contains(got.code) else { return nil }
+        return got.body
+    }
+
+    /** An I.6 envelope straight to one device's relay queue (the server reads only type and from). */
+    func relayTo(_ deviceId: String, envelope: JSON) async -> Bool {
+        guard let got = await answer("POST", "/relay/to/" + Self.escape(deviceId), body: envelope, timeout: 15) else { return false }
+        return (200..<300).contains(got.code) && (got.body["ok"] as? Bool) != false
+    }
+
+    // -- finding songs (round 2 J) --
+
+    /** GET /cache/find/<kind>?... ("artist" or "album"); nil when the server can't say. */
+    func find(_ kind: String, _ query: [String: String]) async -> JSON? {
+        let q = query.sorted { $0.key < $1.key }.map { "\($0.key)=\(Self.escape($0.value))" }.joined(separator: "&")
+        guard let got = await answer("GET", "/find/\(kind)?\(q)", timeout: 35), (200..<300).contains(got.code),
+              got.body["ok"] as? Bool != false else { return nil }
+        return got.body
+    }
+
+    // -- account preferences (round 2 D.3) --
+
+    /** {ok, prefs: {preferredSource, ...}, rev, at}, or nil when the droplet could not say. */
+    func prefs() async -> JSON? {
+        guard let got = await answer("GET", "/prefs", timeout: 15), (200..<300).contains(got.code), got.body.obj("prefs") != nil else { return nil }
+        return got.body
+    }
+
+    /** Merge a change the user made into the account's preferences; the new doc, or nil. */
+    func putPrefs(_ change: JSON, device: String) async -> JSON? {
+        guard let got = await answer("PUT", "/prefs", body: ["prefs": change, "device": device], timeout: 15),
+              (200..<300).contains(got.code) else { return nil }
+        return got.body
+    }
+
     func setPlayback(_ device: String) async -> Bool {
         guard let resp = try? await call("POST", "/account/playback", body: ["device": device]) else { return false }
         return resp.str("playback") == device
@@ -422,7 +544,23 @@ final class MaroClient: @unchecked Sendable {
 
     /** The account's shared player, or nil when the droplet is unreachable. */
     func getPlayer() async -> JSON? {
-        (try? await call("GET", "/player", timeout: 15))?.obj("player")
+        let resp = try? await call("GET", "/player", timeout: 15)
+        // The account preferences' revision rides along (round 2 D.3), for a
+        // device that missed the relay's "prefs" message.
+        if let rev = resp?["prefsRev"] as? NSNumber { notePrefsRev(rev.intValue) }
+        return resp?.obj("player")
+    }
+
+    private var _prefsRev = -1
+
+    private func notePrefsRev(_ rev: Int) {
+        lock.lock(); _prefsRev = rev; lock.unlock()
+    }
+
+    /** The prefs revision the last GET /player named; -1 before any. */
+    var prefsRev: Int {
+        lock.lock(); defer { lock.unlock() }
+        return _prefsRev
     }
 
     /**

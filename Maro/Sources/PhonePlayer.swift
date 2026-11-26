@@ -195,12 +195,40 @@ enum AudioCache {
     }
 }
 
-/** Write the whole song to [dir]. Runs off the main actor. */
+/** Write the whole song to [dir]. Runs off the main actor; `transfer` (a Transfers row) follows its bytes. */
 enum AudioSaver {
-    static func saveTo(_ videoId: String, dir: URL, client: MaroClient) async throws -> URL {
+    static func saveTo(_ videoId: String, dir: URL, client: MaroClient, transfer: Int? = nil) async throws -> URL {
+        if let transfer { await Transfers.shared.begin(transfer) }
+        do {
+            let target = try await download(videoId, dir: dir, client: client, transfer: transfer)
+            if let transfer {
+                let size = ((try? FileManager.default.attributesOfItem(atPath: target.path))?[.size] as? NSNumber)?.int64Value ?? 0
+                await Transfers.shared.progress(transfer, done: size, total: size)
+                await Transfers.shared.finish(transfer)
+            }
+            return target
+        } catch {
+            if let transfer { await Transfers.shared.fail(transfer, error.localizedDescription) }
+            throw error
+        }
+    }
+
+    private static func download(_ videoId: String, dir: URL, client: MaroClient, transfer: Int?) async throws -> URL {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let req = client.request(MaroClient.audioURL(videoId).absoluteString, timeout: 60)
-        let (temp, resp) = try await client.http.download(for: req)
+        // The bytes so far, four times a second, while the row is on the list.
+        let watch = TransferWatch()
+        let poll = transfer.map { id in
+            Task.detached {
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    let (got, of) = watch.bytes
+                    await Transfers.shared.progress(id, done: got, total: of)
+                }
+            }
+        }
+        defer { poll?.cancel() }
+        let (temp, resp) = try await client.http.download(for: req, delegate: watch)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(code) else {
             try? FileManager.default.removeItem(at: temp)
@@ -235,7 +263,13 @@ protocol PhonePlayerEvents: AnyObject {
     func onProgress(position: Double, duration: Double, playing: Bool)
     func onStarted(tag: Int)
     func onEnded()
-    func onFailed(tag: Int, notOnServer: Bool, message: String)
+    func onFailed(tag: Int, notOnServer: Bool, message: String, details: String)
+    /**
+     * A song that had started stopped making progress: stalled, or "playing"
+     * with the position frozen, for `stuck` seconds (0: the player gave up
+     * outright). The view model moves it to a fresh stream at the same second.
+     */
+    func onStalled(tag: Int, position: Double, stuck: Double, why: String)
 }
 
 /**
@@ -259,6 +293,30 @@ final class PhonePlayer {
     private var boundaryObserver: Any?
     /** The song's real length from its metadata, 0 when unknown. */
     private var expected: Double = 0
+    /** The song playing, for the playback log. */
+    var nowTrack: () -> Track? = { nil }
+    /** Since when (uptime) a started song has been stalled, 0 when it is not. */
+    private var bufferingSince: Double = 0
+    /** The system holds the audio (a call, Siri): not a stall. */
+    private var interrupted = false
+    private var stallObserver: NSObjectProtocol?
+
+    /** Buffering this long after the song started: the stream is gone, a fresh one is fetched. */
+    private static let stallBuffering: Double = 12
+    /** "Playing" with the position not moving this long: the decoder or audio output is stuck. */
+    private static let stallFrozen: Double = 8
+
+    private func secs(_ s: Double) -> String { String(format: "%.1f s", s) }
+
+    /**
+     * The loaded media's own length, 0 when unknown or on Spotify. AVPlayer
+     * estimates a fragmented MP4's length (sometimes too long), so only a copy
+     * that is clearly too short can be told apart by it.
+     */
+    var mediaDuration: Double {
+        guard spotifyUri == nil, let d = player.currentItem?.duration.seconds, d.isFinite, d > 0 else { return 0 }
+        return d
+    }
 
     init(events: PhonePlayerEvents) {
         self.events = events
@@ -267,7 +325,11 @@ final class PhonePlayer {
         // at the connection; a stall now resumes as soon as audio is back.
         player.automaticallyWaitsToMinimizeStalling = false
         let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(.playback, mode: .default, policy: .longFormAudio)
+        // Category only: activating here would silence the listener's other audio
+        // every time Jukebox opens. Each play path calls activate() instead.
+        // (No .longFormAudio policy: it asks for activate(options:completionHandler:)
+        // and a plain setActive can fail under it, which try? hid.)
+        do { try session.setCategory(.playback, mode: .default) } catch { ConsoleLog.shared.log("Audio", "category failed: \(error.localizedDescription)") }
         controlObservation = player.observe(\.timeControlStatus) { [weak self] _, _ in
             Task { @MainActor in self?.report() }
         }
@@ -279,8 +341,39 @@ final class PhonePlayer {
             let raw = note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
             let ended = (note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt) == AVAudioSession.InterruptionType.ended.rawValue
             MainActor.assumeIsolated {
-                if ended && AVAudioSession.InterruptionOptions(rawValue: raw).contains(.shouldResume) { self?.play() }
+                guard let self else { return }
+                let resume = AVAudioSession.InterruptionOptions(rawValue: raw).contains(.shouldResume)
+                self.interrupted = !ended
+                if self.tag > 0 {
+                    let src = self.spotifyUri != nil ? "spotify" : nil
+                    if !ended {
+                        ConsoleLog.shared.warn("Player", "Held: the audio was interrupted (a call, Siri, an alarm or another app)", self.nowTrack(), source: src)
+                    } else {
+                        ConsoleLog.shared.info("Player", resume ? "Interruption over; playing on" : "Interruption over; left paused (the system did not ask to resume)", self.nowTrack(), source: src)
+                    }
+                }
+                if ended && resume { self.resumeAfterInterruption() }
+                else if !ended { self.report() }
             }
+        }
+        NotificationCenter.default.addObserver(forName: AVAudioSession.routeChangeNotification, object: session, queue: .main) { [weak self] note in
+            let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt ?? 0
+            MainActor.assumeIsolated {
+                guard let self, self.tag > 0, raw == AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue else { return }
+                ConsoleLog.shared.info("Player", "Paused: headphones unplugged", self.nowTrack(), source: self.spotifyUri != nil ? "spotify" : nil)
+                self.pause()
+            }
+        }
+    }
+
+    /** Make Jukebox the app that owns audio, right before something plays. */
+    static func activate() {
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setCategory(.playback, mode: .default)
+            try session.setActive(true)
+        } catch {
+            ConsoleLog.shared.log("Audio", "session activation failed: \(error.localizedDescription)")
         }
     }
 
@@ -311,6 +404,7 @@ final class PhonePlayer {
     /** The Spotify song this player is on, or nil when AVPlayer is. */
     private var spotifyUri: String?
     private var spotifyPlaying = false
+    private(set) var spotifyLoaded = false
     private var spotifyMs: Double = 0
     private var spotifyAt: Double = 0
     private var spotifyTick: Task<Void, Never>?
@@ -318,7 +412,8 @@ final class PhonePlayer {
     var onSpotifyRate: (([Int], Int, Int) -> Void)?
     private var spotifyLine: [Int] = []
 
-    func playSpotify(_ uri: String, tag: Int, duration: Double, at ms: Int = 0) {
+    func playSpotify(_ uri: String, tag: Int, duration: Double, at ms: Int = 0, play: Bool = true) {
+        watchdog?.cancel()
         player.pause()
         player.replaceCurrentItem(with: nil)
         if let boundaryObserver { player.removeTimeObserver(boundaryObserver) }
@@ -328,13 +423,14 @@ final class PhonePlayer {
         expected = duration
         spotifyUri = uri
         spotifyPlaying = false
+        spotifyLoaded = false
         spotifyMs = Double(ms)
         spotifyAt = uptime()
         spotifyLine = []
-        try? AVAudioSession.sharedInstance().setActive(true)
+        Self.activate()
         let sp = Spotify.shared
         sp.onEvent = { [weak self] ev in self?.spotifyEvent(ev, tag: tag) }
-        sp.load(uri, play: true, ms: ms)
+        sp.load(uri, play: play, ms: ms)
         // librespot reports a position only when it changes state: the lock
         // screen and the bar are kept moving from here.
         spotifyTick?.cancel()
@@ -368,6 +464,7 @@ final class PhonePlayer {
         guard tag == self.tag, let mine = spotifyUri else { return }
         switch ev {
         case .playing(let uri, let ms) where uri == mine:
+            spotifyLoaded = true
             spotifyPlaying = true
             spotifyMs = Double(ms)
             spotifyAt = uptime()
@@ -377,6 +474,7 @@ final class PhonePlayer {
             }
             report()
         case .paused(let uri, let ms) where uri == mine:
+            spotifyLoaded = true
             spotifyPlaying = false
             spotifyMs = Double(ms)
             spotifyAt = uptime()
@@ -385,8 +483,7 @@ final class PhonePlayer {
             spotifyPlaying = false
             events?.onEnded()
         case .unavailable(let uri) where uri == mine:
-            ConsoleLog.shared.log("Spotify", "refused track: unavailable")
-            events?.onFailed(tag: tag, notOnServer: true, message: "Spotify won't play this song here")
+            events?.onFailed(tag: tag, notOnServer: true, message: "Spotify won't play this song here (unavailable)", details: "librespot: track unavailable \u{B7} \(mine)")
         case .bitrate(let uri, let ms, let kbps, let nominal) where uri == mine:
             let second = ms / 1000
             if second >= 0 && second < 7200 {
@@ -394,10 +491,18 @@ final class PhonePlayer {
                 spotifyLine[second] = kbps
             }
             onSpotifyRate?(spotifyLine, kbps, nominal)
-        case .signedOut(let message), .error(let message):
+        case .signedOut(let message):
             if !started {
-                ConsoleLog.shared.log("Spotify", "playback refused: \(message)")
-                events?.onFailed(tag: tag, notOnServer: true, message: message)
+                events?.onFailed(tag: tag, notOnServer: true, message: "Spotify sign-in/player refused: \(message)", details: "librespot: signed out \u{B7} \(mine)")
+            } else {
+                ConsoleLog.shared.warn("Spotify", "Spotify signed out mid-song: \(message)", nowTrack(), source: "spotify")
+                events?.onStalled(tag: tag, position: currentPosition, stuck: 0, why: "Spotify signed out: \(message)")
+            }
+        case .error(let message):
+            if !started {
+                events?.onFailed(tag: tag, notOnServer: true, message: "Spotify playback failed: \(message)", details: "librespot error \u{B7} \(mine)")
+            } else {
+                events?.onStalled(tag: tag, position: currentPosition, stuck: 0, why: "Spotify player error: \(message)")
             }
         default:
             break
@@ -409,34 +514,36 @@ final class PhonePlayer {
         Spotify.shared.stop()
         spotifyUri = nil
         spotifyPlaying = false
+        spotifyLoaded = false
         spotifyTick?.cancel()
         spotifyTick = nil
     }
 
-    func playFile(_ file: URL, tag: Int, duration: Double) { start(AVURLAsset(url: file), tag: tag, duration: duration) }
+    func playFile(_ file: URL, tag: Int, duration: Double, at: Double = 0) { start(AVURLAsset(url: file), tag: tag, duration: duration, at: at) }
 
     /** A stream straight from the service (SoundCloud's own CDN). */
-    func playURL(_ url: URL, tag: Int, duration: Double) { start(AVURLAsset(url: url), tag: tag, duration: duration) }
+    func playURL(_ url: URL, tag: Int, duration: Double, at: Double = 0) { start(AVURLAsset(url: url), tag: tag, duration: duration, at: at) }
 
     /** YouTube's own CDN wants the same browser the URL was asked for as. */
-    func playYouTube(_ url: URL, videoId: String, tag: Int, duration: Double) {
+    func playYouTube(_ url: URL, videoId: String, tag: Int, duration: Double, at: Double = 0, play: Bool = true) {
         let asset = AudioCache.youtubeAsset(videoId, url: url)
         AudioCache.onlyFor(videoId)
-        start(asset, tag: tag, duration: duration)
+        start(asset, tag: tag, duration: duration, at: at, play: play)
     }
 
-    func playStream(_ videoId: String, tag: Int, duration: Double) {
+    func playStream(_ videoId: String, tag: Int, duration: Double, at: Double = 0, play: Bool = true) {
         let asset = AudioCache.asset(videoId)
         AudioCache.onlyFor(videoId)
         AudioCache.forget(videoId)
-        start(asset, tag: tag, duration: duration)
+        start(asset, tag: tag, duration: duration, at: at, play: play)
     }
 
-    private func start(_ asset: AVURLAsset, tag: Int, duration: Double) {
+    private func start(_ asset: AVURLAsset, tag: Int, duration: Double, at: Double = 0, play: Bool = true) {
         leaveSpotify()
         self.tag = tag
         started = false
         expected = duration
+        bufferingSince = 0
         if let boundaryObserver { player.removeTimeObserver(boundaryObserver) }
         boundaryObserver = nil
         // The droplet's files are fragmented MP4 (YouTube's streaming layout),
@@ -467,7 +574,7 @@ final class PhonePlayer {
                 self.player.play()
             }
         }
-        wantsToPlay = true
+        wantsToPlay = play
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
         if let failObserver { NotificationCenter.default.removeObserver(failObserver) }
         endObserver = NotificationCenter.default.addObserver(forName: AVPlayerItem.didPlayToEndTimeNotification, object: item, queue: .main) { [weak self] _ in
@@ -480,9 +587,54 @@ final class PhonePlayer {
             let error = note.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? Error
             MainActor.assumeIsolated { self?.fail(error, tag: tag) }
         }
-        try? AVAudioSession.sharedInstance().setActive(true)
+        // A stall: the song ran out of audio. Timed, and logged once it plays on.
+        if let stallObserver { NotificationCenter.default.removeObserver(stallObserver) }
+        stallObserver = NotificationCenter.default.addObserver(forName: AVPlayerItem.playbackStalledNotification, object: item, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.tag == tag, self.started, self.bufferingSince == 0 else { return }
+                self.bufferingSince = uptime()
+            }
+        }
+        Self.activate()
         player.replaceCurrentItem(with: item)
-        player.play()
+        if at > 0 { player.seek(to: CMTime(seconds: at, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero) }
+        if play { player.play() } else { player.pause() }
+        watch(tag)
+    }
+
+    // -- the stall watchdog ---------------------------------------------------
+
+    private var watchdog: Task<Void, Never>?
+
+    /** Watch a song once it has started: one that stops moving is reported, never left silent. */
+    private func watch(_ tag: Int) {
+        watchdog?.cancel()
+        watchdog = Task { @MainActor [weak self] in
+            var lastPos = -1.0
+            var since = uptime()
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard let self, self.tag == tag, self.spotifyUri == nil, !Task.isCancelled else { return }
+                let now = uptime()
+                // Not started yet: the view model's start watchdog has it.
+                guard self.started else { lastPos = -1; since = now; continue }
+                let pos = self.currentPosition
+                let ended = self.expected > 1 && pos >= self.expected - 1
+                if !self.wantsToPlay || self.interrupted || ended || abs(pos - lastPos) > 0.3 {
+                    lastPos = pos
+                    since = now
+                    continue
+                }
+                let buffering = self.player.timeControlStatus != .playing || self.bufferingSince > 0
+                    || !(self.player.currentItem?.isPlaybackLikelyToKeepUp ?? true)
+                let stuck = now - since
+                if stuck >= (buffering ? Self.stallBuffering : Self.stallFrozen) {
+                    lastPos = -1
+                    since = now
+                    self.events?.onStalled(tag: tag, position: pos, stuck: stuck, why: buffering ? "buffering" : "playing with the position frozen")
+                }
+            }
+        }
     }
 
     private func itemStatusChanged(_ item: AVPlayerItem, tag: Int) {
@@ -508,12 +660,37 @@ final class PhonePlayer {
         let codes = [ns?.code, (ns?.userInfo[NSUnderlyingErrorKey] as? NSError)?.code]
         let notOnServer = codes.contains(-12938) || (ns?.localizedDescription.contains("404") ?? false)
         let message = ns?.localizedDescription ?? "Phone playback failed"
-        ConsoleLog.shared.log("PhonePlayer", "playback failed: \(message)")
-        events?.onFailed(tag: tag, notOnServer: notOnServer, message: message)
+        var chain: [NSError] = []
+        var e = ns
+        while let cur = e, chain.count < 5 {
+            chain.append(cur)
+            e = cur.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        let host = (player.currentItem?.asset as? AVURLAsset)?.url.host ?? ""
+        var details = chain.map { "\($0.domain) \($0.code): \(String($0.localizedDescription.prefix(300)))" }.joined(separator: "\n")
+        if !host.isEmpty { details = host + "\n" + details }
+        details += "\nat " + Omp.fmtTime(currentPosition)
+        if let last = player.currentItem?.errorLog()?.events.last {
+            details += "\nerror log: \(last.errorStatusCode) \(last.errorDomain) \(last.errorComment ?? "")"
+        }
+        let code = codes.contains(-12938) ? "HTTP 404" : ns.map { "\($0.domain) \($0.code)" } ?? "error"
+        events?.onFailed(tag: tag, notOnServer: notOnServer, message: "\(code): \(message)", details: details)
     }
 
     private func report() {
         guard tag > 0 else { return }
+        if bufferingSince > 0 && spotifyUri == nil && player.timeControlStatus == .playing {
+            let s = uptime() - bufferingSince
+            bufferingSince = 0
+            if s >= 0.7 {
+                let at = Omp.fmtTime(currentPosition)
+                if s >= 3 {
+                    ConsoleLog.shared.warn("Player", "Buffered \(secs(s)) at \(at)", nowTrack(), details: "stream ran dry; AVPlayer waited for data")
+                } else {
+                    ConsoleLog.shared.info("Player", "Buffered \(secs(s)) at \(at)", nowTrack())
+                }
+            }
+        }
         if spotifyUri != nil {
             events?.onProgress(position: min(currentPosition, expected > 0 ? expected : .infinity), duration: expected, playing: spotifyPlaying)
             return
@@ -524,10 +701,16 @@ final class PhonePlayer {
     }
 
     func play() {
-        try? AVAudioSession.sharedInstance().setActive(true)
+        Self.activate()
         if spotifyUri != nil { return Spotify.shared.play() }
         wantsToPlay = true
         player.play()
+    }
+
+    /** A call or alarm ended: play on only if the listener had not paused. */
+    private func resumeAfterInterruption() {
+        guard wantsToPlay || spotifyPlaying else { return }
+        play()
     }
 
     func pause() {
@@ -550,6 +733,7 @@ final class PhonePlayer {
 
     func stop() {
         leaveSpotify()
+        watchdog?.cancel()
         tag = 0
         wantsToPlay = false
         if let boundaryObserver { player.removeTimeObserver(boundaryObserver) }
@@ -578,6 +762,12 @@ final class NowPlaying {
 
     init(_ h: Handlers) {
         let c = MPRemoteCommandCenter.shared()
+        // Registered once (the view model builds this once) and switched on
+        // explicitly: a command without isEnabled gets no lock-screen button.
+        for cmd in [c.playCommand, c.pauseCommand, c.togglePlayPauseCommand, c.nextTrackCommand, c.previousTrackCommand, c.changePlaybackPositionCommand] as [MPRemoteCommand] {
+            cmd.removeTarget(nil)
+            cmd.isEnabled = true
+        }
         c.playCommand.addTarget { _ in h.play(); return .success }
         c.pauseCommand.addTarget { _ in h.pause(); return .success }
         c.togglePlayPauseCommand.addTarget { _ in h.toggle(); return .success }
@@ -605,6 +795,8 @@ final class NowPlaying {
         var info = center.nowPlayingInfo ?? [:]
         let key = track.artKey + "|" + track.artUrl
         if key != artKey { info[MPMediaItemPropertyArtwork] = nil }
+        info[MPNowPlayingInfoPropertyMediaType] = MPNowPlayingInfoMediaType.audio.rawValue
+        info[MPNowPlayingInfoPropertyIsLiveStream] = false
         info[MPMediaItemPropertyTitle] = track.title
         info[MPMediaItemPropertyArtist] = track.artist
         info[MPMediaItemPropertyAlbumTitle] = track.album

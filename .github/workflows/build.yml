@@ -1,8 +1,9 @@
 name: Build
 
+# Builds run only when asked (Run workflow) or for a version tag, never on a push.
 on:
   push:
-    branches: [main]
+    tags: ["v*"]
   workflow_dispatch:
 
 jobs:
@@ -37,6 +38,18 @@ jobs:
           brew install xcodegen
           xcodegen generate
 
+      # Round 2 I.6: this app must open the other apps' sealed messages.
+      - name: Interop test (device crypto)
+        run: |
+          xcodebuild test \
+            -project Maro.xcodeproj \
+            -scheme MaroCryptoTests \
+            -destination 'platform=macOS' \
+            -derivedDataPath build-tests \
+            CODE_SIGN_IDENTITY=- CODE_SIGNING_REQUIRED=NO \
+            > test.log 2>&1 || { grep -E "error|failed|XCTAssert" test.log | sort -u | head -40; exit 1; }
+          grep -E "Test Suite|Executed" test.log | tail -4
+
       # Unsigned: the phone-side signing happens on Linux with a free Apple ID.
       - name: Build
         run: |
@@ -55,6 +68,8 @@ jobs:
 
       - name: Package ipa
         run: |
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' build/Build/Products/Release-iphoneos/Maro.app/Info.plist
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' build/Build/Products/Release-iphoneos/Maro.app/Info.plist
           mkdir Payload
           cp -R build/Build/Products/Release-iphoneos/Maro.app Payload/
           zip -qr Maro.ipa Payload
@@ -63,7 +78,9 @@ jobs:
       # repo: release assets do not count against the account's Actions
       # storage, which ran out and failed a good build at the upload.
       # `mdeploy ios update Marobotic/maro-ios --tag latest-build` installs it.
+      # Only main publishes; a branch run (workflow_dispatch) just builds.
       - name: Publish to the latest-build release
+        if: github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

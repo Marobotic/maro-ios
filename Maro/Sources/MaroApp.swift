@@ -3,20 +3,111 @@ import SwiftUI
 @main
 struct MaroApp: App {
     @StateObject private var vm = MaroViewModel()
+    @StateObject private var updates = AppUpdates()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
             Group {
                 if vm.state.signedIn {
-                    HomeScreen(vm: vm)
-                        .sheet(item: $vm.signIn) { ServiceSignInSheet(signIn: $0) }
+                    // Round 2 F and I: "Checking your accounts" while the other
+                    // devices and the account are asked, the listen question only
+                    // with no service at all, else the app.
+                    switch vm.state.listenGate {
+                    case "checking":
+                        CheckingAccountsScreen(vm: vm)
+                            .sheet(item: $vm.signIn) { ServiceSignInSheet(signIn: $0) }
+                    case "pick":
+                        ListenScreen(vm: vm)
+                            .sheet(item: $vm.signIn) { ServiceSignInSheet(signIn: $0) }
+                    default:
+                        HomeScreen(vm: vm)
+                            .sheet(item: $vm.signIn) { ServiceSignInSheet(signIn: $0) }
+                    }
                 } else {
                     LoginScreen(vm: vm)
                 }
             }
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if let release = updates.available {
+                    Text(release.banner)
+                        .font(Omp.font(12, bold: true))
+                        .foregroundColor(Omp.foreground)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(12)
+                        .background(Omp.row)
+                        .overlay(alignment: .bottom) { Rectangle().fill(Omp.themeAccent).frame(height: 1) }
+                }
+            }
+            .task { await updates.monitor() }
+            // A jam link: jukebox://jam/<code> (and the share link, once universal links are set up).
+            .onOpenURL { vm.openLink($0) }
             .preferredColorScheme(.dark)
-            .tint(Omp.accent)
+            .tint(Omp.themeAccent)
+            // Restore the local route and check for an update after suspension.
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .active {
+                    vm.appActive(true)
+                    Task { await updates.checkIfDue() }
+                } else if phase == .background { vm.appActive(false) }
+            }
         }
+    }
+}
+
+/**
+ * "Checking your accounts" (round 2 I): Spotify, YouTube Music and SoundCloud,
+ * each resolving to where it comes from - another device, the account, or not
+ * connected. A service only an unreachable device has offers "I can't reach
+ * my other devices" (sign in here).
+ */
+struct CheckingAccountsScreen: View {
+    @ObservedObject var vm: MaroViewModel
+
+    var body: some View {
+        let state = vm.state
+        ZStack {
+            Color("SplashBackground").ignoresSafeArea()
+            VStack(spacing: 14) {
+                Image("LaunchNote").resizable().scaledToFit().frame(width: 64, height: 64)
+                Text("Checking your accounts\u{2026}")
+                    .font(Omp.font(17, bold: true)).foregroundColor(Omp.foreground)
+                VStack(spacing: 0) {
+                    // The one service order: YouTube, Spotify, SoundCloud.
+                    row("ytm", "YouTube Music", state)
+                    row("spotify", "Spotify", state)
+                    row("soundcloud", "SoundCloud", state)
+                }
+                .frame(maxWidth: 380)
+                if !state.unreachableServices.isEmpty {
+                    MButton("I can't reach my other devices", kind: .primary, small: false, expand: true, height: 44) { vm.cantReachDevices() }
+                        .frame(maxWidth: 380)
+                    MButton("Continue", kind: .ghost, small: false, expand: true, height: 40) { vm.skipAccountCheck() }
+                        .frame(maxWidth: 380)
+                }
+            }
+            .padding(.horizontal, 24)
+        }
+    }
+
+    private func row(_ key: String, _ label: String, _ state: UiState) -> some View {
+        let source = state.accountSources[key] ?? ""
+        let known = !source.isEmpty
+        let on = key == "ytm" ? state.services.contains(ServiceSessions.ytm) : known && source != "Not connected"
+        return HStack(spacing: 10) {
+            BrandLogo(key: key, size: 16)
+            OmpText(label, size: 13, color: Omp.foreground, bold: true)
+            Spacer(minLength: 8)
+            if !known {
+                OmpSpinner(size: 12, color: Omp.t2)
+            } else {
+                OmpText(on ? source + " \u{2713}" : source, size: 11.5, color: on ? Omp.ok : Omp.t3, maxLines: 3)
+            }
+        }
+        .padding(.horizontal, 12)
+        .frame(minHeight: 44)
+        .overlay(alignment: .bottom) { Rectangle().fill(Omp.line).frame(height: 1) }
     }
 }
 
@@ -98,7 +189,7 @@ struct LoginScreen: View {
                     }
                     .frame(maxWidth: .infinity)
                     .frame(height: 52)
-                    .background(Omp.themeAccent.opacity(state.busy || sending ? 0.45 : 1), in: RoundedRectangle(cornerRadius: 10))
+                    .background(Omp.themeAccent.opacity(state.busy || sending ? 0.45 : 1), in: Rectangle())
                 }
                 .buttonStyle(.plain)
                 .disabled(state.busy || sending)
@@ -183,7 +274,7 @@ struct LoginScreen: View {
                 } label: {
                     text(label, 14, on ? Omp.foreground : Omp.muted, bold: on)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .background(on ? Omp.selectedFill : Color.clear, in: RoundedRectangle(cornerRadius: 7))
+                        .background(on ? Omp.foreground.opacity(0.10) : Color.clear, in: Rectangle())
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -191,14 +282,14 @@ struct LoginScreen: View {
         }
         .padding(4)
         .frame(height: 44)
-        .background(Omp.card, in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Omp.softDk, lineWidth: 1))
+        .background(Omp.page, in: Rectangle())
+        .overlay(Rectangle().strokeBorder(Omp.line, lineWidth: 1))
     }
 
     private func field(_ label: String, _ value: Binding<String>, secure: Bool, keyboard: UIKeyboardType = .default,
                        trailing: String? = nil, onTrailing: @escaping () -> Void = {}, submitsForm: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            text(label, 13, Omp.foreground).padding(.leading, 2)
+            text(label.uppercased(), 10, Omp.t2).padding(.leading, 2)
             HStack(spacing: 10) {
                 Group {
                     if secure {
@@ -221,8 +312,61 @@ struct LoginScreen: View {
             }
             .padding(.horizontal, 14)
             .frame(height: 52)
-            .background(Omp.card, in: RoundedRectangle(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(Omp.borderColor, lineWidth: 1))
+            .background(Omp.page, in: Rectangle())
+            .overlay(Rectangle().strokeBorder(Omp.edge, lineWidth: 1))
         }
+    }
+}
+
+/** The launch screen's look (the logo on the splash colour), while the account is asked. */
+struct SplashScreen: View {
+    var body: some View {
+        ZStack {
+            Color("SplashBackground").ignoresSafeArea()
+            Image("LaunchNote").resizable().scaledToFit().frame(width: 84, height: 84)
+        }
+    }
+}
+
+/**
+ * "How do you want to listen?" (round 2 F): only when the Jukebox account has
+ * no music service at all. A service signed in here goes onto the account and
+ * the app opens; Continue as guest is remembered on the account. No "Sign in
+ * to Jukebox" here: that is done already.
+ */
+struct ListenScreen: View {
+    @ObservedObject var vm: MaroViewModel
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 12) {
+                Image("LaunchNote").resizable().scaledToFit().frame(width: 64, height: 64)
+                    .padding(.top, 56)
+                Text("How do you want to listen?")
+                    .font(Omp.font(20, bold: true)).foregroundColor(Omp.foreground)
+                    .multilineTextAlignment(.center)
+                Text("Spotify and SoundCloud are shared through your Jukebox account. Sign in to YouTube Music on this iPhone.")
+                    .font(Omp.font(13)).foregroundColor(Omp.muted)
+                    .multilineTextAlignment(.center)
+                    .padding(.bottom, 14)
+                MButton("Sign in with Spotify", icon: .spotify, iconSize: 18, iconColor: Omp.spotify, small: false, expand: true, height: 46) {
+                    vm.connectService("spotify")
+                }
+                MButton("Sign in with YouTube Music", icon: .ytm, iconSize: 18, iconColor: Omp.ytm, small: false, expand: true, height: 46) {
+                    vm.connectService("ytm")
+                }
+                MButton("Sign in with SoundCloud", icon: .sc, iconSize: 18, iconColor: Omp.sc, small: false, expand: true, height: 46) {
+                    vm.connectService("sc")
+                }
+                MButton("Continue as guest", kind: .ghost, small: false, expand: true, height: 46) {
+                    vm.continueAsGuest()
+                }
+                .padding(.top, 6)
+            }
+            .padding(.horizontal, 24)
+            .frame(maxWidth: 440)
+            .frame(maxWidth: .infinity)
+        }
+        .background(Omp.page.ignoresSafeArea())
     }
 }

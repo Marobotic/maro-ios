@@ -27,6 +27,7 @@ actor YouTubeDirect {
         let kbps: Int
         let codec: String
         let expires: Double
+        var itag = 0
     }
 
     static let ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15"
@@ -126,6 +127,13 @@ actor YouTubeDirect {
                 if let length = groups.last?.joined().trimmingCharacters(in: .whitespaces), length.contains(":") {
                     t.duration = length.split(separator: ":").reduce(0) { $0 * 60 + (Double($1) ?? 0) }
                 }
+                // The artist's and the album's pages, when the runs link them.
+                let metaRuns = ((r["flexColumns"] as? [JSON])?[safe: 1]?.obj("musicResponsiveListItemFlexColumnRenderer")?.obj("text")?["runs"] as? [JSON]) ?? []
+                for run in metaRuns {
+                    let id = run.obj("navigationEndpoint")?.obj("browseEndpoint")?.str("browseId") ?? ""
+                    if id.hasPrefix("UC") && t.artistId.isEmpty { t.artistId = id }
+                    if id.hasPrefix("MPRE") && t.albumId.isEmpty { t.albumId = id }
+                }
                 let thumbs = (r.obj("thumbnail")?.obj("musicThumbnailRenderer")?.obj("thumbnail")?["thumbnails"] as? [JSON]) ?? []
                 t.artUrl = thumbs.last?.str("url") ?? ""
                 out.append(t)
@@ -139,6 +147,9 @@ actor YouTubeDirect {
      * from: after a change of network every kept one answers 403.
      */
     func forgetStreams() { cache.removeAll() }
+
+    /** Drop one kept address: it failed, the next ask gets a fresh one. */
+    func forget(_ videoId: String) { cache.removeValue(forKey: videoId) }
 
     /** The best AAC stream AVPlayer can open for this video, and its rate. */
     func audio(_ videoId: String) async throws -> Stream {
@@ -175,7 +186,7 @@ actor YouTubeDirect {
         var expires = Date().timeIntervalSince1970 + 3600
         if let r = best.str("url").range(of: #"[?&]expire=(\d+)"#, options: .regularExpression),
            let n = Double(best.str("url")[r].split(separator: "=").last ?? "") { expires = n }
-        let stream = Stream(url: url, kbps: Int((Double(bps) / 1000).rounded()), codec: "aac", expires: expires)
+        let stream = Stream(url: url, kbps: Int((Double(bps) / 1000).rounded()), codec: "aac", expires: expires, itag: best["itag"] as? Int ?? 0)
         cache[videoId] = stream
         if cache.count > 200 { cache.removeAll() }
         return stream

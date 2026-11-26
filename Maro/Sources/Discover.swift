@@ -33,12 +33,32 @@ struct DiscoverSection: Equatable, Hashable {
 
 actor YouTubeMusic {
     static let shared = YouTubeMusic()
-    private let http = URLSession(configuration: .ephemeral)
+    // Cookies are set by hand from the phone's one store; this session keeps none of its own.
+    private let http: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.httpShouldSetCookies = false
+        config.httpCookieAcceptPolicy = .never
+        return URLSession(configuration: config)
+    }()
     private static let origin = "https://music.youtube.com"
 
-    /** The session's cookie header, when YouTube Music is signed in here. */
-    private func cookie() -> String {
-        ServiceSessions.shared.session(ServiceSessions.ytm)?.obj("headers")?.str("cookie") ?? ""
+    /**
+     * The session's cookie header: this phone's own YouTube Music sign-in,
+     * read from its persistent web view store (YtmDevice, round 2 H).
+     */
+    private func cookie() -> String { YtmJar.shared.header }
+
+    /**
+     * Whether an answer says the session is signed out: YouTube's own
+     * tracking params carry logged_in "0" when Google dropped the cookies.
+     */
+    private static func signedOut(_ json: JSON) -> Bool {
+        for service in (json.obj("responseContext")?["serviceTrackingParams"] as? [JSON]) ?? [] {
+            for p in (service["params"] as? [JSON]) ?? [] where p.str("key") == "logged_in" {
+                return p.str("value") == "0"
+            }
+        }
+        return false
     }
 
     var signedIn: Bool { !cookie().isEmpty }
@@ -51,8 +71,12 @@ actor YouTubeMusic {
         return ""
     }
 
-    private func call(_ endpoint: String, _ body: JSON, signed: Bool) async throws -> JSON {
-        var body = body
+    func call(_ endpoint: String, _ body: JSON, signed: Bool) async throws -> JSON {
+        try await call(endpoint, body, signed: signed, retried: false)
+    }
+
+    private func call(_ endpoint: String, _ original: JSON, signed: Bool, retried: Bool) async throws -> JSON {
+        var body = original
         let d = Calendar(identifier: .gregorian).dateComponents(in: TimeZone(identifier: "UTC")!, from: Date())
         let version = String(format: "1.%04d%02d%02d.01.00", d.year ?? 2026, d.month ?? 1, d.day ?? 1)
         body["context"] = ["client": ["clientName": "WEB_REMIX", "clientVersion": version, "hl": "en"], "user": [:] as JSON]
@@ -75,7 +99,22 @@ actor YouTubeMusic {
         }
         let (data, resp) = try await http.data(for: req)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-        guard code == 200, let json = JSONText.parse(data) as? JSON else {
+        // Every cookie the answer sets goes back into the phone's one store,
+        // so the session rotates in one place (round 2 H).
+        if !cookies.isEmpty, let answer = resp as? HTTPURLResponse, let url = answer.url {
+            var fields: [String: String] = [:]
+            for (k, v) in answer.allHeaderFields { if let k = k as? String, let v = v as? String { fields[k] = v } }
+            let fresh = HTTPCookie.cookies(withResponseHeaderFields: fields, for: url)
+            if !fresh.isEmpty { await YtmDevice.shared.absorb(fresh) }
+        }
+        let json = code == 200 ? JSONText.parse(data) as? JSON : nil
+        // Turned away (401 / 403 / signed out): the store read again (the
+        // keeper may have rotated it), and the call tried once more if the
+        // cookies changed.
+        if !cookies.isEmpty && !retried && (code == 401 || code == 403 || json.map(Self.signedOut) == true) {
+            if await YtmDevice.shared.reread() { return try await call(endpoint, original, signed: signed, retried: true) }
+        }
+        guard let json else {
             throw YouTubeDirect.Refused(reason: "YouTube Music answered \(code)")
         }
         return json

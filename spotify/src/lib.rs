@@ -128,6 +128,19 @@ pub async fn login(dir: PathBuf) {
     }
 }
 
+/// The ProductInfo attributes that say which plan the account is on
+/// ("type" = premium|free|open, plus the plan's name/product keys).
+pub fn plan_attributes(session: &Session) -> Value {
+    let mut out = serde_json::Map::new();
+    for (k, v) in session.user_data().attributes {
+        let key = k.to_ascii_lowercase();
+        if ["type", "name", "product", "plan", "family", "duo", "student", "financial", "subscription", "tier"].iter().any(|w| key.contains(w)) {
+            out.insert(k, Value::String(v));
+        }
+    }
+    Value::Object(out)
+}
+
 /// A new session from the login stored in `dir`. Never waits more than 20 s:
 /// a connect that hangs would hold up every command behind it.
 async fn reconnect(dir: &PathBuf) -> Option<Session> {
@@ -257,6 +270,20 @@ pub async fn serve(dir: PathBuf, mut lines: tokio::sync::mpsc::UnboundedReceiver
     }
     // "login": true when this start just turned a sign-in into a stored login.
     emit(json!({"ev": "ready", "user": session.username(), "login": fresh}));
+    // The account's plan comes in Spotify's ProductInfo a moment after the
+    // connect; the app reads its tier (Premium / Duo / Family / Free) from it.
+    {
+        let s2 = session.clone();
+        tokio::spawn(async move {
+            for _ in 0..20 {
+                if s2.get_user_attribute("type").is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            emit(json!({"ev": "tier", "attrs": plan_attributes(&s2)}));
+        });
+    }
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<pool::Tagged>();
     let mut volume: u16 = u16::MAX;

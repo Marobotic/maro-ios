@@ -97,6 +97,12 @@ struct Track: Equatable, Hashable {
     var duration: Double = 0
     var playedAt: Int64 = 0
     var viaYoutube = false
+    /** YouTube Music's ids for the artist (UC...) and the release (MPREb...), when the row carried them. */
+    var artistId = ""
+    var albumId = ""
+    /** Who put it in a jam's queue (a guest): their id and name, both empty otherwise. */
+    var addedById = ""
+    var addedBy = ""
 
     /** One song reaches the panel under several ids; all of them are this song. */
     var trackIds: [String] {
@@ -125,11 +131,22 @@ struct Track: Equatable, Hashable {
     }
 
     func toJSON() -> JSON {
-        [
+        var o: JSON = [
             "source": source, "id": id, "sourceId": sourceId, "videoId": videoId,
             "title": title, "artist": artist, "album": album, "art": artUrl,
             "duration": duration, "viaYoutube": viaYoutube,
         ]
+        if !artistId.isEmpty { o["artistId"] = artistId }
+        if !albumId.isEmpty { o["albumId"] = albumId }
+        // Kept when this phone hands the queue back (the host's own player).
+        if !addedBy.isEmpty { o["addedBy"] = ["id": addedById, "name": addedBy] }
+        return o
+    }
+
+    /** Each artist of "A, B & C" on its own. */
+    var artistNames: [String] {
+        artist.components(separatedBy: ", ").flatMap { $0.components(separatedBy: " & ") }
+            .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
     }
 
     static func from(_ o: JSON?) -> Track {
@@ -146,9 +163,20 @@ struct Track: Equatable, Hashable {
             artUrl: o.str("art").ifEmpty(o.str("artUrl")),
             duration: o.double("duration"),
             playedAt: o.int64("played_at"),
-            viaYoutube: o.bool("viaYoutube")
+            viaYoutube: o.bool("viaYoutube"),
+            artistId: o.str("artistId"),
+            albumId: o.str("albumId"),
+            addedById: o.obj("addedBy")?.str("id") ?? "",
+            addedBy: o.obj("addedBy")?.str("name") ?? ""
         )
     }
+}
+
+/** One service's line in Settings > Health. */
+struct HealthState: Equatable {
+    /** "yes", "no", "checking", "offline" or "off" (not signed in). */
+    var state = "off"
+    var why = ""
 }
 
 /** One row of the Playlists tab's library: a section header or a playlist. */
@@ -161,6 +189,11 @@ struct LibraryRow: Equatable, Hashable {
     var id = ""
     var art = ""
     var available = true
+    /**
+     * The count is still the service's own: no song list is held for this
+     * playlist yet (round 2 A/B). Shown as a quiet "syncing" until it lands.
+     */
+    var syncing = false
 }
 
 /** A sign-in the engine started for this phone: open the page, or show the code. */
@@ -183,13 +216,34 @@ struct Device: Equatable, Hashable {
 
 /** Progress of a "Download playlist" job, keyed by its playlist id. */
 struct DownloadJob: Equatable {
+    /** The list's real songs. */
     var total = 0
+    /** Fetched and saved by this job. */
     var done = 0
     var failed = 0
     var running = false
+    /** Saved on this phone before it started: skipped. */
+    var already = 0
+    /** Removed by the service: marked, not asked for. */
+    var unavailable = 0
+    /** How many it set out to fetch. */
+    var wanted = 0
 
-    var finished: Bool { !running && total > 0 && done + failed >= total }
-    var fraction: Double { total > 0 ? Double(done + failed) / Double(total) : 0 }
+    var finished: Bool { !running && total > 0 && already + unavailable + done + failed >= total }
+    var fraction: Double { total > 0 ? Double(already + unavailable + done + failed) / Double(total) : 0 }
+    /** "Downloading 3/12 · 70 already saved", then "81 saved · 1 unavailable". */
+    var label: String {
+        if running && total > 0 {
+            let left = wanted > 0 ? "Downloading \(done + failed)/\(wanted)" : "Downloading\u{2026}"
+            return left + (already > 0 ? " \u{B7} \(already) already saved" : "")
+        }
+        if !running && total == 0 && failed > 0 { return "Couldn't load the list" }
+        guard finished else { return "Preparing download\u{2026}" }
+        var out = "Saved \(already + done)"
+        if unavailable > 0 { out += " \u{B7} \(unavailable) unavailable" }
+        if failed > 0 { out += " \u{B7} \(failed) failed" }
+        return out
+    }
 }
 
 enum PlaybackMode: String {
@@ -219,6 +273,22 @@ struct Progress: Equatable {
 
 struct UiState: Equatable {
     var signedIn = false
+    /**
+     * After the Jukebox sign-in (round 2 F): "checking" (the splash, while
+     * the account's services are looked at), "pick" ("How do you want to
+     * listen?": no service at all), or "in" (the app).
+     */
+    var listenGate = "checking"
+    /**
+     * Where each service comes from (round 2 I): "spotify", "ytm", "soundcloud"
+     * -> "This device", "From Maro's PC", "Through Maro's PC - online",
+     * "On your account", "Not connected"...
+     */
+    var accountSources: [String: String] = [:]
+    /** Services only an unreachable device has (no account copy): "spotify", "sc". */
+    var unreachableServices: [String] = []
+    /** No lyrics for the song (lookup done) or nothing playing: the Lyrics tab hides (round 2 L). */
+    var noLyrics = true
     var email = ""
     var selectedAccount = "maro"
     var busy = false
@@ -277,6 +347,8 @@ struct UiState: Equatable {
     var likedKeys: Set<String> = []
     var likedIds: Set<String> = []
     var library: [LibraryRow] = []
+    /** The liked list's length once it has arrived: Liked Songs' count everywhere. */
+    var likedTotal: Int?
     var selectedPlaylist: LibraryRow?
     var playlistTracks: [Track] = []
     var playlistLoading = false
@@ -299,6 +371,15 @@ struct UiState: Equatable {
     var phoneMusicBytes: Int64 = 0
     var phoneMusicCount = 0
     var phoneCacheBytes: Int64 = 0
+    /** Songs this phone kept on its own as they played (not saved by you): count and size. */
+    var phoneKeptCount = 0
+    var phoneKeptBytes: Int64 = 0
+    /** "Limit for songs on disk" in GB; 0 is unlimited. */
+    var songsLimitGb = 0
+    var playlistCacheCount = 0
+    var artworkCount = 0
+    /** Settings > Health: per service ("maro", "spotify", "ytm", "sc") its state and why. */
+    var health: [String: HealthState] = [:]
     var artworkProgress: [String: Int] = [:]
 
     // Connectivity & offline behaviour
@@ -310,8 +391,6 @@ struct UiState: Equatable {
     var spotifyConnected = false
     var spotifyApiConnected = false
     var spotifyAccountName = ""
-    var ytmConnected = false
-    var ytmAccountName = ""
 
     // Player (this phone)
     var playbackMode: PlaybackMode = .remoteDesktop
@@ -337,13 +416,21 @@ struct UiState: Equatable {
 
     // View
     var view = Sync.viewQueue
+    /** Artist and album pages opened over the tabs, newest last: Back pops one. */
+    var pages: [DetailPage] = []
     var settingsOpen = false
+    /** Friends and jams, a full page like Settings. */
+    var friendsOpen = false
     /** The "?" stats panel. Opened and closed by its button only. */
     var statsOpen = false
 
     // Status footer
     var statusMsg = ""
     var statusKind = "info"
+    /** The Console entry a failure toast opens, 0 for none. */
+    var statusEntry = 0
+    /** An entry the Console should open on (set by a toast's Details), 0 for none. */
+    var consoleFocus = 0
 
     // A Spotify / YouTube Music sign-in waiting on the user.
     var loginPrompt: LoginPrompt?
@@ -352,6 +439,42 @@ struct UiState: Equatable {
 
     var playlists: [LibraryRow] { library.filter { !$0.isHeader } }
 
+    /** The library's own row for a playlist (a kept copy of a row may be stale). */
+    private func liveRow(_ row: LibraryRow) -> LibraryRow? {
+        library.first { !$0.isHeader && $0.source == row.source && $0.id == row.id }
+    }
+
+    /** Whether the opened playlist is this row, with every one of its songs here. */
+    private func openInFull(_ row: LibraryRow) -> Bool {
+        guard let open = selectedPlaylist, open.source == row.source, open.id == row.id else { return false }
+        return !playlistTracks.isEmpty && !playlistHasMore && !playlistLoading
+    }
+
+    /**
+     * The one count rule (round 2 A): a playlist's count is the number of
+     * songs held for it. Every count on screen goes through here - Library
+     * rows, the playlist header, Settings, sorting by size - so they cannot
+     * drift apart. The view model keeps each library row's count at its held
+     * list's length (Liked: the liked list); an opened list that is all here
+     * wins over the row.
+     */
+    func countFor(_ row: LibraryRow) -> Int {
+        if row.source == "liked", let n = likedTotal { return n }
+        if openInFull(row) { return playlistTracks.count }
+        return liveRow(row)?.count ?? row.count
+    }
+
+    /** Whether a row's count is still the service's, its songs not held yet. */
+    func isSyncing(_ row: LibraryRow) -> Bool {
+        if openInFull(row) { return false }
+        return liveRow(row)?.syncing ?? row.syncing
+    }
+
+    /** Liked Songs' count, by the same rule. */
+    var likedCount: Int {
+        countFor(library.first { !$0.isHeader && $0.source == "liked" } ?? LibraryRow(source: "liked"))
+    }
+
     func isLiked(_ t: Track?) -> Bool {
         guard let t, !t.id.isEmpty else { return false }
         if !t.source.isEmpty && likedKeys.contains(t.source + ":" + t.id) { return true }
@@ -359,13 +482,31 @@ struct UiState: Equatable {
     }
 
     /** Why a YouTube Music song can't be played any more, or "" (desktop goneReason). */
-    func goneReason(_ t: Track) -> String { t.source == "ytm" ? gone[t.id] ?? "" : "" }
+    func goneReason(_ t: Track) -> String {
+        if t.source == "ytm" { return gone[t.id] ?? "" }
+        // A song of another service a playlist download found removed.
+        return t.id.isEmpty ? "" : gone["\(t.source):\(t.id)"] ?? ""
+    }
 
     /** Online everything is playable; offline only the songs actually on this phone are. */
     func canPlay(_ t: Track?) -> Bool {
         guard let t, !t.id.isEmpty else { return false }
         if online { return true }
         return t.trackIds.contains { localAvailable.contains($0) }
+    }
+
+    /**
+     * A queue song the repeat mode will not play, drawn dark (the desktop's
+     * .qrow.dk): off skips the songs before the playing one, all skips none,
+     * one skips every song but the playing one. Call it on displayState(),
+     * whose repeat is this phone's own while it plays.
+     */
+    func queueSkips(_ index: Int) -> Bool {
+        switch self.repeat {
+        case "one": return index != queueIndex
+        case "all": return false
+        default: return index < queueIndex
+        }
     }
 
     func downloadOf(_ row: LibraryRow) -> DownloadJob? { downloads["v3:" + row.source + ":" + row.id] }
@@ -456,6 +597,7 @@ enum Sync {
     static let viewSongs = "songs"
     static let viewRecent = "recent"
     static let viewSearch = "search"
+    static let viewTransfers = "transfers"
 
     static func tracks(_ arr: [Any]?) -> [Track] {
         guard let arr else { return [] }
@@ -481,20 +623,31 @@ enum Sync {
     static func library(_ dict: JSON?) -> [LibraryRow] {
         guard let dict else { return [] }
         var out: [LibraryRow] = []
+        // One row per playlist (round 2 A): an older writer listed YouTube's
+        // "Liked Music" twice and sent its counts as strings ("9").
+        var seen = Set<String>()
         func group(_ key: String, _ label: String) {
             guard let entries = dict.arr(key), !entries.isEmpty else { return }
-            out.append(LibraryRow(isHeader: true, source: key, label: label, count: entries.count))
+            var rows: [LibraryRow] = []
             for case let e as JSON in entries {
-                out.append(LibraryRow(
+                let row = LibraryRow(
                     source: e.str("source", key),
                     label: e.str("name", e.str("label")),
-                    count: e.int("count"),
+                    count: max(0, e.int("count", Int(e.double("count")))),
                     name: e.str("name"),
                     id: e.str("id"),
                     art: e.str("art", e.str("cover")),
                     available: e.bool("available", true)
-                ))
+                )
+                var keys = [row.source + ":" + row.id.ifEmpty(row.name.lowercased())]
+                if row.source == "ytm" && (row.id == "LM" || row.name.lowercased() == "liked music") { keys.append("ytm:liked-music") }
+                if keys.contains(where: { seen.contains($0) }) { continue }
+                for k in keys { seen.insert(k) }
+                rows.append(row)
             }
+            guard !rows.isEmpty else { return }
+            out.append(LibraryRow(isHeader: true, source: key, label: label, count: rows.count))
+            out += rows
         }
         group("liked", "Liked")
         group("spotify", "Spotify")

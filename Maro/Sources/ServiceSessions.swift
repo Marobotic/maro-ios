@@ -7,15 +7,14 @@ import Security
  * The music-service sessions, which live on the Jukebox account.
  *
  * Every client - this phone, the desktop, any other - is independent: it can
- * sign in to Spotify, YouTube Music and SoundCloud itself, and whichever
+ * sign in to Spotify and SoundCloud itself, and whichever
  * client signs in puts that session on the account (/service/<name>, sealed
  * with a key derived from the account password, so the droplet only holds
  * ciphertext). Every client takes the account's copy. The newest sign-in wins
  * everywhere, and a service signed out of anywhere is signed out everywhere.
  * Nothing comes from another device; any client works with the rest off.
  *
- * Mirrors the desktop's sidecar/service_creds.py and service_sync.sync() byte
- * for byte: change one, change both.
+ * YouTube Music uses YtmDevice instead and never shares its session.
  */
 final class ServiceSessions: @unchecked Sendable {
     static let shared = ServiceSessions()
@@ -24,7 +23,9 @@ final class ServiceSessions: @unchecked Sendable {
     static let soundcloud = "soundcloud"
     static let ytm = "ytm"
     static let librespot = "librespot"
-    static let all = [librespot, ytm, soundcloud]
+    // YouTube Music is not here: its session is this phone's own (YtmDevice),
+    // never taken from or put on the account (round 2 H).
+    static let all = [librespot, soundcloud]
 
     private static let iterations: UInt32 = 210_000
     private static let info = "maro.music/service-credentials/v1"
@@ -106,8 +107,9 @@ final class ServiceSessions: @unchecked Sendable {
             guard let got = await client.serviceBlob(name) else { continue }      // unreachable: keep ours
             let mine = Keychain.get("at." + name).map { String(decoding: $0, as: UTF8.self) }
             if got.blob.isEmpty {
-                // Gone from the account: signed out of somewhere.
-                if mine != nil { forgetLocal(name) }
+                // Gone from the account: signed out of somewhere. A session another
+                // device handed over (round 2 I) was never on the account: kept.
+                if let mine, !mine.hasPrefix("peer:") { forgetLocal(name) }
                 continue
             }
             if got.at == mine && Keychain.get("svc." + name) != nil { continue }
@@ -129,7 +131,26 @@ final class ServiceSessions: @unchecked Sendable {
         guard let blob = Self.seal(payload, key: key) else { return "Could not seal the session" }
         guard let at = await client.putServiceBlob(name, blob) else { return "Could not save the session to your account" }
         store(name, payload, at: at)
+        UserDefaults.standard.set(at, forKey: "signedHere." + name)
         return nil
+    }
+
+    /**
+     * A session another device of the account handed over (round 2 I,
+     * `session.offer`): kept here, marked as its. The account's copy, when
+     * there is one, still replaces it on the next refresh.
+     */
+    func adopt(_ name: String, _ payload: JSON, from device: String) {
+        store(name, payload, at: "peer:" + device)
+    }
+
+    /** Where a session on this phone came from: "here", "peer:<device>", "account" or "" (none). */
+    func source(_ name: String) -> String {
+        guard session(name) != nil else { return "" }
+        let at = Keychain.get("at." + name).map { String(decoding: $0, as: UTF8.self) } ?? ""
+        if at.hasPrefix("peer:") { return at }
+        if !at.isEmpty && UserDefaults.standard.string(forKey: "signedHere." + name) == at { return "here" }
+        return "account"
     }
 
     /** Signed out of here is signed out everywhere: off the account, then here. */

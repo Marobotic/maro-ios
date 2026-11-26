@@ -2,22 +2,38 @@ import SwiftUI
 import UIKit
 
 /**
- * One-to-one translation of Jukebox's design tokens, the
- * same ones the Android app uses.
- *
- * Colour values come from the plugin's Color.qml defaults and Panel.qml:
- *   foreground #cacccc, background #101315, urgent #a55555, muted #707880,
- *   spotify #1DB954, ytm #FF0033, maro #8A63D2.
- * Sizes mirror Style.space(n) at scale 1.0 and Style.font sizes
- * (caption 10, bodySmall 11, body 12, subtitle 13).
+ * The design tokens of the Windows app's redesign (ui/app.css :root): a
+ * near-black page, #121212 tiles with a #242424 hairline, #A0A0A0 / #8C8C8C
+ * secondary text and the red accent #B14242. Square corners everywhere;
+ * menus and popovers 4 pt. Sizes are the desktop's px at phone width, 1:1.
  */
 enum Omp {
-    static let background = Color(hex: 0x101315)
-    static let foreground = Color(hex: 0xCACCCC)
-    static let accent = Color(hex: 0xCACCCC)
+    // Surfaces
+    static let page = Color(hex: 0x0D0D0D)
+    static let tile = Color(hex: 0x121212)
+    static let line = Color(hex: 0x242424)
+    static let raise = Color(hex: 0x1A1A1A)
+    static let hover = Color(hex: 0x1F1F1F)
+    static let pill = Color(hex: 0x262626)
+    static let row = Color(hex: 0x161616)
+    static let popup = Color(hex: 0x141414)
+    static let edge = Color(hex: 0x333333)
+    // Text
+    static let t2 = Color(hex: 0xA0A0A0)
+    static let t3 = Color(hex: 0x8C8C8C)
+    static let iconTint = Color(hex: 0xB3B3B3)
+    static let soft = Color(hex: 0xFF9494)
+    static let danger = Color(hex: 0xFF8A8A)
+    static let headRed = Color(hex: 0xE06C6C)
+    static let ok = Color(hex: 0x4A8B8B)
+
+    static let background = page
+    static let foreground = Color(hex: 0xF5F5F5)
+    /** The neutral highlight (spinners, selected text); the red accent is `themeAccent`. */
+    static let accent = Color(hex: 0xF5F5F5)
     static let like = Color(hex: 0xE05263)
-    static let urgent = Color(hex: 0xA55555)
-    static let muted = Color(hex: 0x707880)
+    static let urgent = Color(hex: 0xE06C6C)
+    static let muted = Color(hex: 0x949494)
     static let spotify = Color(hex: 0x1DB954)
     static let ytm = Color(hex: 0xFF0033)
     static let sc = Color(hex: 0xFF5500)
@@ -44,19 +60,22 @@ enum Omp {
         kbpsScale.first { kbps >= $0.0 }?.1 ?? muted
     }
 
-    /** Accent of the running Omarchy theme (Dotrb). */
+    /** The redesign's red accent. */
     static let themeAccent = Color(hex: 0xB14242)
+    /** The mockup's red: the saved check and a page's kind label. */
+    static let markRed = Color(hex: 0xE5323F)
+    /** Outlined buttons' border. */
+    static let outline = Color(hex: 0x2A2A2A)
+    /** An album page's artist links. */
+    static let link = Color(hex: 0x6FC3B2)
 
-    static let card = Color(hex: 0x16191D)
-    static let cardRaised = foreground.opacity(0.06)
-    static let softDk = Color(hex: 0x2A2F35)
-
-    /** Qt.darker(foreground, 2.6): the slider track. */
-    static let sliderTrack = Color(hex: 0x4E4E4E)
-
-    static let borderColor = foreground.opacity(0.40)
+    static let card = row
+    static let cardRaised = raise
+    static let softDk = edge
+    static let sliderTrack = edge
+    static let borderColor = edge
     static let normalFill = foreground.opacity(0.04)
-    static let selectedFill = foreground.opacity(0.18)
+    static let selectedFill = pill
 
     static let labelGap: CGFloat = 6
     static let spacing: CGFloat = 8
@@ -64,64 +83,81 @@ enum Omp {
     static let gatesGap: CGFloat = 24
     static let rowButton: CGFloat = 26
     static let queueMarkWidth: CGFloat = 18
-    static let rowArt: CGFloat = 30
-    static let nowArt: CGFloat = 68
+    static let rowArt: CGFloat = 44
+    static let nowArt: CGFloat = 56
     static let panelWidth: CGFloat = 420
 
+    /**
+     * Reddit's type scale, in whole points, the same on every phone: the
+     * panel's width scales spacing (OmpMetrics) but never the type. Every size
+     * in the app is one of these five; pick by role.
+     */
     enum TypeSize {
-        static let caption: CGFloat = 10
-        static let bodySmall: CGFloat = 11
-        static let body: CGFloat = 12
-        static let subtitle: CGFloat = 13
-        static let title: CGFloat = 13
-        static let display: CGFloat = 18
+        /** Tiny meta: times, counts, kbps, badges, section labels. */
+        static let meta: CGFloat = 12
+        /** Secondary: artist lines, notes, values, status. */
+        static let secondary: CGFloat = 13
+        /** Body text and controls: buttons, menus, inputs, settings rows. */
+        static let body: CGFloat = 14
+        /** Row titles: songs, playlists, people, services. */
+        static let rowTitle: CGFloat = 16
+        /** Headings: the song playing, page and dialog titles. */
+        static let heading: CGFloat = 18
+
+        // Display sizes, outside the UI scale on purpose: synced lyrics and a
+        // sign-in code read off the screen.
+        static let lyrics: CGFloat = 20
+        static let lyricsBig: CGFloat = 26
+        static let code: CGFloat = 26
+
+        // The old names, on the new scale.
+        static let caption = meta
+        static let bodySmall = secondary
+        static let subtitle = rowTitle
+        static let title = heading
+        static let display = heading
+
+        /**
+         * A size written against the 0.4 monospace scale, on Reddit's steps:
+         * 9-11 -> meta, 11.5 -> secondary, 12-12.5 -> body, 13-14 row titles,
+         * 15-22 headings. Display sizes (lyrics, codes) pass `exact`.
+         */
+        static func step(_ size: CGFloat) -> CGFloat {
+            switch size {
+            case ..<11.25: return meta
+            case ..<11.75: return secondary
+            case ..<12.75: return body
+            case ..<14.5: return rowTitle
+            default: return heading
+            }
+        }
+
+        /** Reddit's line height for each step, for text that wraps. */
+        static func line(_ size: CGFloat) -> CGFloat {
+            switch size {
+            case ...12: return 16
+            case ...13: return 18
+            case ...14: return 20
+            case ...16: return 22
+            default: return 24
+            }
+        }
     }
 
-    /** The bar's monospace font, bundled so the Nerd Font glyphs actually render. */
-    static func font(_ size: CGFloat, bold: Bool = false) -> Font {
+    /**
+     * Reddit Sans, bundled: every word and number in the app, with tabular
+     * figures so times and counts keep their width. `bold` is its SemiBold,
+     * the weight Reddit sets titles in. A size is put on Reddit's scale
+     * (TypeSize.step) unless `exact`.
+     */
+    static func font(_ size: CGFloat, bold: Bool = false, exact: Bool = false) -> Font {
+        Font.custom(bold ? "RedditSans-SemiBold" : "RedditSans-Regular", fixedSize: exact ? size.rounded() : TypeSize.step(size))
+            .monospacedDigit()
+    }
+
+    /** The bar's Nerd Font, only for a glyph Glyph has no vector for. */
+    static func iconFont(_ size: CGFloat, bold: Bool = false) -> Font {
         .custom(bold ? "JetBrainsMonoNF-Bold" : "JetBrainsMonoNF-Regular", fixedSize: size)
-    }
-
-    enum Icons {
-        static let play = "\u{F04B}"
-        static let pause = "\u{F04C}"
-        static let prev = "\u{F04A}"
-        static let next = "\u{F04E}"
-        static let restart = "\u{F048}"
-        static let clear = "\u{F014}"
-        static let refresh = "\u{F021}"
-        static let back = "\u{F177}"
-        static let close = "\u{F00D}"
-        static let note = "\u{F001}"
-        static let list = "\u{F03A}"
-        static let add = "\u{F067}"
-        static let like = "\u{F08A}"
-        static let likeFull = "\u{F004}"
-        static let check = "\u{F00C}"
-        static let volHigh = "\u{F028}"
-        static let volLow = "\u{F027}"
-        static let volMute = "\u{F026}"
-        static let more = "\u{22EE}"
-        static let signin = "\u{F090}"
-        static let spotify = "\u{F1BC}"
-        static let ytm = "\u{F16A}"
-        static let sc = "\u{F1BE}"
-        static let gear = "\u{F013}"
-        static let bell = "\u{F0F3}"
-        static let cloud = "\u{F0C2}"
-        static let link = "\u{F0C1}"
-        static let shuffle = "\u{F074}"
-        static let `repeat` = "\u{F01E}"
-        static let repeat1 = "\u{F0E2}"
-        static let grid = "\u{F0C7}"
-        static let wifi = "\u{F012}"
-        static let warning = "\u{F071}"
-        static let trash = "\u{F1F8}"
-        static let edit = "\u{F044}"
-        static let paintbrush = "\u{F1FC}"
-        static let broadcast = "\u{F1EB}"
-        static let question = "\u{F059}"
-        static let radio = "\u{F2CE}"
     }
 
     /** The name picked under Settings > Device name; blank means the default. */
@@ -167,7 +203,22 @@ enum Omp {
         case "spotify": return "Spotify"
         case "ytm": return "YouTube Music"
         case "sc": return "SoundCloud"
+        case "youtube": return "YouTube"
         default: return src.isBlank ? "Queue" : src
+        }
+    }
+
+    /**
+     * The playing song's colour (round 2 M.5): the highlighted row's border and
+     * tint, the player cover's border and the playing bars. Jukebox / local
+     * songs keep the app red.
+     */
+    static func playingColor(_ src: String) -> Color {
+        switch src {
+        case "spotify": return Color(hex: 0x1DB954)
+        case "ytm", "youtube": return Color(hex: 0xE5323F)
+        case "sc": return Color(hex: 0xFF5500)
+        default: return themeAccent
         }
     }
 
@@ -176,16 +227,16 @@ enum Omp {
         case "spotify": return spotify
         case "ytm": return ytm
         case "sc": return sc
-        default: return accent
+        default: return themeAccent
         }
     }
 
-    static func sourceIcon(_ src: String) -> String {
+    static func sourceGlyph(_ src: String) -> Glyph {
         switch src {
-        case "spotify": return Icons.spotify
-        case "ytm": return Icons.ytm
-        case "sc": return Icons.sc
-        default: return Icons.note
+        case "spotify": return .spotify
+        case "ytm": return .ytm
+        case "sc": return .sc
+        default: return .note
         }
     }
 
@@ -199,10 +250,11 @@ enum Omp {
     /// Streaming has one tier more: Spotify at 320, YouTube's best as the fallback.
     static let streamQualityOptions: [(String, String)] = qualityOptions + [("spotify", "Spotify  ·  320 kbps")]
 
+    // Services in the one order: YouTube, Spotify, SoundCloud.
     static let sourceOptions: [(String, String)] = [
         ("auto", "Whichever is available"),
-        ("spotify", "Prefer Spotify  ·  320 kbps"),
         ("ytm", "Prefer YouTube Music"),
+        ("spotify", "Prefer Spotify  ·  320 kbps"),
         ("sc", "Prefer SoundCloud"),
     ]
 
@@ -236,15 +288,46 @@ enum Omp {
      */
     static func spotifyShareUrl(id: String, query: String) -> String {
         if !id.isEmpty { return "https://open.spotify.com/track/\(id)" }
-        if !query.isEmpty { return "https://open.spotify.com/search/" + urlEncode(query) }
+        if !query.isEmpty { return "https://open.spotify.com/search/" + queryEncode(query) }
         return ""
     }
 
     /** The same idea for YouTube Music. */
     static func youtubeShareUrl(videoId: String, query: String) -> String {
         if !videoId.isEmpty { return "https://music.youtube.com/watch?v=\(videoId)" }
-        if !query.isEmpty { return "https://music.youtube.com/search?q=" + urlEncode(query) }
+        if !query.isEmpty { return "https://music.youtube.com/search?q=" + queryEncode(query) }
         return ""
+    }
+
+    /** A search query in a link: readable (letters stay letters), spaces as %20. */
+    static func queryEncode(_ s: String) -> String {
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: "&=+?#/")
+        return s.addingPercentEncoding(withAllowedCharacters: allowed) ?? s
+    }
+
+    /** "&amp;", "&#39;" and the like as the characters they stand for. */
+    static func plainText(_ s: String) -> String {
+        guard s.contains("&") else { return s.trimmingCharacters(in: .whitespaces) }
+        var out = s
+        for (k, v) in ["&amp;": "&", "&quot;": "\"", "&#39;": "'", "&apos;": "'", "&lt;": "<", "&gt;": ">", "&nbsp;": " "] {
+            out = out.replacingOccurrences(of: k, with: v)
+        }
+        if let re = try? NSRegularExpression(pattern: "&#(x?)([0-9a-fA-F]+);") {
+            let ns = out as NSString
+            var result = ""
+            var last = 0
+            for m in re.matches(in: out, range: NSRange(location: 0, length: ns.length)) {
+                result += ns.substring(with: NSRange(location: last, length: m.range.location - last))
+                let hex = ns.substring(with: m.range(at: 1)) == "x"
+                let num = UInt32(ns.substring(with: m.range(at: 2)), radix: hex ? 16 : 10)
+                result += num.flatMap(Unicode.Scalar.init).map { String(Character($0)) } ?? ns.substring(with: m.range)
+                last = m.range.location + m.range.length
+            }
+            result += ns.substring(from: last)
+            out = result
+        }
+        return out.trimmingCharacters(in: .whitespaces)
     }
 
     /// Percent-encodes a whole UTF-8 string, which is what a search path wants.
@@ -273,6 +356,17 @@ extension EnvironmentValues {
 }
 
 extension Color {
+    /** CSS color-mix(in srgb, a t, b): a share t of a, the rest b. */
+    static func mix(_ a: Color, _ b: Color, _ t: Double) -> Color {
+        var ar: CGFloat = 0, ag: CGFloat = 0, ab: CGFloat = 0, aa: CGFloat = 0
+        var br: CGFloat = 0, bg: CGFloat = 0, bb: CGFloat = 0, ba: CGFloat = 0
+        UIColor(a).getRed(&ar, green: &ag, blue: &ab, alpha: &aa)
+        UIColor(b).getRed(&br, green: &bg, blue: &bb, alpha: &ba)
+        let k = CGFloat(t)
+        return Color(.sRGB, red: Double(ar * k + br * (1 - k)), green: Double(ag * k + bg * (1 - k)),
+                     blue: Double(ab * k + bb * (1 - k)), opacity: Double(aa * k + ba * (1 - k)))
+    }
+
     init(hex: UInt32) {
         self.init(
             .sRGB,

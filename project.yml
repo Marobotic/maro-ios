@@ -6,8 +6,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.10"
-    MARKETING_VERSION: "0.1.30"
-    CURRENT_PROJECT_VERSION: "32"
+    MARKETING_VERSION: "0.5.0"
+    CURRENT_PROJECT_VERSION: "50"
 targets:
   Maro:
     type: application
@@ -33,6 +33,14 @@ targets:
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSRequiresIPhoneOS: true
+        # Listen together: jukebox://jam/<code> opens the app and joins the jam.
+        # (https://marobotic.dev/jukebox/jam/<code> would need universal links:
+        # an Associated Domains entitlement and an apple-app-site-association
+        # file on marobotic.dev naming a paid Team ID - not possible unsigned.)
+        CFBundleURLTypes:
+          - CFBundleURLName: dev.marobotic.maro.jam
+            CFBundleURLSchemes:
+              - jukebox
         # The Android splash: the logo centred on the panel background.
         UILaunchScreen:
           UIColorName: SplashBackground
@@ -43,9 +51,51 @@ targets:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
+        # Round 2 I: the local route between this account's devices on the same Wi-Fi.
+        NSLocalNetworkUsageDescription: Jukebox talks to your other devices on this network to share Spotify and SoundCloud sign-ins.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
         # Keeps playback going with the screen off or the app in the background.
         UIBackgroundModes:
           - audio
         UIAppFonts:
+          - redditsans_regular.ttf
+          - redditsans_medium.ttf
+          - redditsans_semibold.ttf
+          - redditsans_bold.ttf
           - jetbrainsmono_nerd_regular.ttf
           - jetbrainsmono_nerd_bold.ttf
+  # Round 2 I.6: the device-to-device crypto, alone, against the shared interop
+  # vector (design/round2-hpke-vector.json). macOS, so no simulator is needed.
+  MaroCryptoTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: Maro/Sources/DeviceCrypto.swift
+      # And how big a cover each box asks for (Foundation only, like the crypto).
+      - path: Maro/Sources/ArtSize.swift
+      # Who holds the shared player (a gone owner holds nothing).
+      - path: Maro/Sources/PlayerOwner.swift
+      # Listen together: jam links, the host's playhead, what a guest does; and the transfer list.
+      - path: Maro/Sources/JamLogic.swift
+      - path: Maro/Sources/TransferMath.swift
+      - path: Maro/Sources/AppRelease.swift
+      - path: MaroTests
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: dev.marobotic.maro.cryptotests
+        CODE_SIGN_IDENTITY: "-"
+schemes:
+  Maro:
+    build:
+      targets:
+        Maro: all
+  MaroCryptoTests:
+    build:
+      targets:
+        MaroCryptoTests: [test]
+    test:
+      targets:
+        - MaroCryptoTests
